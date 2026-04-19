@@ -1,5 +1,7 @@
 src/**
 tsconfig.json
+webpack.config.js
 **/*.map
 .vscode/**
 node_modules/**
+out/**

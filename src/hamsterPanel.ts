@@ -1,6 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs/promises';
 import { HamsterDiagnostics } from './diagnostics';
 import { getNonce, loadLangScripts } from './utils';
 
@@ -10,32 +8,15 @@ export interface HamsterPanelOptions {
 }
 
 export class HamsterPanel {
-    private panel: vscode.WebviewPanel;
     private disposables: vscode.Disposable[] = [];
     private _onDidDispose = new vscode.EventEmitter<void>();
     public readonly onDidDispose = this._onDidDispose.event;
-    constructor(
+    private constructor(
         private context: vscode.ExtensionContext,
         private diagnostics: HamsterDiagnostics,
+        private panel: vscode.WebviewPanel,
         private options: HamsterPanelOptions = {},
     ) {
-        this.panel = vscode.window.createWebviewPanel(
-            'hamsterSimulator',
-            'Hamster Simulator',
-            vscode.ViewColumn.Beside,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [
-                    vscode.Uri.file(path.join(context.extensionPath, 'lang')),
-                    vscode.Uri.file(path.join(context.extensionPath, 'assets')),
-                ],
-            }
-        );
-
-        const scripts = loadLangScripts(this.context.extensionPath);
-        this.panel.webview.html = this.getHtmlContent(scripts.lexerCode, scripts.parserCode, scripts.runnerCode);
-
         this.panel.webview.onDidReceiveMessage(
             msg => this.handleMessage(msg),
             null,
@@ -48,6 +29,31 @@ export class HamsterPanel {
         }, null, this.disposables);
     }
 
+    static async create(
+        context: vscode.ExtensionContext,
+        diagnostics: HamsterDiagnostics,
+        options: HamsterPanelOptions = {},
+    ): Promise<HamsterPanel> {
+        const panel = vscode.window.createWebviewPanel(
+            'hamsterSimulator',
+            'Hamster Simulator',
+            vscode.ViewColumn.Beside,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true,
+                localResourceRoots: [
+                    vscode.Uri.joinPath(context.extensionUri, 'lang'),
+                    vscode.Uri.joinPath(context.extensionUri, 'assets'),
+                ],
+            }
+        );
+
+        const scripts = await loadLangScripts(context.extensionUri);
+        const instance = new HamsterPanel(context, diagnostics, panel, options);
+        instance.panel.webview.html = instance.getHtmlContent(scripts.lexerCode, scripts.parserCode, scripts.runnerCode);
+        return instance;
+    }
+
     reveal() {
         this.panel.reveal(vscode.ViewColumn.Beside);
     }
@@ -57,19 +63,25 @@ export class HamsterPanel {
     }
 
     async sendTerrain(hamUri: vscode.Uri) {
-        const dir = path.dirname(hamUri.fsPath);
-        const baseName = path.basename(hamUri.fsPath, '.ham');
-        const exactTer = path.join(dir, baseName + '.ter');
+        const dirUri = vscode.Uri.joinPath(hamUri, '..');
+        const uriPath = hamUri.path;
+        const lastSlash = uriPath.lastIndexOf('/');
+        const fileName = uriPath.substring(lastSlash + 1);
+        const baseName = fileName.endsWith('.ham') ? fileName.slice(0, -4) : fileName;
+        const exactTerUri = vscode.Uri.joinPath(dirUri, baseName + '.ter');
+        const decoder = new TextDecoder('utf-8');
         let terContent: string | undefined;
 
         try {
-            terContent = await fs.readFile(exactTer, 'utf-8');
+            const data = await vscode.workspace.fs.readFile(exactTerUri);
+            terContent = decoder.decode(data);
         } catch {
             try {
-                const files = await fs.readdir(dir);
-                const terFile = files.find(f => f.endsWith('.ter'));
-                if (terFile) {
-                    terContent = await fs.readFile(path.join(dir, terFile), 'utf-8');
+                const entries = await vscode.workspace.fs.readDirectory(dirUri);
+                const terEntry = entries.find(([name]) => name.endsWith('.ter'));
+                if (terEntry) {
+                    const data = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dirUri, terEntry[0]));
+                    terContent = decoder.decode(data);
                 }
             } catch { /* ignore */ }
         }
@@ -126,7 +138,7 @@ export class HamsterPanel {
     private getHtmlContent(lexerCode: string, parserCode: string, runnerCode: string): string {
         const webview = this.panel.webview;
         const assetsUri = webview.asWebviewUri(
-            vscode.Uri.file(path.join(this.context.extensionPath, 'assets'))
+            vscode.Uri.joinPath(this.context.extensionUri, 'assets')
         );
         const nonce = getNonce();
         const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');

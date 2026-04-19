@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { getNonce } from './utils';
 
 export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
@@ -15,12 +14,12 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         webviewPanel.webview.options = {
             enableScripts: true,
             localResourceRoots: [
-                vscode.Uri.file(path.join(this.context.extensionPath, 'assets')),
+                vscode.Uri.joinPath(this.context.extensionUri, 'assets'),
             ],
         };
 
         const assetsUri = webviewPanel.webview.asWebviewUri(
-            vscode.Uri.file(path.join(this.context.extensionPath, 'assets'))
+            vscode.Uri.joinPath(this.context.extensionUri, 'assets')
         );
 
         const escapedTerrain = document.getText()

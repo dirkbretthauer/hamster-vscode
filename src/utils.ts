@@ -1,5 +1,4 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as vscode from 'vscode';
 
 export function getNonce(): string {
     let text = '';
@@ -25,15 +24,21 @@ export interface LangScripts {
 
 let cachedScripts: LangScripts | null = null;
 
-/** Loads and caches the language scripts. Sync read on first call only (small files). */
-export function loadLangScripts(extensionPath: string): LangScripts {
+/** Loads and caches the language scripts. Async read using vscode.workspace.fs. */
+export async function loadLangScripts(extensionUri: vscode.Uri): Promise<LangScripts> {
     if (cachedScripts) return cachedScripts;
 
-    const langDir = path.join(extensionPath, 'lang');
+    const langDir = vscode.Uri.joinPath(extensionUri, 'lang');
+    const decoder = new TextDecoder('utf-8');
+    const [lexerRaw, parserRaw, runnerRaw] = await Promise.all([
+        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-lexer.js')),
+        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-parser.js')),
+        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-runner.js')),
+    ]);
     cachedScripts = {
-        lexerCode: stripEsModule(fs.readFileSync(path.join(langDir, 'hamster-lexer.js'), 'utf-8')),
-        parserCode: stripEsModule(fs.readFileSync(path.join(langDir, 'hamster-parser.js'), 'utf-8')),
-        runnerCode: stripEsModule(fs.readFileSync(path.join(langDir, 'hamster-runner.js'), 'utf-8')),
+        lexerCode: stripEsModule(decoder.decode(lexerRaw)),
+        parserCode: stripEsModule(decoder.decode(parserRaw)),
+        runnerCode: stripEsModule(decoder.decode(runnerRaw)),
     };
     return cachedScripts;
 }

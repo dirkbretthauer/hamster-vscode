@@ -1,6 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
 import { HamsterPanel, HamsterPanelOptions } from './hamsterPanel';
 import { HamsterDiagnostics } from './diagnostics';
 import { TerrainEditorProvider } from './terrainEditor';
@@ -82,28 +80,35 @@ export function activate(context: vscode.ExtensionContext) {
     ).catch(err => console.error('initial diagnostics failed:', err));
 }
 
-function ensurePanel(context: vscode.ExtensionContext) {
+async function ensurePanel(context: vscode.ExtensionContext) {
     if (!currentPanel) {
         const options: HamsterPanelOptions = {};
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'hamster') {
             options.initialProgram = editor.document.getText();
-            const dir = path.dirname(editor.document.uri.fsPath);
-            const baseName = path.basename(editor.document.uri.fsPath, '.ham');
-            const exactTer = path.join(dir, baseName + '.ter');
+            const hamUri = editor.document.uri;
+            const dirUri = vscode.Uri.joinPath(hamUri, '..');
+            const uriPath = hamUri.path;
+            const lastSlash = uriPath.lastIndexOf('/');
+            const fileName = uriPath.substring(lastSlash + 1);
+            const baseName = fileName.endsWith('.ham') ? fileName.slice(0, -4) : fileName;
+            const exactTerUri = vscode.Uri.joinPath(dirUri, baseName + '.ter');
+            const decoder = new TextDecoder('utf-8');
             try {
-                options.initialTerrain = fs.readFileSync(exactTer, 'utf-8');
+                const data = await vscode.workspace.fs.readFile(exactTerUri);
+                options.initialTerrain = decoder.decode(data);
             } catch {
                 try {
-                    const files = fs.readdirSync(dir);
-                    const terFile = files.find(f => f.endsWith('.ter'));
-                    if (terFile) {
-                        options.initialTerrain = fs.readFileSync(path.join(dir, terFile), 'utf-8');
+                    const entries = await vscode.workspace.fs.readDirectory(dirUri);
+                    const terEntry = entries.find(([name]) => name.endsWith('.ter'));
+                    if (terEntry) {
+                        const data = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dirUri, terEntry[0]));
+                        options.initialTerrain = decoder.decode(data);
                     }
                 } catch { /* ignore */ }
             }
         }
-        currentPanel = new HamsterPanel(context, diagnostics, options);
+        currentPanel = await HamsterPanel.create(context, diagnostics, options);
         currentPanel.onDidDispose(() => { currentPanel = undefined; });
         return;
     }

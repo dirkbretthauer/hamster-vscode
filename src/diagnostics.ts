@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
+import { stripEsModule } from './utils';
 
 export class HamsterDiagnostics implements vscode.Disposable {
     private collection: vscode.DiagnosticCollection;
@@ -13,8 +13,17 @@ export class HamsterDiagnostics implements vscode.Disposable {
     private async load(): Promise<void> {
         if (this.loaded) return;
         try {
-            const parserPath = vscode.Uri.joinPath(this.context.extensionUri, 'lang', 'hamster-parser.js').fsPath;
-            const mod = await import(parserPath);
+            const langDir = vscode.Uri.joinPath(this.context.extensionUri, 'lang');
+            const decoder = new TextDecoder('utf-8');
+            const [lexerRaw, parserRaw] = await Promise.all([
+                vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-lexer.js')),
+                vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-parser.js')),
+            ]);
+            const lexerCode = stripEsModule(decoder.decode(lexerRaw));
+            const parserCode = stripEsModule(decoder.decode(parserRaw));
+            const combined = lexerCode + '\n' + parserCode + '\nreturn { parseProgram };';
+            const factory = new Function(combined);
+            const mod = factory();
             this.parseProgram = mod.parseProgram;
             this.loaded = true;
         } catch (e) {
