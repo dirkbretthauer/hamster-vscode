@@ -1,0 +1,2026 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Test</title></head>
+<body>
+<div id="initial-data" style="display:none" data-terrain="" data-program=""></div>
+<canvas id="terrain" width="480" height="384"></canvas>
+<div id="status">Loading...</div>
+<div id="log"></div>
+<script>
+(function() {
+    console.log('Script 1 start');
+    const canvas = document.getElementById('terrain');
+    const ctx = canvas.getContext('2d');
+    
+    const CELL = 48;
+    
+    function makeTerrain(w, h) {
+        return {
+            width: w, height: h,
+            walls: Array.from({length: h}, () => Array(w).fill(0)),
+            corn: Array.from({length: h}, () => Array(w).fill(0)),
+            hamsters: [{id: -1, x: 0, y: 0, dir: 1, mouth: 0, color: 0}],
+        };
+    }
+    
+    let engineState = null;
+    
+    function initEngine(w, h) {
+        engineState = {
+            state: 0,
+            terrain: makeTerrain(Math.max(1,w|0), Math.max(1,h|0)),
+            log: [], terminal: {needsInput:false, prompt:'', output:[]},
+        };
+        render(engineState);
+        return engineState;
+    }
+    
+    function render(state) {
+        if (!state) return;
+        const {terrain} = state;
+        const {width, height, walls} = terrain;
+        canvas.width = width * CELL;
+        canvas.height = height * CELL;
+        ctx.fillStyle = '#f9f5e7';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = '#ccc';
+        ctx.lineWidth = 1;
+        for(let x = 0; x <= width; x++) {
+            ctx.beginPath(); ctx.moveTo(x*CELL, 0); ctx.lineTo(x*CELL, height*CELL); ctx.stroke();
+        }
+        for(let y = 0; y <= height; y++) {
+            ctx.beginPath(); ctx.moveTo(0, y*CELL); ctx.lineTo(width*CELL, y*CELL); ctx.stroke();
+        }
+        console.log('Rendered', width, 'x', height, 'grid');
+    }
+    
+    const initialDataEl = document.getElementById('initial-data');
+    const initialTerrain = initialDataEl ? initialDataEl.getAttribute('data-terrain') : null;
+    console.log('initialTerrain:', JSON.stringify(initialTerrain));
+    if (initialTerrain) {
+        console.log('Loading terrain from data');
+    } else {
+        console.log('Calling initEngine(10, 8)');
+        initEngine(10, 8);
+    }
+    console.log('Script 1 end');
+})();
+</script>
+<script>
+/**
+ * Hamster Imperative Language lexer.
+ *
+ * Converts legacy `.ham` source text into a flat token stream while tracking
+ * line/column metadata required by the parser and diagnostics.
+ */
+
+const KEYWORDS = new Set([
+    'void',
+    'int',
+    'boolean',
+    'do',
+    'for',
+    'while',
+    'if',
+    'else',
+    'return',
+    'new',
+    'null',
+    'class',
+    'interface',
+    'public',
+    'private',
+    'protected',
+    'static',
+    'final',
+    'package',
+    'import',
+    'extends',
+    'implements',
+    'this',
+]);
+
+const SINGLE_CHAR_TOKENS = new Map([
+    ['(', 'LPAREN'],
+    [')', 'RPAREN'],
+    ['{', 'LBRACE'],
+    ['}', 'RBRACE'],
+    ['[', 'LBRACKET'],
+    [']', 'RBRACKET'],
+    ['.', 'DOT'],
+    ['?', 'QUESTION'],
+    [':', 'COLON'],
+    [',', 'COMMA'],
+    [';', 'SEMICOLON'],
+]);
+
+const MULTI_CHAR_OPERATORS = new Map([
+    ['==', 'EQ'],
+    ['!=', 'NEQ'],
+    ['<=', 'LTE'],
+    ['>=', 'GTE'],
+    ['&&', 'AND'],
+    ['||', 'OR'],
+    ['++', 'INC'],
+    ['--', 'DEC'],
+]);
+
+const SINGLE_CHAR_OPERATORS = new Map([
+    ['+', 'PLUS'],
+    ['-', 'MINUS'],
+    ['*', 'STAR'],
+    ['/', 'SLASH'],
+    ['%', 'MOD'],
+    ['<', 'LT'],
+    ['>', 'GT'],
+    ['=', 'ASSIGN'],
+    ['!', 'BANG'],
+]);
+
+const TokenType = Object.freeze({
+    EOF: 'EOF',
+    IDENTIFIER: 'IDENTIFIER',
+    INTEGER: 'INTEGER',
+    STRING: 'STRING',
+    BOOLEAN: 'BOOLEAN',
+    NULL: 'NULL',
+    KEYWORD: 'KEYWORD',
+    SYMBOL: 'SYMBOL',
+    OPERATOR: 'OPERATOR',
+});
+
+class Token {
+    constructor(type, value, line, column) {
+        this.type = type;
+        this.value = value;
+        this.line = line;
+        this.column = column;
+    }
+}
+
+class HamsterLexerError extends Error {
+    constructor(message, line, column) {
+        super(`Line ${line}, column ${column}: ${message}`);
+        this.name = 'HamsterLexerError';
+        this.line = line;
+        this.column = column;
+    }
+}
+
+class HamsterLexer {
+    constructor(source) {
+        this.source = source ?? '';
+        this.length = this.source.length;
+        this.index = 0;
+        this.line = 1;
+        this.column = 1;
+    }
+
+    tokenize() {
+        const tokens = [];
+        while (true) {
+            this.skipTrivia();
+            if (this.isAtEnd()) {
+                tokens.push(new Token(TokenType.EOF, null, this.line, this.column));
+                break;
+            }
+            const token = this.scanToken();
+            if (token) tokens.push(token);
+        }
+        return tokens;
+    }
+
+    scanToken() {
+        const startLine = this.line;
+        const startColumn = this.column;
+        const ch = this.advance();
+
+        if (isDigit(ch)) {
+            const value = this.readNumber(ch);
+            return new Token(TokenType.INTEGER, value, startLine, startColumn);
+        }
+
+        if (isIdentifierStart(ch)) {
+            const text = this.readIdentifier(ch);
+            if (text === 'true' || text === 'false') {
+                return new Token(TokenType.BOOLEAN, text === 'true', startLine, startColumn);
+            }
+            if (text === 'null') {
+                return new Token(TokenType.NULL, null, startLine, startColumn);
+            }
+            if (KEYWORDS.has(text)) {
+                return new Token(TokenType.KEYWORD, text, startLine, startColumn);
+            }
+            return new Token(TokenType.IDENTIFIER, text, startLine, startColumn);
+        }
+
+        if (ch === '"') {
+            return this.readString(startLine, startColumn);
+        }
+
+        const maybeTwoChar = ch + this.peek();
+        if (MULTI_CHAR_OPERATORS.has(maybeTwoChar)) {
+            this.advance();
+            return new Token(TokenType.OPERATOR, maybeTwoChar, startLine, startColumn);
+        }
+
+        if (SINGLE_CHAR_TOKENS.has(ch)) {
+            return new Token(TokenType.SYMBOL, ch, startLine, startColumn);
+        }
+
+        if (SINGLE_CHAR_OPERATORS.has(ch)) {
+            return new Token(TokenType.OPERATOR, ch, startLine, startColumn);
+        }
+
+        throw new HamsterLexerError(`Unexpected character '${ch}'`, startLine, startColumn);
+    }
+
+    readNumber(initialChar) {
+        let value = initialChar;
+        while (isDigit(this.peek())) {
+            value += this.advance();
+        }
+        return value;
+    }
+
+    readIdentifier(initialChar) {
+        let value = initialChar;
+        while (isIdentifierPart(this.peek())) {
+            value += this.advance();
+        }
+        return value;
+    }
+
+    readString(startLine, startColumn) {
+        let value = '';
+        while (!this.isAtEnd()) {
+            const ch = this.advance();
+            if (ch === '"') {
+                return new Token(TokenType.STRING, value, startLine, startColumn);
+            }
+            if (ch === '\\') {
+                const escaped = this.advance();
+                switch (escaped) {
+                    case 'n': value += '\n'; break;
+                    case 'r': value += '\r'; break;
+                    case 't': value += '\t'; break;
+                    case '"': value += '"'; break;
+                    case '\\': value += '\\'; break;
+                    default: value += escaped; break;
+                }
+                continue;
+            }
+            value += ch;
+        }
+        throw new HamsterLexerError('Unterminated string literal', startLine, startColumn);
+    }
+
+    skipTrivia() {
+        while (!this.isAtEnd()) {
+            const ch = this.peek();
+            if (isWhitespace(ch)) {
+                this.advance();
+                continue;
+            }
+            if (ch === '/' && this.peekNext() === '/') {
+                this.skipLineComment();
+                continue;
+            }
+            if (ch === '/' && this.peekNext() === '*') {
+                this.skipBlockComment();
+                continue;
+            }
+            break;
+        }
+    }
+
+    skipLineComment() {
+        while (!this.isAtEnd() && this.peek() !== '\n') {
+            this.advance();
+        }
+        if (!this.isAtEnd()) {
+            this.advance();
+        }
+    }
+
+    skipBlockComment() {
+        // consume the initial "/*"
+        this.advance();
+        this.advance();
+        while (!this.isAtEnd()) {
+            if (this.peek() === '*' && this.peekNext() === '/') {
+                this.advance();
+                this.advance();
+                return;
+            }
+            this.advance();
+        }
+        throw new HamsterLexerError('Unterminated block comment', this.line, this.column);
+    }
+
+    advance() {
+        const ch = this.source[this.index++];
+        if (ch === '\n') {
+            this.line += 1;
+            this.column = 1;
+        } else {
+            this.column += 1;
+        }
+        return ch;
+    }
+
+    peek() {
+        if (this.isAtEnd()) return '\0';
+        return this.source[this.index];
+    }
+
+    peekNext() {
+        if (this.index + 1 >= this.length) return '\0';
+        return this.source[this.index + 1];
+    }
+
+    isAtEnd() {
+        return this.index >= this.length;
+    }
+}
+
+function isWhitespace(ch) {
+    return ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+}
+
+function isDigit(ch) {
+    return ch >= '0' && ch <= '9';
+}
+
+function isIdentifierStart(ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch === '_';
+}
+
+function isIdentifierPart(ch) {
+    return isIdentifierStart(ch) || isDigit(ch);
+}
+
+
+
+const ASTNodeType = Object.freeze({
+    Program: 'Program',
+    FunctionDecl: 'FunctionDeclaration',
+    Parameter: 'Parameter',
+    Block: 'BlockStatement',
+    VariableDecl: 'VariableDeclaration',
+    Assignment: 'AssignmentStatement',
+    ExpressionStmt: 'ExpressionStatement',
+    IfStatement: 'IfStatement',
+    WhileStatement: 'WhileStatement',
+    DoWhileStatement: 'DoWhileStatement',
+    ForStatement: 'ForStatement',
+    ReturnStatement: 'ReturnStatement',
+    ConditionalExpression: 'ConditionalExpression',
+    BinaryExpression: 'BinaryExpression',
+    UnaryExpression: 'UnaryExpression',
+    PostfixExpression: 'PostfixExpression',
+    Literal: 'Literal',
+    Identifier: 'Identifier',
+    CallExpression: 'CallExpression',
+    MemberExpression: 'MemberExpression',
+    IndexExpression: 'IndexExpression',
+    NewExpression: 'NewExpression',
+    ThisExpression: 'ThisExpression',
+});
+
+class HamsterParserError extends Error {
+    constructor(message, token) {
+        const location = token ? ` (line ${token.line}, column ${token.column})` : '';
+        super(message + location);
+        this.name = 'HamsterParserError';
+        this.token = token;
+    }
+}
+
+function parseProgram(source, options = {}) {
+    const parser = new Parser(source, options);
+    return parser.parseProgram();
+}
+
+class Parser {
+    constructor(source, options = {}) {
+        this.tokens = new HamsterLexer(source).tokenize();
+        this.current = 0;
+        this.options = {
+            requireMain: options.requireMain !== undefined ? options.requireMain : true,
+            compatibility: options.compatibility === true,
+        };
+    }
+
+    parseProgram() {
+        if (this.options.compatibility) {
+            return this.parseCompatibilityProgram();
+        }
+        if (this.isAtEnd()) {
+            throw new HamsterParserError('Program must define void main()', this.peek());
+        }
+        const functions = [];
+        functions.push(this.parseFunction(true));
+        while (!this.isAtEnd()) {
+            functions.push(this.parseFunction(false));
+        }
+        return { type: ASTNodeType.Program, functions };
+    }
+
+    parseCompatibilityProgram() {
+        const functions = [];
+        while (!this.isAtEnd()) {
+            if (this.checkKeyword('package') || this.checkKeyword('import')) {
+                this.skipUntilSymbol(';');
+                continue;
+            }
+            if (this.checkKeyword('class') || this.checkKeyword('interface')) {
+                functions.push(...this.parseCompatibilityClassLikeDeclaration());
+                continue;
+            }
+            const fn = this.tryParseFunction(true);
+            if (fn) {
+                functions.push(fn);
+                continue;
+            }
+            this.advance();
+        }
+        if (this.options.requireMain && !functions.some(fn => fn.name === 'main' && fn.returnType === 'void')) {
+            throw new HamsterParserError('Program must define void main()', this.peek());
+        }
+        return { type: ASTNodeType.Program, functions };
+    }
+
+    parseCompatibilityClassLikeDeclaration() {
+        const functions = [];
+
+        // consume class/interface keyword and declaration header
+        this.advance();
+        while (!this.isAtEnd() && !this.checkSymbol('{') && !this.checkSymbol(';')) {
+            this.advance();
+        }
+        if (this.matchSymbol(';')) {
+            return functions;
+        }
+        if (!this.matchSymbol('{')) {
+            return functions;
+        }
+
+        let depth = 1;
+        while (!this.isAtEnd() && depth > 0) {
+            if (depth === 1) {
+                const fn = this.tryParseFunction(true);
+                if (fn) {
+                    functions.push(fn);
+                    continue;
+                }
+            }
+
+            if (this.matchSymbol('{')) {
+                depth += 1;
+                continue;
+            }
+            if (this.matchSymbol('}')) {
+                depth -= 1;
+                continue;
+            }
+            this.advance();
+        }
+
+        return functions;
+    }
+
+    parseFunction(requireMain) {
+        this.skipModifiers();
+        const returnToken = this.consumeTypeName(true);
+        const nameToken = this.consumeIdentifier('Expected function name');
+        if (requireMain) {
+            if (returnToken.value !== 'void' || nameToken.value !== 'main') {
+                throw new HamsterParserError('First function must be void main()', nameToken);
+            }
+        }
+        this.consumeSymbol('(', 'Expected ( after function name');
+        const parameters = [];
+        if (!this.checkSymbol(')')) {
+            do {
+                parameters.push(this.parseParameter());
+            } while (this.matchSymbol(','));
+        }
+        this.consumeSymbol(')', 'Expected ) after parameter list');
+        const body = this.parseBlock();
+        return {
+            type: ASTNodeType.FunctionDecl,
+            name: nameToken.value,
+            returnType: returnToken.value,
+            parameters,
+            body,
+            loc: locationFrom(nameToken),
+        };
+    }
+
+    parseParameter() {
+        this.skipModifiers();
+        const typeToken = this.consumeTypeName(false);
+
+        // Accept both `Type[] name` and `Type name[]` parameter forms.
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in parameter type');
+        }
+
+        const nameToken = this.consumeIdentifier('Expected parameter name');
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in parameter type');
+        }
+        return {
+            type: ASTNodeType.Parameter,
+            name: nameToken.value,
+            paramType: typeToken.value,
+            loc: locationFrom(nameToken),
+        };
+    }
+
+    parseBlock() {
+        const lbrace = this.consumeSymbol('{', 'Expected { to start block');
+        const statements = [];
+        while (!this.checkSymbol('}') && !this.isAtEnd()) {
+            statements.push(this.parseStatement());
+        }
+        this.consumeSymbol('}', 'Expected } to close block');
+        return {
+            type: ASTNodeType.Block,
+            statements,
+            loc: locationFrom(lbrace),
+        };
+    }
+
+    parseStatement() {
+        if (this.matchSymbol(';')) {
+            return {
+                type: ASTNodeType.Block,
+                statements: [],
+                loc: locationFrom(this.previous()),
+            };
+        }
+        if (this.checkSymbol('{')) {
+            return this.parseBlock();
+        }
+        if (this.checkKeyword('if')) {
+            return this.parseIfStatement();
+        }
+        if (this.checkKeyword('do')) {
+            return this.parseDoWhileStatement();
+        }
+        if (this.checkKeyword('while')) {
+            return this.parseWhileStatement();
+        }
+        if (this.checkKeyword('for')) {
+            return this.parseForStatement();
+        }
+        if (this.checkKeyword('return')) {
+            return this.parseReturnStatement();
+        }
+        if (this.isTypeKeywordAhead()) {
+            return this.parseVariableDeclaration();
+        }
+        if (this.isAssignmentAhead()) {
+            return this.parseAssignmentStatement();
+        }
+        return this.parseExpressionStatement();
+    }
+
+    parseDoWhileStatement() {
+        const doToken = this.consumeKeyword('do', 'Expected do');
+        const body = this.parseStatement();
+        this.consumeKeyword('while', 'Expected while after do-body');
+        this.consumeSymbol('(', 'Expected ( after while');
+        const test = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after condition');
+        this.consumeSymbol(';', 'Expected ; after do-while');
+        return {
+            type: ASTNodeType.DoWhileStatement,
+            test,
+            body,
+            loc: locationFrom(doToken),
+        };
+    }
+
+    parseIfStatement() {
+        const ifToken = this.consumeKeyword('if', 'Expected if');
+        this.consumeSymbol('(', 'Expected ( after if');
+        const test = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after condition');
+        const consequent = this.parseStatement();
+        let alternate = null;
+        if (this.matchKeyword('else')) {
+            alternate = this.parseStatement();
+        }
+        return {
+            type: ASTNodeType.IfStatement,
+            test,
+            consequent,
+            alternate,
+            loc: locationFrom(ifToken),
+        };
+    }
+
+    parseWhileStatement() {
+        const whileToken = this.consumeKeyword('while', 'Expected while');
+        this.consumeSymbol('(', 'Expected ( after while');
+        const test = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after condition');
+        const body = this.parseStatement();
+        return {
+            type: ASTNodeType.WhileStatement,
+            test,
+            body,
+            loc: locationFrom(whileToken),
+        };
+    }
+
+    parseReturnStatement() {
+        const returnToken = this.consumeKeyword('return', 'Expected return');
+        let argument = null;
+        if (!this.checkSymbol(';')) {
+            argument = this.parseExpression();
+        }
+        this.consumeSymbol(';', 'Expected ; after return');
+        return {
+            type: ASTNodeType.ReturnStatement,
+            argument,
+            loc: locationFrom(returnToken),
+        };
+    }
+
+    parseForStatement() {
+        const forToken = this.consumeKeyword('for', 'Expected for');
+        this.consumeSymbol('(', 'Expected ( after for');
+
+        let initializer = null;
+        if (!this.checkSymbol(';')) {
+            if (this.isTypeKeywordAhead()) {
+                initializer = this.parseForVariableDeclaration();
+            } else if (this.isAssignmentAhead()) {
+                initializer = this.parseForAssignment();
+            } else {
+                const expr = this.parseExpression();
+                initializer = {
+                    type: ASTNodeType.ExpressionStmt,
+                    expression: expr,
+                    loc: expr.loc,
+                };
+            }
+        }
+        this.consumeSymbol(';', 'Expected ; after for-loop initializer');
+
+        let test = null;
+        if (!this.checkSymbol(';')) {
+            test = this.parseExpression();
+        }
+        this.consumeSymbol(';', 'Expected ; after for-loop condition');
+
+        let update = null;
+        if (!this.checkSymbol(')')) {
+            if (this.isAssignmentAhead()) {
+                update = this.parseForAssignment();
+            } else {
+                const expr = this.parseExpression();
+                update = {
+                    type: ASTNodeType.ExpressionStmt,
+                    expression: expr,
+                    loc: expr.loc,
+                };
+            }
+        }
+        this.consumeSymbol(')', 'Expected ) after for-loop update');
+
+        const body = this.parseStatement();
+        let whileBody = body;
+        if (update) {
+            if (whileBody.type === ASTNodeType.Block) {
+                whileBody = {
+                    ...whileBody,
+                    statements: [...whileBody.statements, update],
+                };
+            } else {
+                whileBody = {
+                    type: ASTNodeType.Block,
+                    statements: [whileBody, update],
+                    loc: body.loc || locationFrom(forToken),
+                };
+            }
+        }
+
+        const whileNode = {
+            type: ASTNodeType.WhileStatement,
+            test: test || {
+                type: ASTNodeType.Literal,
+                value: true,
+                literalType: 'boolean',
+                loc: locationFrom(forToken),
+            },
+            body: whileBody,
+            loc: locationFrom(forToken),
+        };
+
+        if (!initializer) {
+            return whileNode;
+        }
+
+        return {
+            type: ASTNodeType.Block,
+            statements: [initializer, whileNode],
+            loc: locationFrom(forToken),
+        };
+    }
+
+    parseForVariableDeclaration() {
+        this.skipModifiers();
+        const typeToken = this.consumeTypeName(false);
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in variable type');
+        }
+        const nameToken = this.consumeIdentifier('Expected variable name');
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
+        }
+
+        let initializer = null;
+        if (this.matchOperator('=')) {
+            initializer = this.parseExpression();
+        }
+
+        return {
+            type: ASTNodeType.VariableDecl,
+            varType: typeToken.value,
+            name: nameToken.value,
+            initializer,
+            loc: locationFrom(nameToken),
+        };
+    }
+
+    parseForAssignment() {
+        const target = this.parseAssignableExpression();
+        this.consumeOperator('=', 'Expected = in assignment');
+        const value = this.parseExpression();
+        return {
+            type: ASTNodeType.Assignment,
+            name: target.type === ASTNodeType.Identifier ? target.name : null,
+            target,
+            value,
+            loc: target.loc,
+        };
+    }
+
+    parseVariableDeclaration() {
+        this.skipModifiers();
+        const typeToken = this.consumeTypeName(false);
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in variable type');
+        }
+        const nameToken = this.consumeIdentifier('Expected variable name');
+        while (this.matchSymbol('[')) {
+            // Skip array declarator after variable name (e.g., int a[])
+            this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
+        }
+        let initializer = null;
+        if (this.matchOperator('=')) {
+            initializer = this.parseExpression();
+        }
+        this.consumeSymbol(';', 'Expected ; after variable declaration');
+        return {
+            type: ASTNodeType.VariableDecl,
+            varType: typeToken.value,
+            name: nameToken.value,
+            initializer,
+            loc: locationFrom(nameToken),
+        };
+    }
+
+    parseAssignmentStatement() {
+        const target = this.parseAssignableExpression();
+        this.consumeOperator('=', 'Expected = in assignment');
+        const value = this.parseExpression();
+        this.consumeSymbol(';', 'Expected ; after assignment');
+        return {
+            type: ASTNodeType.Assignment,
+            name: target.type === ASTNodeType.Identifier ? target.name : null,
+            target,
+            value,
+            loc: target.loc,
+        };
+    }
+
+    parseExpressionStatement() {
+        const expr = this.parseExpression();
+        this.consumeSymbol(';', 'Expected ; after expression');
+        return {
+            type: ASTNodeType.ExpressionStmt,
+            expression: expr,
+            loc: expr.loc,
+        };
+    }
+
+    parseExpression() {
+        return this.parseConditional();
+    }
+
+    parseConditional() {
+        const test = this.parseLogicalOr();
+        if (!this.matchSymbol('?')) {
+            return test;
+        }
+        const consequent = this.parseExpression();
+        this.consumeSymbol(':', 'Expected : in conditional expression');
+        const alternate = this.parseExpression();
+        return {
+            type: ASTNodeType.ConditionalExpression,
+            test,
+            consequent,
+            alternate,
+            loc: test.loc,
+        };
+    }
+
+    parseLogicalOr() {
+        let expr = this.parseLogicalAnd();
+        while (this.matchOperator('||')) {
+            const operator = this.previous();
+            const right = this.parseLogicalAnd();
+            expr = makeBinary(operator, expr, right);
+        }
+        return expr;
+    }
+
+    parseLogicalAnd() {
+        let expr = this.parseEquality();
+        while (this.matchOperator('&&')) {
+            const operator = this.previous();
+            const right = this.parseEquality();
+            expr = makeBinary(operator, expr, right);
+        }
+        return expr;
+    }
+
+    parseEquality() {
+        let expr = this.parseRelational();
+        while (this.matchOperator('==') || this.matchOperator('!=')) {
+            const operator = this.previous();
+            const right = this.parseRelational();
+            expr = makeBinary(operator, expr, right);
+        }
+        return expr;
+    }
+
+    parseRelational() {
+        let expr = this.parseAdditive();
+        while (this.matchOperator('<') || this.matchOperator('>') ||
+               this.matchOperator('<=') || this.matchOperator('>=')) {
+            const operator = this.previous();
+            const right = this.parseAdditive();
+            expr = makeBinary(operator, expr, right);
+        }
+        return expr;
+    }
+
+    parseAdditive() {
+        let expr = this.parseMultiplicative();
+        while (this.matchOperator('+') || this.matchOperator('-')) {
+            const operator = this.previous();
+            const right = this.parseMultiplicative();
+            expr = makeBinary(operator, expr, right);
+        }
+        return expr;
+    }
+
+    parseMultiplicative() {
+        let expr = this.parseUnary();
+        while (this.matchOperator('*') || this.matchOperator('/') || this.matchOperator('%')) {
+            const operator = this.previous();
+            const right = this.parseUnary();
+            expr = makeBinary(operator, expr, right);
+        }
+        return expr;
+    }
+
+    parseUnary() {
+        if (this.matchOperator('!') || this.matchOperator('-')) {
+            const operator = this.previous();
+            const argument = this.parseUnary();
+            return {
+                type: ASTNodeType.UnaryExpression,
+                operator: operator.value,
+                argument,
+                loc: locationFrom(operator),
+            };
+        }
+        return this.parsePostfix();
+    }
+
+    parsePostfix() {
+        let expr = this.parsePrimary();
+        while (true) {
+            if (this.matchSymbol('(')) {
+                const args = [];
+                if (!this.checkSymbol(')')) {
+                    do {
+                        args.push(this.parseExpression());
+                    } while (this.matchSymbol(','));
+                }
+                this.consumeSymbol(')', 'Expected ) to close argument list');
+                expr = {
+                    type: ASTNodeType.CallExpression,
+                    callee: expr,
+                    arguments: args,
+                    loc: expr.loc,
+                };
+                continue;
+            }
+            if (this.matchSymbol('.')) {
+                const property = this.consumeIdentifier('Expected member name after .');
+                expr = {
+                    type: ASTNodeType.MemberExpression,
+                    object: expr,
+                    property: property.value,
+                    loc: expr.loc,
+                };
+                continue;
+            }
+            if (this.matchSymbol('[')) {
+                const index = this.parseExpression();
+                this.consumeSymbol(']', 'Expected ] after index expression');
+                expr = {
+                    type: ASTNodeType.IndexExpression,
+                    object: expr,
+                    index,
+                    loc: expr.loc,
+                };
+                continue;
+            }
+            break;
+        }
+        if (this.matchOperator('++') || this.matchOperator('--')) {
+            const operator = this.previous();
+            expr = {
+                type: ASTNodeType.PostfixExpression,
+                operator: operator.value,
+                argument: expr,
+                loc: locationFrom(operator),
+            };
+        }
+        return expr;
+    }
+
+    parsePrimary() {
+        if (this.matchToken(TokenType.INTEGER)) {
+            const token = this.previous();
+            return {
+                type: ASTNodeType.Literal,
+                value: Number(token.value),
+                literalType: 'int',
+                loc: locationFrom(token),
+            };
+        }
+        if (this.matchToken(TokenType.BOOLEAN)) {
+            const token = this.previous();
+            return {
+                type: ASTNodeType.Literal,
+                value: token.value,
+                literalType: 'boolean',
+                loc: locationFrom(token),
+            };
+        }
+        if (this.matchToken(TokenType.STRING)) {
+            const token = this.previous();
+            return {
+                type: ASTNodeType.Literal,
+                value: token.value,
+                literalType: 'string',
+                loc: locationFrom(token),
+            };
+        }
+        if (this.matchToken(TokenType.NULL)) {
+            const token = this.previous();
+            return {
+                type: ASTNodeType.Literal,
+                value: null,
+                literalType: 'null',
+                loc: locationFrom(token),
+            };
+        }
+        if (this.matchKeyword('this')) {
+            const token = this.previous();
+            return {
+                type: ASTNodeType.ThisExpression,
+                loc: locationFrom(token),
+            };
+        }
+        if (this.matchKeyword('new')) {
+            const newToken = this.previous();
+            const ctorName = this.consumeIdentifier('Expected constructor/type name after new');
+            let callee = {
+                type: ASTNodeType.Identifier,
+                name: ctorName.value,
+                loc: locationFrom(ctorName),
+            };
+            while (this.matchSymbol('.')) {
+                const member = this.consumeIdentifier('Expected member name after .');
+                callee = {
+                    type: ASTNodeType.MemberExpression,
+                    object: callee,
+                    property: member.value,
+                    loc: callee.loc,
+                };
+            }
+
+            if (this.matchSymbol('(')) {
+                const args = [];
+                if (!this.checkSymbol(')')) {
+                    do {
+                        args.push(this.parseExpression());
+                    } while (this.matchSymbol(','));
+                }
+                this.consumeSymbol(')', 'Expected ) after constructor arguments');
+                return {
+                    type: ASTNodeType.NewExpression,
+                    callee,
+                    arguments: args,
+                    dimensions: [],
+                    loc: locationFrom(newToken),
+                };
+            }
+
+            const dimensions = [];
+            while (this.matchSymbol('[')) {
+                if (!this.checkSymbol(']')) {
+                    dimensions.push(this.parseExpression());
+                } else {
+                    dimensions.push(null);
+                }
+                this.consumeSymbol(']', 'Expected ] after array dimension');
+            }
+            if (dimensions.length > 0) {
+                return {
+                    type: ASTNodeType.NewExpression,
+                    callee,
+                    arguments: [],
+                    dimensions,
+                    loc: locationFrom(newToken),
+                };
+            }
+
+            throw new HamsterParserError('Expected constructor call or array dimension after new', this.peek());
+        }
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+            const identifier = this.previous();
+            return {
+                type: ASTNodeType.Identifier,
+                name: identifier.value,
+                loc: locationFrom(identifier),
+            };
+        }
+        if (this.matchSymbol('(')) {
+            const expr = this.parseExpression();
+            this.consumeSymbol(')', 'Expected ) after expression');
+            return expr;
+        }
+        throw new HamsterParserError('Unexpected token in expression', this.peek());
+    }
+
+    isAssignmentAhead() {
+        if (!this.checkToken(TokenType.IDENTIFIER) && !this.checkKeyword('this')) return false;
+        let idx = this.current + 1;
+        while (idx < this.tokens.length) {
+            const token = this.tokens[idx];
+            if (token.type === TokenType.SYMBOL && token.value === '.') {
+                if (this.tokens[idx + 1]?.type !== TokenType.IDENTIFIER) return false;
+                idx += 2;
+                continue;
+            }
+            if (token.type === TokenType.SYMBOL && token.value === '[') {
+                let depth = 1;
+                idx += 1;
+                while (idx < this.tokens.length && depth > 0) {
+                    const t = this.tokens[idx];
+                    if (t.type === TokenType.SYMBOL && t.value === '[') depth += 1;
+                    if (t.type === TokenType.SYMBOL && t.value === ']') depth -= 1;
+                    idx += 1;
+                }
+                if (depth !== 0) return false;
+                continue;
+            }
+            return token.type === TokenType.OPERATOR && token.value === '=';
+        }
+        return false;
+    }
+
+    isTypeKeywordAhead() {
+        if (this.checkKeyword('int') || this.checkKeyword('boolean')) {
+            return true;
+        }
+        if (this.checkToken(TokenType.IDENTIFIER)) {
+            let idx = this.current + 1;
+            while (idx < this.tokens.length && this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '[') {
+                if (this.tokens[idx + 1]?.type !== TokenType.SYMBOL || this.tokens[idx + 1]?.value !== ']') {
+                    return false;
+                }
+                idx += 2;
+            }
+            if (this.tokens[idx]?.type === TokenType.IDENTIFIER) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    consumeTypeName(allowVoid) {
+        if (allowVoid && this.checkKeyword('void')) {
+            return this.advance();
+        }
+        if (this.checkKeyword('int') || this.checkKeyword('boolean')) {
+            return this.advance();
+        }
+        if (this.checkToken(TokenType.IDENTIFIER)) {
+            return this.advance();
+        }
+        throw new HamsterParserError('Expected type keyword', this.peek());
+    }
+
+    parseAssignableExpression() {
+        let target;
+        if (this.matchKeyword('this')) {
+            const token = this.previous();
+            target = {
+                type: ASTNodeType.ThisExpression,
+                loc: locationFrom(token),
+            };
+        } else {
+            const identifier = this.consumeIdentifier('Expected assignment target');
+            target = {
+                type: ASTNodeType.Identifier,
+                name: identifier.value,
+                loc: locationFrom(identifier),
+            };
+        }
+
+        while (true) {
+            if (this.matchSymbol('.')) {
+                const property = this.consumeIdentifier('Expected member name after .');
+                target = {
+                    type: ASTNodeType.MemberExpression,
+                    object: target,
+                    property: property.value,
+                    loc: target.loc,
+                };
+                continue;
+            }
+            if (this.matchSymbol('[')) {
+                const index = this.parseExpression();
+                this.consumeSymbol(']', 'Expected ] after index expression');
+                target = {
+                    type: ASTNodeType.IndexExpression,
+                    object: target,
+                    index,
+                    loc: target.loc,
+                };
+                continue;
+            }
+            break;
+        }
+
+        return target;
+    }
+
+    skipModifiers() {
+        while (this.checkKeyword('public') || this.checkKeyword('private') || this.checkKeyword('protected') ||
+               this.checkKeyword('static') || this.checkKeyword('final')) {
+            this.advance();
+        }
+    }
+
+    tryParseFunction(allowModifiers) {
+        const checkpoint = this.current;
+        try {
+            if (allowModifiers) {
+                this.skipModifiers();
+            }
+            const returnType = this.consumeTypeName(true);
+            const nameToken = this.consumeIdentifier('Expected function name');
+            if (!this.checkSymbol('(')) {
+                this.current = checkpoint;
+                return null;
+            }
+            this.consumeSymbol('(', 'Expected ( after function name');
+            const parameters = [];
+            if (!this.checkSymbol(')')) {
+                do {
+                    parameters.push(this.parseParameter());
+                } while (this.matchSymbol(','));
+            }
+            this.consumeSymbol(')', 'Expected ) after parameter list');
+            const body = this.parseBlock();
+            return {
+                type: ASTNodeType.FunctionDecl,
+                name: nameToken.value,
+                returnType: returnType.value,
+                parameters,
+                body,
+                loc: locationFrom(nameToken),
+            };
+        } catch (error) {
+            this.current = checkpoint;
+            return null;
+        }
+    }
+
+    skipUntilSymbol(symbol) {
+        while (!this.isAtEnd() && !this.checkSymbol(symbol)) {
+            this.advance();
+        }
+        if (this.matchSymbol(symbol)) {
+            return;
+        }
+    }
+
+    skipClassLikeDeclaration() {
+        this.advance();
+        while (!this.isAtEnd() && !this.checkSymbol('{') && !this.checkSymbol(';')) {
+            this.advance();
+        }
+        if (this.matchSymbol(';')) {
+            return;
+        }
+        if (!this.matchSymbol('{')) {
+            return;
+        }
+        let depth = 1;
+        while (!this.isAtEnd() && depth > 0) {
+            if (this.matchSymbol('{')) {
+                depth += 1;
+                continue;
+            }
+            if (this.matchSymbol('}')) {
+                depth -= 1;
+                continue;
+            }
+            this.advance();
+        }
+    }
+
+    consumeIdentifier(message) {
+        if (this.checkToken(TokenType.IDENTIFIER)) {
+            return this.advance();
+        }
+        throw new HamsterParserError(message, this.peek());
+    }
+
+    consumeSymbol(symbol, message) {
+        if (this.matchSymbol(symbol)) {
+            return this.previous();
+        }
+        throw new HamsterParserError(message, this.peek());
+    }
+
+    consumeOperator(op, message) {
+        if (this.matchOperator(op)) {
+            return this.previous();
+        }
+        throw new HamsterParserError(message, this.peek());
+    }
+
+    consumeKeyword(value, message) {
+        if (this.matchKeyword(value)) {
+            return this.previous();
+        }
+        throw new HamsterParserError(message, this.peek());
+    }
+
+    matchKeyword(value) {
+        if (this.checkKeyword(value)) {
+            this.advance();
+            return true;
+        }
+        return false;
+    }
+
+    matchSymbol(symbol) {
+        if (this.checkSymbol(symbol)) {
+            this.advance();
+            return true;
+        }
+        return false;
+    }
+
+    matchOperator(value) {
+        if (this.checkOperator(value)) {
+            this.advance();
+            return true;
+        }
+        return false;
+    }
+
+    matchToken(type) {
+        if (this.checkToken(type)) {
+            this.advance();
+            return true;
+        }
+        return false;
+    }
+
+    checkKeyword(value) {
+        const token = this.peek();
+        return token.type === TokenType.KEYWORD && token.value === value;
+    }
+
+    checkSymbol(symbol) {
+        const token = this.peek();
+        return token.type === TokenType.SYMBOL && token.value === symbol;
+    }
+
+    checkOperator(value) {
+        const token = this.peek();
+        return token.type === TokenType.OPERATOR && token.value === value;
+    }
+
+    checkToken(type) {
+        const token = this.peek();
+        return token.type === type;
+    }
+
+    peek() {
+        return this.tokens[this.current];
+    }
+
+    peekNext() {
+        if (this.current + 1 >= this.tokens.length) {
+            return this.tokens[this.tokens.length - 1];
+        }
+        return this.tokens[this.current + 1];
+    }
+
+    previous() {
+        return this.tokens[this.current - 1];
+    }
+
+    advance() {
+        if (!this.isAtEnd()) {
+            this.current += 1;
+        }
+        return this.previous();
+    }
+
+    isAtEnd() {
+        return this.peek().type === TokenType.EOF;
+    }
+}
+
+function makeBinary(operatorToken, left, right) {
+    return {
+        type: ASTNodeType.BinaryExpression,
+        operator: operatorToken.value,
+        left,
+        right,
+        loc: locationFrom(operatorToken),
+    };
+}
+
+function locationFrom(token) {
+    return { line: token.line, column: token.column };
+}
+
+
+
+class RunnerPause extends Error {
+    constructor(message = 'Runner paused') {
+        super(message);
+        this.name = 'RunnerPause';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal signal for return statements inside generator-based execution.
+// ---------------------------------------------------------------------------
+class ReturnSignal {
+    constructor(value) {
+        this.value = value;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hamster instructions that constitute breakpoints (mode A1/B).
+// One step = one hamster instruction.  Everything else executes invisibly.
+// ---------------------------------------------------------------------------
+const HAMSTER_INSTRUCTIONS = new Set([
+    'vor', 'linksUm', 'nimm', 'gib',
+    'vornFrei', 'kornDa', 'maulLeer',
+    'getReihe', 'getSpalte', 'getBlickrichtung',
+    'getAnzahlKoerner', 'anzahlKoerner',
+    'schreib',
+    'readInt', 'readString',
+    'liesZahl', 'liesZeichenkette', 'liesString',
+    'createHamster',
+    'rechtsUm',
+]);
+
+function isHamsterInstruction(name) {
+    return HAMSTER_INSTRUCTIONS.has(name);
+}
+
+const KNOWN_BUILTINS = new Set([
+    'vor',
+    'linksUm',
+    'nimm',
+    'gib',
+    'vornFrei',
+    'kornDa',
+    'maulLeer',
+    'getReihe',
+    'getSpalte',
+    'getBlickrichtung',
+    'getAnzahlKoerner',
+    'anzahlKoerner',
+    'createHamster',
+    'readInt',
+    'readString',
+]);
+
+function isKnownBuiltinName(name) {
+    if (KNOWN_BUILTINS.has(name)) return true;
+    if (name === 'Math.random') return true;
+    if (name.endsWith('.getStandardHamster') || name.endsWith('.getStandardHamsterAlsDrehHamster')) return true;
+    return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Public API – createRunnerState / executeRunnerStep
+// ═══════════════════════════════════════════════════════════════════════════
+
+function createRunnerState(ast, runtime) {
+    const functions = new Map();
+    for (const fn of ast.functions || []) {
+        if (!functions.has(fn.name)) {
+            functions.set(fn.name, []);
+        }
+        functions.get(fn.name).push(fn);
+    }
+    const mainCandidates = functions.get('main') || [];
+    const main = mainCandidates.find(fn => (fn.parameters || []).length === 0) || null;
+    if (!main) {
+        throw new Error('Program must define void main()');
+    }
+    if (!runtime || typeof runtime.callBuiltin !== 'function') {
+        throw new Error('Runner runtime must provide callBuiltin(name, args, functions)');
+    }
+
+    const state = {
+        ast,
+        functions,
+        runtime,
+        finished: false,
+        scopes: [new Map()],
+        // Legacy stack field kept for backward-compatible state inspection.
+        stack: [],
+        generator: null,
+    };
+
+    state.generator = programGenerator(state, main);
+    return state;
+}
+
+/**
+ * Advance execution to the next hamster instruction (mode A1/B).
+ *
+ * Returns `true` if the program has more work, `false` when finished.
+ * Throws `RunnerPause` when the program needs terminal input.
+ */
+function executeRunnerStep(state) {
+    if (state.finished || !state.generator) return false;
+
+    const result = state.generator.next();
+    if (result.done) {
+        state.finished = true;
+        return false;
+    }
+
+    const yielded = result.value;
+    if (yielded && yielded.kind === 'needsInput') {
+        throw new RunnerPause(yielded.message || 'Waiting for input');
+    }
+
+    // yielded.kind === 'instruction'  →  one hamster command completed = one visible step.
+    // Expose the last instruction info (including loc) for debugger integration.
+    state.lastInstruction = yielded || null;
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Generator-based interpreter (matches original mode A1/B)
+//
+// The generator yields a { kind, name } descriptor after every hamster
+// instruction.  Non-hamster statements (variable decls, control flow,
+// arithmetic, user-defined functions) execute transparently without yielding.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function* programGenerator(state, mainFn) {
+    try {
+        yield* executeStatementGen(mainFn.body, state, 0);
+    } finally {
+        state.finished = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Statement generator – returns undefined or ReturnSignal
+// ---------------------------------------------------------------------------
+function* executeStatementGen(node, state, callDepth) {
+    if (!node) return undefined;
+
+    switch (node.type) {
+        case ASTNodeType.Block: {
+            state.scopes.push(new Map());
+            try {
+                for (const stmt of node.statements || []) {
+                    const result = yield* executeStatementGen(stmt, state, callDepth);
+                    if (result instanceof ReturnSignal) return result;
+                }
+            } finally {
+                if (state.scopes.length > 1) state.scopes.pop();
+            }
+            return undefined;
+        }
+
+        case ASTNodeType.IfStatement: {
+            const cond = truthy(yield* evalExpressionGen(node.test, state, callDepth));
+            if (cond) {
+                return yield* executeStatementGen(node.consequent, state, callDepth);
+            } else if (node.alternate) {
+                return yield* executeStatementGen(node.alternate, state, callDepth);
+            }
+            return undefined;
+        }
+
+        case ASTNodeType.WhileStatement: {
+            let guard = 0;
+            while (truthy(yield* evalExpressionGen(node.test, state, callDepth))) {
+                if (++guard > 100000) throw new Error('Loop iteration limit exceeded');
+                const result = yield* executeStatementGen(node.body, state, callDepth);
+                if (result instanceof ReturnSignal) return result;
+            }
+            return undefined;
+        }
+
+        case ASTNodeType.DoWhileStatement: {
+            let guard = 0;
+            do {
+                if (++guard > 100000) throw new Error('Loop iteration limit exceeded');
+                const result = yield* executeStatementGen(node.body, state, callDepth);
+                if (result instanceof ReturnSignal) return result;
+            } while (truthy(yield* evalExpressionGen(node.test, state, callDepth)));
+            return undefined;
+        }
+
+        case ASTNodeType.ForStatement:
+            throw new Error('For statements are not supported at runtime');
+
+        case ASTNodeType.VariableDecl: {
+            let value = defaultValueForType(node.varType);
+            if (node.initializer) {
+                value = yield* evalExpressionGen(node.initializer, state, callDepth);
+            }
+            declareVariable(state, node.name, value);
+            return undefined;
+        }
+
+        case ASTNodeType.Assignment: {
+            const value = yield* evalExpressionGen(node.value, state, callDepth);
+            yield* assignTargetGen(state, node.target ?? null, node.name, value, callDepth);
+            return undefined;
+        }
+
+        case ASTNodeType.ExpressionStmt:
+            yield* evalExpressionGen(node.expression, state, callDepth);
+            return undefined;
+
+        case ASTNodeType.ReturnStatement: {
+            const value = node.argument
+                ? yield* evalExpressionGen(node.argument, state, callDepth)
+                : undefined;
+            return new ReturnSignal(value);
+        }
+
+        default:
+            throw new Error('Unsupported statement type: ' + node.type);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Expression generator – returns the evaluated value.
+// Yields only when a hamster instruction is encountered inside a call.
+// ---------------------------------------------------------------------------
+function* evalExpressionGen(node, state, callDepth) {
+    switch (node.type) {
+        case ASTNodeType.Literal:
+            return node.value;
+
+        case ASTNodeType.Identifier:
+            return resolveIdentifierValue(state, node.name);
+
+        case ASTNodeType.MemberExpression:
+            return yield* evalMemberExpressionGen(node, state, callDepth);
+
+        case ASTNodeType.IndexExpression:
+            return yield* evalIndexExpressionGen(node, state, callDepth);
+
+        case ASTNodeType.NewExpression:
+            return yield* evalNewExpressionGen(node, state, callDepth);
+
+        case ASTNodeType.ThisExpression:
+            return getVariable(state, 'this');
+
+        case ASTNodeType.UnaryExpression: {
+            const value = yield* evalExpressionGen(node.argument, state, callDepth);
+            if (node.operator === '!') return !truthy(value);
+            if (node.operator === '-') return -Number(value);
+            throw new Error('Unsupported unary operator: ' + node.operator);
+        }
+
+        case ASTNodeType.PostfixExpression: {
+            if ((node.operator !== '--' && node.operator !== '++') || node.argument.type !== ASTNodeType.Identifier) {
+                throw new Error('Only identifier++/identifier-- is supported');
+            }
+            const current = Number(getVariable(state, node.argument.name));
+            const delta = node.operator === '++' ? 1 : -1;
+            assignVariable(state, node.argument.name, current + delta);
+            return current;
+        }
+
+        case ASTNodeType.BinaryExpression:
+            return yield* evalBinaryExpressionGen(node, state, callDepth);
+
+        case ASTNodeType.ConditionalExpression: {
+            const test = yield* evalExpressionGen(node.test, state, callDepth);
+            return truthy(test)
+                ? yield* evalExpressionGen(node.consequent, state, callDepth)
+                : yield* evalExpressionGen(node.alternate, state, callDepth);
+        }
+
+        case ASTNodeType.CallExpression:
+            return yield* evalCallExpressionGen(node, state, callDepth);
+
+        default:
+            throw new Error('Unsupported expression type: ' + node.type);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call expression generator – handles builtin + user function dispatch.
+// Yields { kind:'instruction', name } after every hamster instruction,
+// and { kind:'needsInput', message } when RunnerPause is caught.
+// ---------------------------------------------------------------------------
+function* evalCallExpressionGen(node, state, callDepth) {
+    // ── Member call: receiver.method(args) ──────────────────────────────
+    if (node.callee?.type === ASTNodeType.MemberExpression) {
+        const receiver = yield* evalExpressionGen(node.callee.object, state, callDepth);
+        const methodName = node.callee.property;
+        const args = [];
+        for (const arg of node.arguments) {
+            args.push(yield* evalExpressionGen(arg, state, callDepth));
+        }
+
+        // Compatibility: static class calls → user functions
+        if (receiver && receiver.__kind === 'class') {
+            const candidates = state.functions.get(methodName) || [];
+            const fn = candidates.find(c => (c.parameters || []).length === args.length);
+            if (fn) {
+                return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1);
+            }
+        }
+
+        // Runtime method call (retry loop for terminal input)
+        let result;
+        while (true) {
+            try {
+                if (typeof state.runtime.callMethod === 'function') {
+                    result = state.runtime.callMethod(receiver, methodName, args, state.functions);
+                } else {
+                    const fallbackName = stringifyReceiver(receiver) + '.' + methodName;
+                    result = state.runtime.callBuiltin(fallbackName, args, state.functions);
+                }
+                break;
+            } catch (e) {
+                if (e instanceof RunnerPause) {
+                    yield { kind: 'needsInput', message: e.message };
+                    continue;
+                }
+                throw e;
+            }
+        }
+
+        if (isHamsterInstruction(methodName)) {
+            yield { kind: 'instruction', name: methodName, loc: node.loc || null };
+        }
+        return result;
+    }
+
+    // ── Non-member call: func(args) ─────────────────────────────────────
+    const args = [];
+    for (const arg of node.arguments) {
+        args.push(yield* evalExpressionGen(arg, state, callDepth));
+    }
+    const calleeName = resolveCalleeName(node.callee);
+    if (!calleeName) {
+        throw new Error('Unsupported call expression callee');
+    }
+
+    // User-defined function takes priority
+    const candidates = state.functions.get(calleeName) || [];
+    const fn = candidates.find(c => (c.parameters || []).length === args.length);
+    if (fn) {
+        return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1);
+    }
+
+    if (candidates.length > 0) {
+        if (isKnownBuiltinName(calleeName)) {
+            // Fall through to builtin
+        } else {
+            const expected = (candidates[0].parameters || []).length;
+            throw new Error('Function ' + calleeName + ' expects ' + expected + ' arguments but got ' + args.length);
+        }
+    }
+
+    // Builtin call (retry loop for terminal input)
+    let result;
+    while (true) {
+        try {
+            result = state.runtime.callBuiltin(calleeName, args, state.functions);
+            break;
+        } catch (e) {
+            if (e instanceof RunnerPause) {
+                yield { kind: 'needsInput', message: e.message };
+                continue;
+            }
+            throw e;
+        }
+    }
+
+    if (isHamsterInstruction(calleeName)) {
+        yield { kind: 'instruction', name: calleeName, loc: node.loc || null };
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// User function invocation – transparent; each internal hamster instruction
+// produces its own yield (matching mode A1/B compound-step behaviour).
+// ---------------------------------------------------------------------------
+function* invokeUserFunctionGen(fn, args, state, callDepth) {
+    if (callDepth > 256) {
+        throw new Error('Maximum function call depth exceeded');
+    }
+    if ((fn.parameters || []).length !== args.length) {
+        throw new Error('Function ' + fn.name + ' expects ' + fn.parameters.length + ' arguments but got ' + args.length);
+    }
+
+    const functionScope = new Map();
+    for (let i = 0; i < fn.parameters.length; i++) {
+        functionScope.set(fn.parameters[i].name, args[i]);
+    }
+
+    state.scopes.push(functionScope);
+    try {
+        const result = yield* executeStatementGen(fn.body, state, callDepth);
+        if (result instanceof ReturnSignal) {
+            return fn.returnType === 'void' ? undefined : result.value;
+        }
+        return fn.returnType === 'void' ? undefined : defaultValueForType(fn.returnType);
+    } finally {
+        state.scopes.pop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Binary expression generator
+// ---------------------------------------------------------------------------
+function* evalBinaryExpressionGen(node, state, callDepth) {
+    const op = node.operator;
+    if (op === '&&') {
+        const left = truthy(yield* evalExpressionGen(node.left, state, callDepth));
+        if (!left) return false;
+        return truthy(yield* evalExpressionGen(node.right, state, callDepth));
+    }
+    if (op === '||') {
+        const left = truthy(yield* evalExpressionGen(node.left, state, callDepth));
+        if (left) return true;
+        return truthy(yield* evalExpressionGen(node.right, state, callDepth));
+    }
+
+    const left = yield* evalExpressionGen(node.left, state, callDepth);
+    const right = yield* evalExpressionGen(node.right, state, callDepth);
+
+    switch (op) {
+        case '+': return Number(left) + Number(right);
+        case '-': return Number(left) - Number(right);
+        case '*': return Number(left) * Number(right);
+        case '/': return Math.trunc(Number(left) / Number(right));
+        case '%': return Number(left) % Number(right);
+        case '==': return left === right;
+        case '!=': return left !== right;
+        case '<': return Number(left) < Number(right);
+        case '<=': return Number(left) <= Number(right);
+        case '>': return Number(left) > Number(right);
+        case '>=': return Number(left) >= Number(right);
+        default:
+            throw new Error('Unsupported binary operator: ' + op);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Member / index / new expression generators
+// ---------------------------------------------------------------------------
+function* evalMemberExpressionGen(node, state, callDepth) {
+    const receiver = yield* evalExpressionGen(node.object, state, callDepth);
+    if (receiver == null) {
+        throw new Error('Cannot read property ' + node.property + ' of null');
+    }
+    if (Array.isArray(receiver) && node.property === 'length') {
+        return receiver.length;
+    }
+    if (typeof state.runtime.getMember === 'function') {
+        const resolved = state.runtime.getMember(receiver, node.property, state.functions);
+        if (resolved !== undefined) {
+            return resolved;
+        }
+    }
+    if (typeof receiver === 'object' && Object.prototype.hasOwnProperty.call(receiver, node.property)) {
+        return receiver[node.property];
+    }
+    throw new Error('Unknown member: ' + node.property);
+}
+
+function* evalIndexExpressionGen(node, state, callDepth) {
+    const target = yield* evalExpressionGen(node.object, state, callDepth);
+    const index = Number(yield* evalExpressionGen(node.index, state, callDepth));
+    if (Array.isArray(target)) {
+        return target[index];
+    }
+    if (typeof target === 'string') {
+        return target.charAt(index);
+    }
+    throw new Error('Index access is only supported for arrays and strings');
+}
+
+function* evalNewExpressionGen(node, state, callDepth) {
+    if (node.dimensions && node.dimensions.length > 0) {
+        const firstDim = node.dimensions[0];
+        const length = firstDim == null ? 0 : Number(yield* evalExpressionGen(firstDim, state, callDepth));
+        const safeLength = Number.isFinite(length) && length > 0 ? Math.trunc(length) : 0;
+        return new Array(safeLength).fill(null);
+    }
+
+    const args = [];
+    for (const arg of (node.arguments || [])) {
+        args.push(yield* evalExpressionGen(arg, state, callDepth));
+    }
+    if (typeof state.runtime.createObject === 'function') {
+        const className = resolveCalleeName(node.callee) || 'Object';
+        const obj = state.runtime.createObject(className, args, state.functions);
+        // Hamster constructor is a breakpoint (CreateInstruction)
+        if (className.endsWith('Hamster')) {
+            yield { kind: 'instruction', name: 'createHamster', loc: node.loc || null };
+        }
+        return obj;
+    }
+    return {
+        __className: resolveCalleeName(node.callee) || 'Object',
+        __args: args,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Assignment target generator
+// ---------------------------------------------------------------------------
+function* assignTargetGen(state, targetNode, name, value, callDepth) {
+    if (targetNode && targetNode.type === ASTNodeType.Identifier) {
+        assignVariable(state, targetNode.name, value);
+        return;
+    }
+    if (!targetNode && name) {
+        assignVariable(state, name, value);
+        return;
+    }
+    if (targetNode && targetNode.type === ASTNodeType.MemberExpression) {
+        const receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
+        if (receiver == null) {
+            throw new Error('Cannot assign member on null receiver');
+        }
+        if (typeof state.runtime.setMember === 'function') {
+            const handled = state.runtime.setMember(receiver, targetNode.property, value, state.functions);
+            if (handled === true) {
+                return;
+            }
+        }
+        if (typeof receiver === 'object') {
+            receiver[targetNode.property] = value;
+            return;
+        }
+        throw new Error('Unsupported assignment target');
+    }
+    if (targetNode && targetNode.type === ASTNodeType.IndexExpression) {
+        const receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
+        const index = Number(yield* evalExpressionGen(targetNode.index, state, callDepth));
+        if (Array.isArray(receiver)) {
+            receiver[index] = value;
+            return;
+        }
+        throw new Error('Unsupported index assignment target');
+    }
+    throw new Error('Unsupported assignment target');
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (unchanged)
+// ---------------------------------------------------------------------------
+function truthy(value) {
+    return !!value;
+}
+
+function defaultValueForType(typeName) {
+    if (typeName === 'boolean') return false;
+    if (typeName === 'int') return 0;
+    return null;
+}
+
+function declareVariable(state, name, value) {
+    const scope = state.scopes[state.scopes.length - 1];
+    if (scope.has(name)) {
+        throw new Error('Variable already declared: ' + name);
+    }
+    scope.set(name, value);
+}
+
+function assignVariable(state, name, value) {
+    for (let i = state.scopes.length - 1; i >= 0; i--) {
+        const scope = state.scopes[i];
+        if (scope.has(name)) {
+            scope.set(name, value);
+            return;
+        }
+    }
+    throw new Error('Unknown variable: ' + name);
+}
+
+function getVariable(state, name) {
+    for (let i = state.scopes.length - 1; i >= 0; i--) {
+        const scope = state.scopes[i];
+        if (scope.has(name)) {
+            return scope.get(name);
+        }
+    }
+    throw new Error('Unknown variable: ' + name);
+}
+
+function resolveIdentifierValue(state, name) {
+    try {
+        return getVariable(state, name);
+    } catch (error) {
+        if (typeof state.runtime.resolveIdentifier === 'function') {
+            const resolved = state.runtime.resolveIdentifier(name, state.functions);
+            if (resolved !== undefined) {
+                return resolved;
+            }
+        }
+        throw error;
+    }
+}
+
+function stringifyReceiver(receiver) {
+    if (receiver && typeof receiver === 'object' && typeof receiver.__className === 'string') {
+        return receiver.__className;
+    }
+    if (typeof receiver === 'string') {
+        return receiver;
+    }
+    return 'object';
+}
+
+function resolveCalleeName(calleeNode) {
+    if (!calleeNode) {
+        return null;
+    }
+    if (typeof calleeNode === 'string') {
+        return calleeNode;
+    }
+    if (calleeNode.type === ASTNodeType.Identifier) {
+        return calleeNode.name;
+    }
+    if (calleeNode.type === ASTNodeType.MemberExpression) {
+        const objectName = resolveCalleeName(calleeNode.object);
+        if (!objectName) return null;
+        return objectName + '.' + calleeNode.property;
+    }
+    return null;
+}
+
+console.log('Script 2 done - parseProgram:', typeof parseProgram);
+</script>
+</body>
+</html>

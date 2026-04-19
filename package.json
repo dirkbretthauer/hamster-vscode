@@ -1,0 +1,96 @@
+{
+  "name": "hamstersimulator",
+  "displayName": "Hamster Simulator",
+  "description": "Run and visualise Hamster programs (.ham) inside VS Code",
+  "version": "0.1.0",
+  "publisher": "hamster",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Education"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "hamster",
+        "aliases": [
+          "Hamster",
+          "ham"
+        ],
+        "extensions": [
+          ".ham"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hamster",
+        "scopeName": "source.hamster",
+        "path": "./syntaxes/hamster.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "hamster.openSimulator",
+        "title": "Hamster: Open Simulator",
+        "icon": "$(play)"
+      },
+      {
+        "command": "hamster.run",
+        "title": "Hamster: Run Program",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "hamster.step",
+        "title": "Hamster: Step",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "hamster.stop",
+        "title": "Hamster: Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "hamster.reset",
+        "title": "Hamster: Reset",
+        "icon": "$(debug-restart)"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "hamster.terrainEditor",
+        "displayName": "Hamster Terrain Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.ter"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "hamster.openSimulator",
+          "when": "resourceLangId == hamster",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.3.0"
+  }
+}

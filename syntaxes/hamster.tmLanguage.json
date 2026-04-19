@@ -1,0 +1,74 @@
+{
+  "scopeName": "source.hamster",
+  "name": "Hamster",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#constants" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#hamster-builtins" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.hamster", "match": "//.*$" },
+        { "name": "comment.block.hamster", "begin": "/\\*", "end": "\\*/", "captures": { "0": { "name": "punctuation.definition.comment.hamster" } } }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.hamster",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.hamster", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.boolean.hamster", "match": "\\b(true|false)\\b" },
+        { "name": "constant.language.null.hamster", "match": "\\bnull\\b" },
+        { "name": "constant.language.direction.hamster", "match": "\\b(NORD|OST|SUED|WEST)\\b" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.hamster", "match": "\\b(if|else|while|do|for|return)\\b" },
+        { "name": "keyword.other.hamster", "match": "\\b(new|this|class|interface|extends|implements|package|import)\\b" },
+        { "name": "storage.modifier.hamster", "match": "\\b(public|private|protected|static|final)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "storage.type.hamster", "match": "\\b(void|int|boolean|String|Hamster)\\b" }
+      ]
+    },
+    "hamster-builtins": {
+      "patterns": [
+        {
+          "name": "support.function.hamster",
+          "match": "\\b(vor|linksUm|nimm|gib|vornFrei|kornDa|maulLeer|getReihe|getSpalte|getBlickrichtung|getAnzahlKoerner|anzahlKoerner|createHamster|readInt|readString|liesZahl|liesZeichenkette|liesString|schreib|rechtsUm)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.integer.hamster", "match": "\\b[0-9]+\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.comparison.hamster", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.logical.hamster", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.arithmetic.hamster", "match": "\\+\\+|--|\\+|-|\\*|/|%" },
+        { "name": "keyword.operator.assignment.hamster", "match": "=" }
+      ]
+    }
+  }
+}
