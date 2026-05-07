@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 — Global Variable Support
+
+- Added support for top-level (global) variable declarations in imperative programs (e.g., `int richtung = 0;` before `void main()`)
+- Parser now collects globals in both normal and compatibility modes
+- Runner initializes global variables into the root scope before `main()` executes
+
 ## 0.2.0 — Web Extension Support
 
 - Migrated to VS Code web extension — now runs in vscode.dev and github.dev

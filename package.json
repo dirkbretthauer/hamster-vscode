@@ -2,7 +2,7 @@
   "name": "hamstersimulator",
   "displayName": "Hamster Simulator",
   "description": "Run and visualise Hamster programs (.ham) inside VS Code",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "DirkBretthauer",
   "license": "MIT",
   "repository": {
