@@ -58,15 +58,21 @@ class Parser {
             throw new HamsterParserError('Program must define void main()', this.peek());
         }
         const functions = [];
+        const globals = [];
+        // Parse global variable declarations before main()
+        while (!this.isAtEnd() && this.isTypeKeywordAhead() && !this.isFunctionAhead()) {
+            globals.push(this.parseVariableDeclaration());
+        }
         functions.push(this.parseFunction(true));
         while (!this.isAtEnd()) {
             functions.push(this.parseFunction(false));
         }
-        return { type: ASTNodeType.Program, functions };
+        return { type: ASTNodeType.Program, functions, globals };
     }
 
     parseCompatibilityProgram() {
         const functions = [];
+        const globals = [];
         while (!this.isAtEnd()) {
             if (this.checkKeyword('package') || this.checkKeyword('import')) {
                 this.skipUntilSymbol(';');
@@ -81,12 +87,17 @@ class Parser {
                 functions.push(fn);
                 continue;
             }
+            const varDecl = this.tryParseGlobalVariable();
+            if (varDecl) {
+                globals.push(varDecl);
+                continue;
+            }
             this.advance();
         }
         if (this.options.requireMain && !functions.some(fn => fn.name === 'main' && fn.returnType === 'void')) {
             throw new HamsterParserError('Program must define void main()', this.peek());
         }
-        return { type: ASTNodeType.Program, functions };
+        return { type: ASTNodeType.Program, functions, globals };
     }
 
     parseCompatibilityClassLikeDeclaration() {
@@ -833,6 +844,79 @@ class Parser {
                this.checkKeyword('static') || this.checkKeyword('final')) {
             this.advance();
         }
+    }
+
+    tryParseGlobalVariable() {
+        const checkpoint = this.current;
+        try {
+            this.skipModifiers();
+            if (!this.isTypeKeywordAhead()) {
+                this.current = checkpoint;
+                return null;
+            }
+            const typeToken = this.consumeTypeName(false);
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in variable type');
+            }
+            const nameToken = this.consumeIdentifier('Expected variable name');
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
+            }
+            // Must be followed by '=' or ';' — not '(' (that would be a function)
+            if (this.checkSymbol('(')) {
+                this.current = checkpoint;
+                return null;
+            }
+            let initializer = null;
+            if (this.matchOperator('=')) {
+                initializer = this.parseExpression();
+            }
+            this.consumeSymbol(';', 'Expected ; after variable declaration');
+            return {
+                type: ASTNodeType.VariableDecl,
+                varType: typeToken.value,
+                name: nameToken.value,
+                initializer,
+                loc: locationFrom(nameToken),
+            };
+        } catch (error) {
+            this.current = checkpoint;
+            return null;
+        }
+    }
+
+    isFunctionAhead() {
+        let idx = this.current;
+        // skip modifiers
+        while (idx < this.tokens.length) {
+            const t = this.tokens[idx];
+            if (t.type === TokenType.KEYWORD && (t.value === 'public' || t.value === 'private' ||
+                t.value === 'protected' || t.value === 'static' || t.value === 'final')) {
+                idx++;
+            } else {
+                break;
+            }
+        }
+        // skip return type
+        const typeToken = this.tokens[idx];
+        if (!typeToken) return false;
+        if (typeToken.type === TokenType.KEYWORD && (typeToken.value === 'void' || typeToken.value === 'int' || typeToken.value === 'boolean')) {
+            idx++;
+        } else if (typeToken.type === TokenType.IDENTIFIER) {
+            idx++;
+        } else {
+            return false;
+        }
+        // skip array brackets on type
+        while (idx < this.tokens.length && this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '[') {
+            if (this.tokens[idx + 1]?.type !== TokenType.SYMBOL || this.tokens[idx + 1]?.value !== ']') break;
+            idx += 2;
+        }
+        // expect identifier (name)
+        if (!this.tokens[idx] || this.tokens[idx].type !== TokenType.IDENTIFIER) return false;
+        idx++;
+        // expect '(' → it's a function
+        return this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '(';
     }
 
     tryParseFunction(allowModifiers) {

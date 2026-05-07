@@ -93,6 +93,15 @@ export function createRunnerState(ast, runtime) {
         generator: null,
     };
 
+    // Initialize global variables into the root scope before main runs.
+    for (const g of ast.globals || []) {
+        let value = defaultValueForType(g.varType);
+        if (g.initializer && g.initializer.type === ASTNodeType.Literal) {
+            value = g.initializer.value;
+        }
+        state.scopes[0].set(g.name, value);
+    }
+
     state.generator = programGenerator(state, main);
     return state;
 }
