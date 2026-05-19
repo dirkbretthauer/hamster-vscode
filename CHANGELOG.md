@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 — Compile Button & Debugger Integration
+
+- Added a **Compile** button to the simulator toolbar (left of Run) that validates the current `.ham` file and reports errors with line/column information
+- Parser gained a `strict` option that surfaces previously-swallowed top-level garbage (e.g. malformed function declarations next to a valid `void main()`); the Compile button uses it
+- Added full **VS Code debugger** integration for `.ham` files (press F5)
+  - Breakpoints in the editor gutter
+  - Step over / step in / step out, continue, pause
+  - Call stack showing nested user-function calls
+  - Variables view with Locals (current frame) and Globals
+  - Hover and watch expressions for identifiers
+  - Program output routed to the Debug Console
+- Runner now tracks call frames (`state.frames`) to support stack traces
+
 ## 0.3.0 — Global Variable Support
 
 - Added support for top-level (global) variable declarations in imperative programs (e.g., `int richtung = 0;` before `void main()`)

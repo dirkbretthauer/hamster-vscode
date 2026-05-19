@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { HamsterPanel, HamsterPanelOptions } from './hamsterPanel';
 import { HamsterDiagnostics } from './diagnostics';
 import { TerrainEditorProvider } from './terrainEditor';
+import { HamsterDebugSession, HamsterDebugConfigurationProvider } from './hamsterDebugSession';
 
 let currentPanel: HamsterPanel | undefined;
 let diagnostics: HamsterDiagnostics;
@@ -17,6 +18,11 @@ export function activate(context: vscode.ExtensionContext) {
             if (existed) {
                 currentPanel!.reveal();
             }
+        }),
+
+        vscode.commands.registerCommand('hamster.compile', () => {
+            ensurePanel(context);
+            currentPanel!.postCommand('compile');
         }),
 
         vscode.commands.registerCommand('hamster.run', () => {
@@ -70,6 +76,22 @@ export function activate(context: vscode.ExtensionContext) {
             TerrainEditorProvider.viewType,
             new TerrainEditorProvider(context),
         )
+    );
+
+    // Register Hamster debugger
+    context.subscriptions.push(
+        vscode.debug.registerDebugConfigurationProvider('hamster', new HamsterDebugConfigurationProvider()),
+        vscode.debug.registerDebugAdapterDescriptorFactory('hamster', {
+            createDebugAdapterDescriptor: () => {
+                const session = new HamsterDebugSession({
+                    ensurePanel: async () => {
+                        await ensurePanel(context);
+                        return currentPanel!;
+                    },
+                });
+                return new vscode.DebugAdapterInlineImplementation(session);
+            },
+        }),
     );
 
     // Run diagnostics on already-open .ham files

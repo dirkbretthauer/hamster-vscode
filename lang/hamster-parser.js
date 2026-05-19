@@ -47,6 +47,7 @@ class Parser {
         this.options = {
             requireMain: options.requireMain !== undefined ? options.requireMain : true,
             compatibility: options.compatibility === true,
+            strict: options.strict === true,
         };
     }
 
@@ -91,6 +92,16 @@ class Parser {
             if (varDecl) {
                 globals.push(varDecl);
                 continue;
+            }
+            if (this.options.strict) {
+                // Re-run a strict function parse to surface the precise error
+                // (parseFunction throws on the first malformed construct).
+                this.parseFunction(false);
+                // parseFunction always throws here; safety net just in case:
+                throw new HamsterParserError(
+                    `Unexpected token '${this.peek().value ?? this.peek().type}' at top level`,
+                    this.peek()
+                );
             }
             this.advance();
         }

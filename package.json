@@ -2,7 +2,7 @@
   "name": "hamstersimulator",
   "displayName": "Hamster Simulator",
   "description": "Run and visualise Hamster programs (.ham) inside VS Code",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "DirkBretthauer",
   "license": "MIT",
   "repository": {
@@ -45,6 +45,11 @@
         "icon": "$(play)"
       },
       {
+        "command": "hamster.compile",
+        "title": "Hamster: Compile Program",
+        "icon": "$(check)"
+      },
+      {
         "command": "hamster.run",
         "title": "Hamster: Run Program",
         "icon": "$(debug-start)"
@@ -85,7 +90,62 @@
           "group": "navigation"
         }
       ]
-    }
+    },
+    "breakpoints": [
+      {
+        "language": "hamster"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "hamster",
+        "label": "Hamster",
+        "languages": [
+          "hamster"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to a .ham program file.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop at the first hamster instruction.",
+                "default": true
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "hamster",
+            "request": "launch",
+            "name": "Run Hamster Program",
+            "program": "${file}",
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Hamster: Launch",
+            "description": "Launch and debug a Hamster (.ham) program",
+            "body": {
+              "type": "hamster",
+              "request": "launch",
+              "name": "Run Hamster Program",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "compile": "webpack",

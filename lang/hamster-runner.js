@@ -90,6 +90,10 @@ export function createRunnerState(ast, runtime) {
         scopes: [new Map()],
         // Legacy stack field kept for backward-compatible state inspection.
         stack: [],
+        // Call frames for debugger integration. Each entry:
+        //   { name, loc, scopeIndex, callerLoc }
+        // The root frame (main) is pushed by programGenerator.
+        frames: [],
         generator: null,
     };
 
@@ -107,29 +111,42 @@ export function createRunnerState(ast, runtime) {
 }
 
 /**
- * Advance execution to the next hamster instruction (mode A1/B).
+ * Advance execution.
+ *
+ * `opts.granularity`:
+ *   - 'instruction' (default): stop only on hamster instructions and user
+ *     function-call sites. Used by the simulator's Run/Step buttons.
+ *   - 'statement': also stop on every non-block statement. Used by the
+ *     VS Code debugger so users can step through control flow / assignments.
  *
  * Returns `true` if the program has more work, `false` when finished.
  * Throws `RunnerPause` when the program needs terminal input.
  */
-export function executeRunnerStep(state) {
+export function executeRunnerStep(state, opts) {
     if (state.finished || !state.generator) return false;
+    const granularity = (opts && opts.granularity) || 'instruction';
 
-    const result = state.generator.next();
-    if (result.done) {
-        state.finished = true;
-        return false;
+    while (true) {
+        const result = state.generator.next();
+        if (result.done) {
+            state.finished = true;
+            return false;
+        }
+
+        const yielded = result.value;
+        if (yielded && yielded.kind === 'needsInput') {
+            throw new RunnerPause(yielded.message || 'Waiting for input');
+        }
+
+        // In coarse 'instruction' mode, swallow statement-level yields so
+        // visible stepping stays at one-hamster-instruction-per-step.
+        if (granularity === 'instruction' && yielded && yielded.kind === 'statement') {
+            continue;
+        }
+
+        state.lastInstruction = yielded || null;
+        return true;
     }
-
-    const yielded = result.value;
-    if (yielded && yielded.kind === 'needsInput') {
-        throw new RunnerPause(yielded.message || 'Waiting for input');
-    }
-
-    // yielded.kind === 'instruction'  →  one hamster command completed = one visible step.
-    // Expose the last instruction info (including loc) for debugger integration.
-    state.lastInstruction = yielded || null;
-    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -141,9 +158,16 @@ export function executeRunnerStep(state) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function* programGenerator(state, mainFn) {
+    state.frames.push({
+        name: 'main',
+        loc: mainFn.loc || null,
+        scopeIndex: state.scopes.length,
+        callerLoc: null,
+    });
     try {
         yield* executeStatementGen(mainFn.body, state, 0);
     } finally {
+        state.frames.pop();
         state.finished = true;
     }
 }
@@ -153,6 +177,14 @@ function* programGenerator(state, mainFn) {
 // ---------------------------------------------------------------------------
 function* executeStatementGen(node, state, callDepth) {
     if (!node) return undefined;
+
+    // Statement-level yield – swallowed by the runner in 'instruction'
+    // granularity mode, but observed by the debugger in 'statement' mode so
+    // users can step through ifs, loops, assignments, etc.
+    // Blocks are transparent: only their contained statements yield.
+    if (node.type !== ASTNodeType.Block && node.loc) {
+        yield { kind: 'statement', name: node.type, loc: node.loc };
+    }
 
     switch (node.type) {
         case ASTNodeType.Block: {
@@ -311,8 +343,17 @@ function* evalCallExpressionGen(node, state, callDepth) {
             const candidates = state.functions.get(methodName) || [];
             const fn = candidates.find(c => (c.parameters || []).length === args.length);
             if (fn) {
+                // Stop on the call site so the debugger highlights the
+                // function-call line before stepping into the function.
+                yield { kind: 'call', name: fn.name, loc: node.loc || null };
                 return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1);
             }
+        }
+
+        // Stop before executing a hamster instruction so the debugger can
+        // highlight the line that is *about to* run.
+        if (isHamsterInstruction(methodName)) {
+            yield { kind: 'instruction', name: methodName, loc: node.loc || null };
         }
 
         // Runtime method call (retry loop for terminal input)
@@ -334,10 +375,6 @@ function* evalCallExpressionGen(node, state, callDepth) {
                 throw e;
             }
         }
-
-        if (isHamsterInstruction(methodName)) {
-            yield { kind: 'instruction', name: methodName, loc: node.loc || null };
-        }
         return result;
     }
 
@@ -355,6 +392,9 @@ function* evalCallExpressionGen(node, state, callDepth) {
     const candidates = state.functions.get(calleeName) || [];
     const fn = candidates.find(c => (c.parameters || []).length === args.length);
     if (fn) {
+        // Stop on the call site so the debugger highlights the
+        // function-call line before stepping into the function.
+        yield { kind: 'call', name: fn.name, loc: node.loc || null };
         return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1);
     }
 
@@ -365,6 +405,12 @@ function* evalCallExpressionGen(node, state, callDepth) {
             const expected = (candidates[0].parameters || []).length;
             throw new Error('Function ' + calleeName + ' expects ' + expected + ' arguments but got ' + args.length);
         }
+    }
+
+    // Stop before executing a hamster instruction so the debugger can
+    // highlight the line that is *about to* run.
+    if (isHamsterInstruction(calleeName)) {
+        yield { kind: 'instruction', name: calleeName, loc: node.loc || null };
     }
 
     // Builtin call (retry loop for terminal input)
@@ -380,10 +426,6 @@ function* evalCallExpressionGen(node, state, callDepth) {
             }
             throw e;
         }
-    }
-
-    if (isHamsterInstruction(calleeName)) {
-        yield { kind: 'instruction', name: calleeName, loc: node.loc || null };
     }
     return result;
 }
@@ -405,6 +447,12 @@ function* invokeUserFunctionGen(fn, args, state, callDepth) {
         functionScope.set(fn.parameters[i].name, args[i]);
     }
 
+    state.frames.push({
+        name: fn.name,
+        loc: fn.loc || null,
+        scopeIndex: state.scopes.length,
+        callerLoc: (state.lastInstruction && state.lastInstruction.loc) || null,
+    });
     state.scopes.push(functionScope);
     try {
         const result = yield* executeStatementGen(fn.body, state, callDepth);
@@ -414,6 +462,7 @@ function* invokeUserFunctionGen(fn, args, state, callDepth) {
         return fn.returnType === 'void' ? undefined : defaultValueForType(fn.returnType);
     } finally {
         state.scopes.pop();
+        state.frames.pop();
     }
 }
 
@@ -502,11 +551,13 @@ function* evalNewExpressionGen(node, state, callDepth) {
     }
     if (typeof state.runtime.createObject === 'function') {
         const className = resolveCalleeName(node.callee) || 'Object';
-        const obj = state.runtime.createObject(className, args, state.functions);
-        // Hamster constructor is a breakpoint (CreateInstruction)
+        // Hamster constructor is a breakpoint (CreateInstruction).
+        // Yield BEFORE constructing so the debugger highlights the line
+        // that is *about to* run.
         if (className.endsWith('Hamster')) {
             yield { kind: 'instruction', name: 'createHamster', loc: node.loc || null };
         }
+        const obj = state.runtime.createObject(className, args, state.functions);
         return obj;
     }
     return {

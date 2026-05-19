@@ -11,6 +11,8 @@ export class HamsterPanel {
     private disposables: vscode.Disposable[] = [];
     private _onDidDispose = new vscode.EventEmitter<void>();
     public readonly onDidDispose = this._onDidDispose.event;
+    private _onDidReceiveDebugMessage = new vscode.EventEmitter<any>();
+    public readonly onDidReceiveDebugMessage = this._onDidReceiveDebugMessage.event;
     private constructor(
         private context: vscode.ExtensionContext,
         private diagnostics: HamsterDiagnostics,
@@ -99,7 +101,15 @@ export class HamsterPanel {
         this.panel.webview.postMessage({ type: 'command', command });
     }
 
+    postDebug(msg: any) {
+        this.panel.webview.postMessage(msg);
+    }
+
     private handleMessage(msg: any) {
+        if (msg && typeof msg.type === 'string' && msg.type.startsWith('dbg:')) {
+            this._onDidReceiveDebugMessage.fire(msg);
+            return;
+        }
         switch (msg.type) {
             case 'error':
                 vscode.window.showErrorMessage(`Hamster: ${msg.message}`);
@@ -270,6 +280,7 @@ export class HamsterPanel {
 <body>
     <div id="initial-data" style="display:none" data-terrain="${escapedTerrain}" data-program="${escapedProgram}"></div>
     <div class="toolbar">
+        <button id="btn-compile" title="Compile">&#10003; Compile</button>
         <button id="btn-run" title="Run">&#9654; Run</button>
         <button id="btn-step" title="Step">&#9193; Step</button>
         <button id="btn-stop" title="Stop">&#9209; Stop</button>
@@ -534,6 +545,12 @@ export class HamsterPanel {
             currentSource = initialProgram;
         }
 
+        // ── Debugger state (Option A: runner lives here, host drives via dbg:* msgs) ──
+        let dbgActive = false;
+        let dbgRunning = false;
+        let dbgBreakpoints = new Set();
+        let dbgTimerId = null;
+
         // ── Message handling from extension host ──
         window.addEventListener('message', event => {
             const msg = event.data;
@@ -555,9 +572,246 @@ export class HamsterPanel {
                 case 'command':
                     handleCommand(msg.command);
                     break;
+                case 'dbg:launch':           dbgLaunch(msg); break;
+                case 'dbg:setBreakpoints':   dbgSetBreakpoints(msg.lines||[]); break;
+                case 'dbg:continue':         dbgContinue(); break;
+                case 'dbg:next':             dbgStepOnce('step'); break;
+                case 'dbg:stepIn':           dbgStepOnce('step'); break;
+                case 'dbg:stepOut':          dbgStepOnce('step'); break;
+                case 'dbg:pause':            dbgPause(); break;
+                case 'dbg:stackTrace':       dbgSendStackTrace(msg.requestId); break;
+                case 'dbg:scopes':           dbgSendScopes(msg.requestId, msg.frameId); break;
+                case 'dbg:variables':        dbgSendVariables(msg.requestId, msg.variablesReference); break;
+                case 'dbg:evaluate':         dbgEvaluate(msg.requestId, msg.expression); break;
+                case 'dbg:disconnect':       dbgDisconnect(); break;
             }
         });
 
+        // ── Debugger implementation ──────────────────────────────────────────
+        function dbgFormatValue(v) {
+            if (v === null || v === undefined) return String(v);
+            if (typeof v === 'object') {
+                if (v.__kind === 'hamster') return 'Hamster #' + v.id;
+                if (v.__kind === 'class') return 'class ' + (v.name||'');
+                try { return JSON.stringify(v); } catch(e) { return String(v); }
+            }
+            if (typeof v === 'string') return JSON.stringify(v);
+            return String(v);
+        }
+
+        function dbgClearTimer() {
+            if (dbgTimerId !== null) { clearTimeout(dbgTimerId); dbgTimerId = null; }
+        }
+
+        function dbgLaunch(msg) {
+            dbgActive = true;
+            dbgRunning = false;
+            dbgBreakpoints = new Set((msg.breakpoints||[]).map(n => n|0));
+            dbgClearTimer();
+            if (runTimerId !== null) { clearTimeout(runTimerId); runTimerId = null; }
+            runnerState = null;
+            engine.reset();
+            clearLog();
+            if (typeof msg.source === 'string') currentSource = msg.source;
+            if (!compileProgram()) {
+                vscode.postMessage({type:'dbg:terminated'});
+                dbgActive = false;
+                return;
+            }
+            engine.start();
+            statusEl.textContent = 'Debugging';
+            if (msg.stopOnEntry === false) {
+                dbgContinue();
+            } else {
+                // Step once so we have a real lastInstruction location, then stop.
+                dbgStepOnce('entry');
+            }
+        }
+
+        function dbgSetBreakpoints(lines) {
+            dbgBreakpoints = new Set(lines.map(n => n|0));
+        }
+
+        function dbgFlushNewLogs() {
+            if (!engineState || !engineState.log) return;
+            if (typeof engineState._shownLogCount !== 'number') engineState._shownLogCount = 0;
+            while (engineState._shownLogCount < engineState.log.length) {
+                appendLog(engineState.log[engineState._shownLogCount]);
+                engineState._shownLogCount++;
+            }
+        }
+
+        function dbgStepOnce(reason) {
+            if (!dbgActive) return;
+            if (!runnerState || runnerState.finished) {
+                dbgTerminate();
+                return;
+            }
+            try {
+                const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
+                render(engineState);
+                dbgFlushNewLogs();
+                if (!hasMore) { dbgTerminate(); return; }
+                const loc = runnerState.lastInstruction && runnerState.lastInstruction.loc;
+                vscode.postMessage({type:'dbg:stopped', reason, line: loc ? loc.line : 1, column: loc ? loc.column : 1});
+            } catch(e) {
+                if (window.RunnerPause && e instanceof window.RunnerPause) {
+                    vscode.postMessage({type:'dbg:stopped', reason:'pause', line: 1, column: 1});
+                    return;
+                }
+                const m = 'Runtime error: ' + (e.message||e);
+                appendLog(m, true);
+                vscode.postMessage({type:'dbg:output', category:'stderr', output: m + '\\n'});
+                vscode.postMessage({type:'dbg:stopped', reason:'exception', text: m});
+                dbgRunning = false;
+            }
+        }
+
+        function dbgContinue() {
+            if (!dbgActive) return;
+            dbgRunning = true;
+            function tick() {
+                if (!dbgRunning || !dbgActive) return;
+                if (!runnerState || runnerState.finished) { dbgTerminate(); return; }
+                try {
+                    const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
+                    const inst = runnerState.lastInstruction || {};
+                    const isHamster = inst.kind === 'instruction';
+                    if (isHamster) {
+                        render(engineState);
+                        dbgFlushNewLogs();
+                    }
+                    if (!hasMore) { render(engineState); dbgFlushNewLogs(); dbgTerminate(); return; }
+                    const loc = inst.loc;
+                    if (loc && dbgBreakpoints.has(loc.line)) {
+                        dbgRunning = false;
+                        render(engineState);
+                        dbgFlushNewLogs();
+                        vscode.postMessage({type:'dbg:stopped', reason:'breakpoint', line: loc.line, column: loc.column});
+                        return;
+                    }
+                    // Pace the visualisation: full speed between hamster
+                    // instructions, near-zero delay for pure statements.
+                    const delay = isHamster ? (parseInt(speedInput.value)||0) : 0;
+                    dbgTimerId = setTimeout(tick, delay);
+                } catch(e) {
+                    if (window.RunnerPause && e instanceof window.RunnerPause) {
+                        dbgRunning = false;
+                        vscode.postMessage({type:'dbg:stopped', reason:'pause'});
+                        return;
+                    }
+                    const m = 'Runtime error: ' + (e.message||e);
+                    appendLog(m, true);
+                    vscode.postMessage({type:'dbg:output', category:'stderr', output: m + '\\n'});
+                    vscode.postMessage({type:'dbg:stopped', reason:'exception', text: m});
+                    dbgRunning = false;
+                }
+            }
+            tick();
+        }
+
+        function dbgPause() {
+            dbgRunning = false;
+            dbgClearTimer();
+            const loc = runnerState && runnerState.lastInstruction && runnerState.lastInstruction.loc;
+            vscode.postMessage({type:'dbg:stopped', reason:'pause', line: loc ? loc.line : 1, column: loc ? loc.column : 1});
+        }
+
+        function dbgTerminate() {
+            dbgRunning = false;
+            dbgClearTimer();
+            vscode.postMessage({type:'dbg:terminated'});
+            statusEl.textContent = 'Debug session ended';
+        }
+
+        function dbgDisconnect() {
+            dbgActive = false;
+            dbgRunning = false;
+            dbgClearTimer();
+            vscode.postMessage({type:'clearHighlight'});
+        }
+
+        function dbgSendStackTrace(requestId) {
+            const frames = [];
+            if (runnerState && Array.isArray(runnerState.frames) && runnerState.frames.length > 0) {
+                const top = runnerState.frames.length - 1;
+                const topLoc = runnerState.lastInstruction && runnerState.lastInstruction.loc;
+                for (let i = top; i >= 0; i--) {
+                    const f = runnerState.frames[i];
+                    let line = 1, column = 1;
+                    if (i === top) {
+                        line = topLoc ? topLoc.line : (f.loc ? f.loc.line : 1);
+                        column = topLoc ? topLoc.column : (f.loc ? f.loc.column : 1);
+                    } else {
+                        const cl = runnerState.frames[i+1] && runnerState.frames[i+1].callerLoc;
+                        line = cl ? cl.line : (f.loc ? f.loc.line : 1);
+                        column = cl ? cl.column : (f.loc ? f.loc.column : 1);
+                    }
+                    frames.push({ id: i + 1, name: f.name || '<anonymous>', line, column });
+                }
+            }
+            vscode.postMessage({type:'dbg:stackTrace', requestId, frames});
+        }
+
+        function dbgSendScopes(requestId, frameId) {
+            const scopes = [
+                { name: 'Locals',  variablesReference: 1000 + (frameId|0), expensive: false },
+                { name: 'Globals', variablesReference: 1, expensive: false },
+            ];
+            vscode.postMessage({type:'dbg:scopes', requestId, scopes});
+        }
+
+        function dbgSendVariables(requestId, variablesReference) {
+            const vars = [];
+            if (runnerState && Array.isArray(runnerState.scopes)) {
+                if (variablesReference === 1) {
+                    const root = runnerState.scopes[0];
+                    if (root && typeof root.forEach === 'function') {
+                        root.forEach((v, k) => vars.push({name:k, value:dbgFormatValue(v), variablesReference:0}));
+                    }
+                } else if (variablesReference >= 1000) {
+                    const frameId = variablesReference - 1000;
+                    const idx = frameId - 1;
+                    const frames = runnerState.frames || [];
+                    const frame = frames[idx];
+                    if (frame) {
+                        const start = frame.scopeIndex|0;
+                        const nextFrame = frames[idx + 1];
+                        const end = nextFrame ? (nextFrame.scopeIndex|0) : runnerState.scopes.length;
+                        const seen = new Set();
+                        for (let i = end - 1; i >= start; i--) {
+                            const scope = runnerState.scopes[i];
+                            if (scope && typeof scope.forEach === 'function') {
+                                scope.forEach((v, k) => {
+                                    if (!seen.has(k)) {
+                                        seen.add(k);
+                                        vars.push({name:k, value:dbgFormatValue(v), variablesReference:0});
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            vscode.postMessage({type:'dbg:variables', requestId, variables: vars});
+        }
+
+        function dbgEvaluate(requestId, expression) {
+            let result = '<unavailable>';
+            const expr = String(expression||'').trim();
+            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(expr) && runnerState && Array.isArray(runnerState.scopes)) {
+                for (let i = runnerState.scopes.length - 1; i >= 0; i--) {
+                    const s = runnerState.scopes[i];
+                    if (s && typeof s.has === 'function' && s.has(expr)) {
+                        result = dbgFormatValue(s.get(expr));
+                        break;
+                    }
+                }
+            }
+            vscode.postMessage({type:'dbg:evaluate', requestId, result});
+        }
+
+        document.getElementById('btn-compile').addEventListener('click', () => handleCommand('compile'));
         document.getElementById('btn-run').addEventListener('click', () => handleCommand('run'));
         document.getElementById('btn-step').addEventListener('click', () => handleCommand('step'));
         document.getElementById('btn-stop').addEventListener('click', () => handleCommand('stop'));
@@ -565,10 +819,41 @@ export class HamsterPanel {
 
         function handleCommand(cmd) {
             switch(cmd) {
+                case 'compile': doCompile(); break;
                 case 'run': doRun(); break;
                 case 'step': doStep(); break;
                 case 'stop': doStop(); break;
                 case 'reset': doReset(); break;
+            }
+        }
+
+        function doCompile() {
+            doStop();
+            runnerState = null;
+            if (!currentSource) {
+                statusEl.textContent = 'No program loaded';
+                vscode.postMessage({type:'error', message:'No program loaded. Open a .ham file first.'});
+                return;
+            }
+            if (!window.parseProgram) {
+                statusEl.textContent = 'Language tools not loaded';
+                vscode.postMessage({type:'error', message:'Language tools not loaded yet.'});
+                return;
+            }
+            clearLog();
+            try {
+                window.parseProgram(currentSource, {compatibility:true, requireMain:true, strict:true});
+                appendLog('Compilation successful \\u2013 no errors found.');
+                statusEl.textContent = 'Compiled successfully';
+                vscode.postMessage({type:'info', message:'Compilation successful \\u2013 no errors found.'});
+            } catch(e) {
+                const msg = e.message || String(e);
+                appendLog('Compile error: ' + msg, true);
+                statusEl.textContent = 'Compile error';
+                if (e.token && e.token.line) {
+                    vscode.postMessage({type:'highlightLine', line: e.token.line});
+                }
+                vscode.postMessage({type:'error', message:'Compile error: ' + msg});
             }
         }
 
