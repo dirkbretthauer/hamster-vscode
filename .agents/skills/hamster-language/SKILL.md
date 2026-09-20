@@ -111,6 +111,7 @@ The parser currently only supports `=`. To add compound assignment:
 - **Statements** – Add a `case ASTNodeType.XxxStatement:` in `executeStatementGen()`. Follow the generator pattern: use `yield*` to delegate to sub-expressions and `yield` to emit hamster instructions.
 - **Expressions** – Add a `case ASTNodeType.XxxExpression:` in `evalExpressionGen()`.
 - **Global variables** – `createRunnerState()` iterates `ast.globals[]` and pre-populates the root scope. Currently only literal initializers are evaluated eagerly; complex initializers would need generator-based evaluation.
+- **`for` loops already work** – `parseForStatement()` always desugars into `BlockStatement`/`WhileStatement` nodes, so the runner's `case ASTNodeType.ForStatement:` handler (which throws) is unreachable dead code, not an active gap.
 - **Compound assignment** – Modify the `case ASTNodeType.Assignment:` handler to read the current value, apply the operator, then assign.
 - **String concatenation** – The `+` operator in `evalBinaryExpressionGen` currently coerces both sides to `Number`. To support `String + x`, check if either operand is a string and concatenate instead.
 
@@ -153,7 +154,6 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 - `abstract` methods
 
 ### Runner gaps
-- `for` statement throws at runtime (desugared to `while` by parser, but the node type is unsupported)
 - Postfix `++`/`--` only works on plain identifiers (not `arr[i]++` or `this.x++`)
 - String `+` concatenation (always coerces to Number)
 - `super`, `instanceof`, `try/catch/throw` – not handled
