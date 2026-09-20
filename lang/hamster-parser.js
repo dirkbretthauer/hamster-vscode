@@ -88,7 +88,7 @@ class Parser {
             if (this.isClassLikeDeclarationAhead()) {
                 const declaration = this.parseClassLikeDeclaration();
                 classes.push(declaration);
-                functions.push(...declaration.methods);
+                functions.push(...collectClassMethods(declaration));
                 continue;
             }
             const fn = this.tryParseFunction(true);
@@ -158,11 +158,24 @@ class Parser {
         const constructors = [];
         const methods = [];
         const nestedClasses = [];
+        const initializerBlocks = [];
+        let initializationOrder = 0;
         while (!this.checkSymbol('}') && !this.isAtEnd()) {
             if (this.matchSymbol(';')) {
                 continue;
             }
             const memberModifiers = this.parseModifiers();
+            if (this.checkSymbol('{')) {
+                if (memberModifiers.some(modifier => modifier !== 'static')) {
+                    throw new HamsterParserError('Initializer blocks may only be static', this.peek());
+                }
+                initializerBlocks.push({
+                    body: this.parseBlock(),
+                    isStatic: memberModifiers.includes('static'),
+                    order: initializationOrder++,
+                });
+                continue;
+            }
             if (this.checkKeyword('class') || this.checkKeyword('interface')) {
                 nestedClasses.push(this.parseClassLikeDeclaration(memberModifiers));
                 continue;
@@ -190,7 +203,11 @@ class Parser {
             if (typeToken.value === 'void') {
                 throw new HamsterParserError('Fields cannot have type void', typeToken);
             }
-            fields.push(this.parseFieldRest(memberName, typeToken.value, memberModifiers));
+            const declarations = this.parseFieldRest(memberName, typeToken.value, memberModifiers);
+            for (const field of declarations) {
+                field.order = initializationOrder++;
+                fields.push(field);
+            }
         }
         this.consumeSymbol('}', `Expected } to close ${kindToken.value} body`);
 
@@ -204,6 +221,7 @@ class Parser {
             constructors,
             methods,
             nestedClasses,
+            initializerBlocks,
             loc: locationFrom(kindToken),
         };
     }
@@ -211,6 +229,7 @@ class Parser {
     parseConstructor(className, modifiers) {
         const nameToken = this.consumeIdentifier('Expected constructor name');
         const parameters = this.parseParameterList();
+        this.parseThrowsClause();
         const body = this.parseBlock();
         return {
             type: ASTNodeType.ConstructorDecl,
@@ -224,6 +243,7 @@ class Parser {
 
     parseMethodRest(nameToken, returnType, modifiers, owner, allowAbstract) {
         const parameters = this.parseParameterList();
+        this.parseThrowsClause();
         let body = null;
         if (this.matchSymbol(';')) {
             if (!allowAbstract && !modifiers.includes('abstract')) {
@@ -245,22 +265,31 @@ class Parser {
     }
 
     parseFieldRest(nameToken, varType, modifiers) {
-        while (this.matchSymbol('[')) {
-            this.consumeSymbol(']', 'Expected ] after [ in field declarator');
-        }
-        let initializer = null;
-        if (this.matchOperator('=')) {
-            initializer = this.parseExpression();
-        }
+        const fields = [];
+        let currentName = nameToken;
+        do {
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in field declarator');
+            }
+            let initializer = null;
+            if (this.matchOperator('=')) {
+                initializer = this.parseExpression();
+            }
+            fields.push({
+                type: ASTNodeType.FieldDecl,
+                varType,
+                name: currentName.value,
+                initializer,
+                modifiers,
+                loc: locationFrom(currentName),
+            });
+            if (!this.matchSymbol(',')) {
+                break;
+            }
+            currentName = this.consumeIdentifier('Expected field name after comma');
+        } while (true);
         this.consumeSymbol(';', 'Expected ; after field declaration');
-        return {
-            type: ASTNodeType.FieldDecl,
-            varType,
-            name: nameToken.value,
-            initializer,
-            modifiers,
-            loc: locationFrom(nameToken),
-        };
+        return fields;
     }
 
     parseParameterList() {
@@ -273,6 +302,15 @@ class Parser {
         }
         this.consumeSymbol(')', 'Expected ) after parameter list');
         return parameters;
+    }
+
+    parseThrowsClause() {
+        if (!this.matchKeyword('throws')) {
+            return;
+        }
+        do {
+            this.consumeQualifiedName('Expected exception type after throws');
+        } while (this.matchSymbol(','));
     }
 
     parseFunction(requireMain) {
@@ -879,7 +917,9 @@ class Parser {
     }
 
     isAssignmentAhead() {
-        if (!this.checkToken(TokenType.IDENTIFIER) && !this.checkKeyword('this')) return false;
+        if (!this.checkToken(TokenType.IDENTIFIER) &&
+            !this.checkKeyword('this') &&
+            !this.checkKeyword('super')) return false;
         let idx = this.current + 1;
         while (idx < this.tokens.length) {
             const token = this.tokens[idx];
@@ -943,6 +983,12 @@ class Parser {
             const token = this.previous();
             target = {
                 type: ASTNodeType.ThisExpression,
+                loc: locationFrom(token),
+            };
+        } else if (this.matchKeyword('super')) {
+            const token = this.previous();
+            target = {
+                type: ASTNodeType.SuperExpression,
                 loc: locationFrom(token),
             };
         } else {
@@ -1248,6 +1294,14 @@ function makeBinary(operatorToken, left, right) {
         right,
         loc: locationFrom(operatorToken),
     };
+}
+
+function collectClassMethods(declaration) {
+    const methods = [...(declaration.methods || [])];
+    for (const nested of declaration.nestedClasses || []) {
+        methods.push(...collectClassMethods(nested));
+    }
+    return methods;
 }
 
 function locationFrom(token) {

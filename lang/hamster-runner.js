@@ -29,6 +29,7 @@ const HAMSTER_INSTRUCTIONS = new Set([
     'readInt', 'readString',
     'liesZahl', 'liesZeichenkette', 'liesString',
     'createHamster',
+    'init', 'initialisiere',
     'rechtsUm',
 ]);
 
@@ -50,6 +51,8 @@ const KNOWN_BUILTINS = new Set([
     'getAnzahlKoerner',
     'anzahlKoerner',
     'createHamster',
+    'init',
+    'initialisiere',
     'readInt',
     'readString',
 ]);
@@ -75,27 +78,42 @@ export function createRunnerState(ast, runtime) {
     }
     const classes = new Map();
     const staticFields = new Map();
-    const staticFieldInitializers = [];
+    const staticInitializers = [];
     for (const declaration of flattenClassDeclarations(ast.classes || [])) {
+        if (classes.has(declaration.name)) {
+            throw new Error('Duplicate class or interface name: ' + declaration.name);
+        }
         classes.set(declaration.name, declaration);
         const classFields = new Map();
+        const classStaticInitializers = [];
         for (const field of declaration.fields || []) {
             if ((field.modifiers || []).includes('static')) {
                 classFields.set(field.name, defaultValueForType(field.varType));
                 if (field.initializer) {
-                    staticFieldInitializers.push({ className: declaration.name, field });
+                    classStaticInitializers.push({
+                        className: declaration.name,
+                        kind: 'field',
+                        order: field.order,
+                        field,
+                    });
                 }
             }
         }
         staticFields.set(declaration.name, classFields);
+        for (const initializer of declaration.initializerBlocks || []) {
+            if (initializer.isStatic) {
+                classStaticInitializers.push({
+                    className: declaration.name,
+                    kind: 'block',
+                    order: initializer.order,
+                    body: initializer.body,
+                });
+            }
+        }
+        classStaticInitializers.sort((left, right) => left.order - right.order);
+        staticInitializers.push(...classStaticInitializers);
     }
-    const mainCandidates = functions.get('main') || [];
-    const main = mainCandidates.find(
-        fn => (fn.parameters || []).length === 0 && fn.body
-    ) || null;
-    if (!main) {
-        throw new Error('Program must define void main()');
-    }
+    const main = selectMainFunction(functions.get('main') || []);
     if (!runtime || typeof runtime.callBuiltin !== 'function') {
         throw new Error('Runner runtime must provide callBuiltin(name, args, functions)');
     }
@@ -105,7 +123,7 @@ export function createRunnerState(ast, runtime) {
         functions,
         classes,
         staticFields,
-        staticFieldInitializers,
+        staticInitializers,
         runtime,
         finished: false,
         scopes: [new Map()],
@@ -179,19 +197,27 @@ export function executeRunnerStep(state, opts) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function* programGenerator(state, mainFn) {
-    for (const { className, field } of state.staticFieldInitializers) {
+    for (const initializer of state.staticInitializers) {
+        const { className } = initializer;
         state.frames.push({
             name: '<static>',
-            loc: field.loc,
+            loc: initializer.field?.loc || initializer.body?.loc || null,
             scopeIndex: state.scopes.length,
             callerLoc: null,
             className,
         });
         try {
-            state.staticFields.get(className).set(
-                field.name,
-                yield* evalExpressionGen(field.initializer, state, 0)
-            );
+            if (initializer.kind === 'field') {
+                state.staticFields.get(className).set(
+                    initializer.field.name,
+                    yield* evalExpressionGen(initializer.field.initializer, state, 0)
+                );
+            } else {
+                const result = yield* executeStatementGen(initializer.body, state, 0);
+                if (result instanceof ReturnSignal) {
+                    throw new Error('Static initializer blocks cannot return');
+                }
+            }
         } finally {
             state.frames.pop();
         }
@@ -653,14 +679,14 @@ function readMemberValue(state, receiver, property, startClass = null) {
         if (owner) {
             return state.staticFields.get(owner).get(property);
         }
-        const fieldOwner = findInstanceFieldOwner(
-            state,
-            startClass || receiver.__className,
-            property
-        );
-        if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
-            return receiver.__fieldScopes[fieldOwner][property];
-        }
+    }
+    const fieldOwner = findInstanceFieldOwner(
+        state,
+        startClass || receiver.__className,
+        property
+    );
+    if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
+        return receiver.__fieldScopes[fieldOwner][property];
     }
     if (receiver.fields && Object.prototype.hasOwnProperty.call(receiver.fields, property)) {
         return receiver.fields[property];
@@ -798,15 +824,36 @@ function* invokeConstructorGen(declaration, constructor, args, receiver, state, 
             );
             const declaredFields = Object.create(null);
             receiver.__fieldScopes[declaration.name] = declaredFields;
-            for (const field of declaration.fields || []) {
-                if ((field.modifiers || []).includes('static')) {
-                    continue;
+            const instanceInitializers = [
+                ...(declaration.fields || [])
+                    .filter(field => !(field.modifiers || []).includes('static'))
+                    .map(field => ({ kind: 'field', order: field.order, field })),
+                ...(declaration.initializerBlocks || [])
+                    .filter(initializer => !initializer.isStatic)
+                    .map(initializer => ({
+                        kind: 'block',
+                        order: initializer.order,
+                        body: initializer.body,
+                    })),
+            ].sort((left, right) => left.order - right.order);
+            for (const initializer of instanceInitializers) {
+                if (initializer.kind === 'field') {
+                    const field = initializer.field;
+                    const value = field.initializer
+                        ? yield* evalExpressionGen(field.initializer, state, callDepth)
+                        : defaultValueForType(field.varType);
+                    declaredFields[field.name] = value;
+                    receiver.fields[field.name] = value;
+                } else {
+                    const result = yield* executeStatementGen(
+                        initializer.body,
+                        state,
+                        callDepth
+                    );
+                    if (result instanceof ReturnSignal) {
+                        throw new Error('Instance initializer blocks cannot return');
+                    }
                 }
-                const value = field.initializer
-                    ? yield* evalExpressionGen(field.initializer, state, callDepth)
-                    : defaultValueForType(field.varType);
-                declaredFields[field.name] = value;
-                receiver.fields[field.name] = value;
             }
         }
         for (let i = chainingCall ? 1 : 0; i < statements.length; i++) {
@@ -879,7 +926,7 @@ function* assignTargetGen(state, targetNode, name, value, callDepth) {
 function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
     if (targetNode && targetNode.type === ASTNodeType.Identifier) {
         const receiver = tryGetVariable(state, 'this');
-        const isLocal = hasVariable(state, targetNode.name);
+        const isLocal = hasLocalVariable(state, targetNode.name);
         const fieldOwner = !isLocal && receiver
             ? findInstanceFieldOwner(state, currentClassName(state), targetNode.name)
             : null;
@@ -926,7 +973,12 @@ function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
             throw new Error('Cannot assign member on null receiver');
         }
         return {
-            get: () => readMemberValue(state, receiver, targetNode.property),
+            get: () => readMemberValue(
+                state,
+                receiver,
+                targetNode.property,
+                fieldStartClass
+            ),
             set: value => {
                 if (receiver.__kind === 'class') {
                     const owner = findStaticFieldOwner(state, receiver.name, targetNode.property);
@@ -1032,8 +1084,12 @@ function tryGetVariable(state, name) {
     return undefined;
 }
 
-function hasVariable(state, name) {
-    return visibleScopeIndices(state).some(index => state.scopes[index].has(name));
+function hasLocalVariable(state, name) {
+    return localScopeIndices(state).some(index => state.scopes[index].has(name));
+}
+
+function localScopeIndices(state) {
+    return visibleScopeIndices(state).filter(index => index !== 0);
 }
 
 function visibleScopeIndices(state) {
@@ -1050,40 +1106,39 @@ function visibleScopeIndices(state) {
 }
 
 function resolveIdentifierValue(state, name) {
-    try {
-        return getVariable(state, name);
-    } catch (error) {
-        const receiver = tryGetVariable(state, 'this');
-        const fieldOwner = receiver
-            ? findInstanceFieldOwner(state, currentClassName(state), name)
-            : null;
-        if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
-            return receiver.__fieldScopes[fieldOwner][name];
+    for (const index of localScopeIndices(state)) {
+        if (state.scopes[index].has(name)) {
+            return state.scopes[index].get(name);
         }
-        const staticOwner = findStaticFieldOwner(state, currentClassName(state), name);
-        if (staticOwner) {
-            return state.staticFields.get(staticOwner).get(name);
-        }
-        if (state.classes.has(name)) {
-            return { __kind: 'class', name };
-        }
-        if (typeof state.runtime.resolveIdentifier === 'function') {
-            const resolved = state.runtime.resolveIdentifier(name, state.functions);
-            if (resolved !== undefined) {
-                return resolved;
-            }
-        }
-        throw error;
     }
+    const receiver = tryGetVariable(state, 'this');
+    const fieldOwner = receiver
+        ? findInstanceFieldOwner(state, currentClassName(state), name)
+        : null;
+    if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
+        return receiver.__fieldScopes[fieldOwner][name];
+    }
+    const staticOwner = findStaticFieldOwner(state, currentClassName(state), name);
+    if (staticOwner) {
+        return state.staticFields.get(staticOwner).get(name);
+    }
+    if (state.scopes[0]?.has(name)) {
+        return state.scopes[0].get(name);
+    }
+    if (state.classes.has(name)) {
+        return { __kind: 'class', name };
+    }
+    if (typeof state.runtime.resolveIdentifier === 'function') {
+        const resolved = state.runtime.resolveIdentifier(name, state.functions);
+        if (resolved !== undefined) {
+            return resolved;
+        }
+    }
+    throw new Error('Unknown variable: ' + name);
 }
 
 function currentClassName(state) {
-    for (let i = state.frames.length - 1; i >= 0; i--) {
-        if (state.frames[i].className) {
-            return state.frames[i].className;
-        }
-    }
-    return null;
+    return state.frames[state.frames.length - 1]?.className || null;
 }
 
 function flattenClassDeclarations(declarations) {
@@ -1093,6 +1148,38 @@ function flattenClassDeclarations(declarations) {
         result.push(...flattenClassDeclarations(declaration.nestedClasses || []));
     }
     return result;
+}
+
+function selectMainFunction(candidates) {
+    const runnable = candidates.filter(candidate =>
+        candidate.body &&
+        candidate.returnType === 'void' &&
+        (candidate.parameters || []).length === 0
+    );
+    const topLevel = runnable.filter(candidate => !candidate.owner);
+    if (topLevel.length > 1) {
+        throw new Error('Program defines multiple top-level void main() functions');
+    }
+    if (topLevel.length === 1) {
+        return topLevel[0];
+    }
+    const staticMethods = runnable.filter(candidate =>
+        (candidate.modifiers || []).includes('static')
+    );
+    if (staticMethods.length > 1) {
+        throw new Error('Program defines multiple static void main() methods');
+    }
+    if (staticMethods.length === 1) {
+        return staticMethods[0];
+    }
+    const instanceMethods = runnable.filter(candidate => candidate.owner);
+    if (instanceMethods.length > 1) {
+        throw new Error('Program defines multiple instance void main() methods');
+    }
+    if (instanceMethods.length === 1) {
+        return instanceMethods[0];
+    }
+    throw new Error('Program must define void main()');
 }
 
 function findMethod(state, className, methodName, argumentCount, requireStatic) {

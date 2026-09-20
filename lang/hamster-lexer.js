@@ -25,6 +25,7 @@ const KEYWORDS = new Set([
     'static',
     'final',
     'abstract',
+    'throws',
     'package',
     'import',
     'extends',
