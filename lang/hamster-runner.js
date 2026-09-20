@@ -486,7 +486,11 @@ function* evalBinaryExpressionGen(node, state, callDepth) {
     const right = yield* evalExpressionGen(node.right, state, callDepth);
 
     switch (op) {
-        case '+': return Number(left) + Number(right);
+        case '+':
+            if (typeof left === 'string' || typeof right === 'string') {
+                return String(left) + String(right);
+            }
+            return Number(left) + Number(right);
         case '-': return Number(left) - Number(right);
         case '*': return Number(left) * Number(right);
         case '/': return Math.trunc(Number(left) / Number(right));

@@ -52,7 +52,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟡 Unsupported top-level syntax can be silently skipped in non-strict compatibility mode rather than reported as an error.
 
 ### 3. Language: Runner/Interpreter (`lang/hamster-runner.js`)
-- 🔴 **Bug:** binary `+` always does `Number(left) + Number(right)` — string concatenation (`"a"+"b"`) produces `NaN` instead of `"ab"`.
+- 🟢 Binary `+` performs numeric addition unless either operand is a string, matching Java string concatenation semantics.
 - 🔴 Postfix `++`/`--` only supports plain identifiers (`arr[i]++`, `this.x++` fail).
 - 🔴 No exception system: no `HamsterException` hierarchy, no catchable `MauerDaException`/`WallInFrontException`/etc. — runtime errors are fatal, not catchable via (nonexistent) `try/catch`.
 - 🟡 English API aliases (`move`, `turnLeft`, `pickGrain`, `putGrain`, `frontIsClear`, `grainAvailable`, `mouthEmpty`, `write`, `readNumber`, `readString`) are largely absent from `KNOWN_BUILTINS`; only German names dispatch reliably. `readInt` is used instead of spec's `readNumber`.
@@ -96,7 +96,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 No confusing partial/stub remnants found for: Scheme/JavaScript/Python/Ruby/Prolog consoles, Scratch/FSM/Flowchart visual editors, LEGO integration, 3D/OpenGL view, or Java-style multi-locale i18n bundles. Per `alternate-frontends.md`/`platform-concerns.md`, these are reasonable scope cuts for this port.
 
 ## Prioritization for Fixes
-1. **P0 — correctness bugs likely to confuse users immediately:** string concatenation (`"a"+"b"` → `NaN`), postfix `++`/`--` restricted to identifiers, wall-under-hamster placement.
+1. **P0 — correctness bugs likely to confuse users immediately:** postfix `++`/`--` restricted to identifiers, wall-under-hamster placement.
 2. **P1 — core language gaps blocking Band 2 curriculum content:** real classes/inheritance/interfaces/constructors, `try/catch/throw` + exception hierarchy, `switch/case/break`, English API aliases, `+=`/`-=`, prefix `++`/`--`.
 3. **P2 — fidelity/UX gaps:** zoom controls, per-hamster color sprites, multi-hamster `.ter` loading, program-type marker handling, step-in/out distinction, terrain editor mouth-count UI.
 4. **P3 — polish/maintainability:** `new Function()` replacement, multi-error diagnostics, breakpoint verification, expression evaluation in debugger.
