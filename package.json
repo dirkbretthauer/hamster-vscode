@@ -149,6 +149,8 @@
   },
   "scripts": {
     "compile": "webpack",
+    "smoke:language": "node scripts/language-smoke.cjs",
+    "test": "npm run smoke:language",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map && vsce package"
   },
