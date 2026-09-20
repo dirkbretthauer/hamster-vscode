@@ -154,7 +154,6 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 - `abstract` methods
 
 ### Runner gaps
-- Postfix `++`/`--` only works on plain identifiers (not `arr[i]++` or `this.x++`)
 - `super`, `instanceof`, `try/catch/throw` – not handled
 - No `Territorium`/`Territory` static API
 - No English alias names for built-in commands
