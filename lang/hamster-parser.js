@@ -548,12 +548,21 @@ class Parser {
     parseTryStatement() {
         const tryToken = this.consumeKeyword('try', 'Expected try');
         const block = this.parseBlock();
+        if (this.peek().value === 'finally') {
+            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        }
         this.consumeKeyword('catch', 'Expected catch after try block');
         this.consumeSymbol('(', 'Expected ( after catch');
         const typeToken = this.consumeTypeName(false);
         const parameter = this.consumeIdentifier('Expected catch parameter name');
         this.consumeSymbol(')', 'Expected ) after catch parameter');
         const handler = this.parseBlock();
+        if (this.checkKeyword('catch')) {
+            throw new HamsterParserError('Multiple catch clauses are not supported', this.peek());
+        }
+        if (this.peek().value === 'finally') {
+            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        }
         return {
             type: ASTNodeType.TryStatement,
             block,

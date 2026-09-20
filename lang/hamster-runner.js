@@ -45,12 +45,6 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['Throwable', 'Object'],
 ]);
 
-const BUILTIN_FAILURE_TYPES = new Map([
-    ['vor', 'WallInFrontException'],
-    ['nimm', 'TileEmptyException'],
-    ['gib', 'MouthEmptyException'],
-]);
-
 // ---------------------------------------------------------------------------
 // Hamster instructions that constitute breakpoints (mode A1/B).
 // One step = one hamster instruction.  Everything else executes invisibly.
@@ -557,7 +551,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
         }
 
         if (receiver?.__kind === 'exception' ||
-            exceptionMatchesType(receiver, 'Throwable', state)) {
+            (receiver?.__className && exceptionMatchesType(receiver, 'Throwable', state))) {
             return invokeExceptionMethod(receiver, methodName, args);
         }
 
@@ -583,7 +577,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
                     yield { kind: 'needsInput', message: e.message };
                     continue;
                 }
-                throw normalizeBuiltinFailure(e, methodName);
+                throw normalizeBuiltinFailure(e);
             }
         }
         return result;
@@ -660,7 +654,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
                 yield { kind: 'needsInput', message: e.message };
                 continue;
             }
-            throw normalizeBuiltinFailure(e, calleeName);
+            throw normalizeBuiltinFailure(e);
         }
     }
     return result;
@@ -989,6 +983,12 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
         );
         return;
     }
+    if (BUILTIN_EXCEPTION_SUPERTYPES.has(declaration.superClass)) {
+        const exception = createExceptionValue(declaration.superClass, args);
+        receiver.message = exception.message;
+        receiver.cause = exception.cause;
+        return;
+    }
     if (typeof state.runtime.createObject !== 'function') {
         throw new Error('Unknown superclass ' + declaration.superClass);
     }
@@ -1166,14 +1166,23 @@ function invokeExceptionMethod(exception, methodName, args) {
     if (args.length > 0) {
         throw new Error(methodName + ' expects 0 arguments but got ' + args.length);
     }
+    const message = exception.fields &&
+        Object.prototype.hasOwnProperty.call(exception.fields, 'message')
+        ? exception.fields.message
+        : exception.message || '';
+    const cause = exception.fields &&
+        Object.prototype.hasOwnProperty.call(exception.fields, 'cause')
+        ? exception.fields.cause
+        : exception.cause || null;
     if (methodName === 'getMessage' || methodName === 'getNachricht') {
-        return exception.message;
+        return message;
     }
     if (methodName === 'getCause') {
-        return exception.cause;
+        return cause;
     }
     if (methodName === 'toString') {
-        return exception.toString();
+        const typeName = exception.__className || 'HamsterException';
+        return typeName + (message ? ': ' + message : '');
     }
     throw new Error('Unknown exception method: ' + methodName);
 }
@@ -1203,18 +1212,12 @@ function exceptionMatchesType(value, catchType, state) {
     return false;
 }
 
-function normalizeBuiltinFailure(error, builtinName) {
+function normalizeBuiltinFailure(error) {
     if (error instanceof RunnerPause || error instanceof HamsterLanguageException) {
         return error;
     }
-    const unqualifiedName = builtinName.split('.').pop();
     const message = error instanceof Error ? error.message : String(error);
-    const typeName = error?.hamsterExceptionType ||
-        (/not initiali[sz]ed|nicht initialisiert/i.test(message)
-            ? 'HamsterNotInitializedException'
-            : /already initiali[sz]ed|bereits initialisiert/i.test(message)
-                ? 'HamsterInitializationException'
-                : BUILTIN_FAILURE_TYPES.get(unqualifiedName));
+    const typeName = error?.hamsterExceptionType;
     if (!typeName) return error;
     return new HamsterLanguageException(createExceptionValue(typeName, [message], error));
 }
@@ -1446,7 +1449,7 @@ function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, 
                     yield { kind: 'needsInput', message: error.message };
                     continue;
                 }
-                throw normalizeBuiltinFailure(error, methodName);
+                throw normalizeBuiltinFailure(error);
             }
         }
     }
