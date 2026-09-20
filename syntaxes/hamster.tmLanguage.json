@@ -40,8 +40,8 @@
     "keywords": {
       "patterns": [
         { "name": "keyword.control.hamster", "match": "\\b(if|else|while|do|for|return)\\b" },
-        { "name": "keyword.other.hamster", "match": "\\b(new|this|class|interface|extends|implements|package|import)\\b" },
-        { "name": "storage.modifier.hamster", "match": "\\b(public|private|protected|static|final)\\b" }
+        { "name": "keyword.other.hamster", "match": "\\b(new|this|super|class|interface|extends|implements|throws|package|import)\\b" },
+        { "name": "storage.modifier.hamster", "match": "\\b(public|private|protected|static|final|abstract)\\b" }
       ]
     },
     "types": {

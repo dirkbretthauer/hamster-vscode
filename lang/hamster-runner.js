@@ -29,6 +29,7 @@ const HAMSTER_INSTRUCTIONS = new Set([
     'readInt', 'readString',
     'liesZahl', 'liesZeichenkette', 'liesString',
     'createHamster',
+    'init', 'initialisiere',
     'rechtsUm',
 ]);
 
@@ -50,6 +51,8 @@ const KNOWN_BUILTINS = new Set([
     'getAnzahlKoerner',
     'anzahlKoerner',
     'createHamster',
+    'init',
+    'initialisiere',
     'readInt',
     'readString',
 ]);
@@ -73,11 +76,44 @@ export function createRunnerState(ast, runtime) {
         }
         functions.get(fn.name).push(fn);
     }
-    const mainCandidates = functions.get('main') || [];
-    const main = mainCandidates.find(fn => (fn.parameters || []).length === 0) || null;
-    if (!main) {
-        throw new Error('Program must define void main()');
+    const classes = new Map();
+    const staticFields = new Map();
+    const staticInitializers = [];
+    for (const declaration of flattenClassDeclarations(ast.classes || [])) {
+        if (classes.has(declaration.name)) {
+            throw new Error('Duplicate class or interface name: ' + declaration.name);
+        }
+        classes.set(declaration.name, declaration);
+        const classFields = new Map();
+        const classStaticInitializers = [];
+        for (const field of declaration.fields || []) {
+            if ((field.modifiers || []).includes('static')) {
+                classFields.set(field.name, defaultValueForType(field.varType));
+                if (field.initializer) {
+                    classStaticInitializers.push({
+                        className: declaration.name,
+                        kind: 'field',
+                        order: field.order,
+                        field,
+                    });
+                }
+            }
+        }
+        staticFields.set(declaration.name, classFields);
+        for (const initializer of declaration.initializerBlocks || []) {
+            if (initializer.isStatic) {
+                classStaticInitializers.push({
+                    className: declaration.name,
+                    kind: 'block',
+                    order: initializer.order,
+                    body: initializer.body,
+                });
+            }
+        }
+        classStaticInitializers.sort((left, right) => left.order - right.order);
+        staticInitializers.push(...classStaticInitializers);
     }
+    const main = selectMainFunction(functions.get('main') || []);
     if (!runtime || typeof runtime.callBuiltin !== 'function') {
         throw new Error('Runner runtime must provide callBuiltin(name, args, functions)');
     }
@@ -85,6 +121,9 @@ export function createRunnerState(ast, runtime) {
     const state = {
         ast,
         functions,
+        classes,
+        staticFields,
+        staticInitializers,
         runtime,
         finished: false,
         scopes: [new Map()],
@@ -158,11 +197,49 @@ export function executeRunnerStep(state, opts) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function* programGenerator(state, mainFn) {
+    for (const initializer of state.staticInitializers) {
+        const { className } = initializer;
+        state.frames.push({
+            name: '<static>',
+            loc: initializer.field?.loc || initializer.body?.loc || null,
+            scopeIndex: state.scopes.length,
+            callerLoc: null,
+            className,
+        });
+        try {
+            if (initializer.kind === 'field') {
+                state.staticFields.get(className).set(
+                    initializer.field.name,
+                    yield* evalExpressionGen(initializer.field.initializer, state, 0)
+                );
+            } else {
+                const result = yield* executeStatementGen(initializer.body, state, 0);
+                if (result instanceof ReturnSignal) {
+                    throw new Error('Static initializer blocks cannot return');
+                }
+            }
+        } finally {
+            state.frames.pop();
+        }
+    }
+    const isInstanceMain = mainFn.owner && !(mainFn.modifiers || []).includes('static');
+    if (isInstanceMain) {
+        try {
+            const receiver = yield* instantiateClassGen(
+                mainFn.owner, [], state, 0, mainFn.loc || null
+            );
+            yield* invokeUserFunctionGen(mainFn, [], state, 1, receiver, mainFn.owner);
+        } finally {
+            state.finished = true;
+        }
+        return;
+    }
     state.frames.push({
         name: 'main',
         loc: mainFn.loc || null,
         scopeIndex: state.scopes.length,
         callerLoc: null,
+        className: mainFn.owner || null,
     });
     try {
         yield* executeStatementGen(mainFn.body, state, 0);
@@ -288,6 +365,9 @@ function* evalExpressionGen(node, state, callDepth) {
         case ASTNodeType.ThisExpression:
             return getVariable(state, 'this');
 
+        case ASTNodeType.SuperExpression:
+            throw new Error('super can only be used for constructor or method calls');
+
         case ASTNodeType.UnaryExpression: {
             const value = yield* evalExpressionGen(node.argument, state, callDepth);
             if (node.operator === '!') return !truthy(value);
@@ -332,22 +412,54 @@ function* evalExpressionGen(node, state, callDepth) {
 function* evalCallExpressionGen(node, state, callDepth) {
     // ── Member call: receiver.method(args) ──────────────────────────────
     if (node.callee?.type === ASTNodeType.MemberExpression) {
-        const receiver = yield* evalExpressionGen(node.callee.object, state, callDepth);
         const methodName = node.callee.property;
         const args = [];
         for (const arg of node.arguments) {
             args.push(yield* evalExpressionGen(arg, state, callDepth));
         }
 
+        if (node.callee.object?.type === ASTNodeType.SuperExpression) {
+            const receiver = getVariable(state, 'this');
+            const currentClass = currentClassName(state);
+            const superClass = state.classes.get(currentClass)?.superClass;
+            if (!superClass) {
+                throw new Error('Class ' + currentClass + ' has no superclass method ' + methodName);
+            }
+            return yield* invokeInstanceMethodGen(
+                receiver,
+                methodName,
+                args,
+                state,
+                callDepth,
+                superClass,
+                node.loc
+            );
+        }
+
+        const receiver = yield* evalExpressionGen(node.callee.object, state, callDepth);
+
         // Compatibility: static class calls → user functions
         if (receiver && receiver.__kind === 'class') {
-            const candidates = state.functions.get(methodName) || [];
-            const fn = candidates.find(c => (c.parameters || []).length === args.length);
+            const fn = findMethod(state, receiver.name, methodName, args.length, true);
             if (fn) {
-                // Stop on the call site so the debugger highlights the
-                // function-call line before stepping into the function.
                 yield { kind: 'call', name: fn.name, loc: node.loc || null };
-                return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1);
+                return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1, null, fn.owner);
+            }
+        }
+
+        if (receiver && typeof receiver === 'object' && receiver.__className &&
+            state.classes.has(receiver.__className)) {
+            const fn = findMethod(state, receiver.__className, methodName, args.length, false);
+            if (fn) {
+                yield { kind: 'call', name: fn.name, loc: node.loc || null };
+                return yield* invokeUserFunctionGen(
+                    fn,
+                    args,
+                    state,
+                    callDepth + 1,
+                    receiver,
+                    fn.owner
+                );
             }
         }
 
@@ -389,8 +501,33 @@ function* evalCallExpressionGen(node, state, callDepth) {
         throw new Error('Unsupported call expression callee');
     }
 
+    const receiver = tryGetVariable(state, 'this');
+    const activeClass = receiver?.__className || currentClassName(state);
+    if (activeClass) {
+        const method = findMethod(state, activeClass, calleeName, args.length, receiver == null);
+        if (method) {
+            yield { kind: 'call', name: method.name, loc: node.loc || null };
+            return yield* invokeUserFunctionGen(
+                method,
+                args,
+                state,
+                callDepth + 1,
+                receiver,
+                method.owner
+            );
+        }
+        if (receiver && classHasNativeHamsterBase(state, activeClass) &&
+            (isKnownBuiltinName(calleeName) || isHamsterInstruction(calleeName))) {
+            return yield* invokeInstanceMethodGen(
+                receiver, calleeName, args, state, callDepth, activeClass, node.loc
+            );
+        }
+    }
+
     // User-defined function takes priority
-    const candidates = state.functions.get(calleeName) || [];
+    const candidates = (state.functions.get(calleeName) || []).filter(
+        candidate => candidate.body && !candidate.owner
+    );
     const fn = candidates.find(c => (c.parameters || []).length === args.length);
     if (fn) {
         // Stop on the call site so the debugger highlights the
@@ -435,7 +572,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
 // User function invocation – transparent; each internal hamster instruction
 // produces its own yield (matching mode A1/B compound-step behaviour).
 // ---------------------------------------------------------------------------
-function* invokeUserFunctionGen(fn, args, state, callDepth) {
+function* invokeUserFunctionGen(fn, args, state, callDepth, receiver = null, className = null) {
     if (callDepth > 256) {
         throw new Error('Maximum function call depth exceeded');
     }
@@ -447,15 +584,22 @@ function* invokeUserFunctionGen(fn, args, state, callDepth) {
     for (let i = 0; i < fn.parameters.length; i++) {
         functionScope.set(fn.parameters[i].name, args[i]);
     }
+    if (receiver != null) {
+        functionScope.set('this', receiver);
+    }
 
     state.frames.push({
         name: fn.name,
         loc: fn.loc || null,
         scopeIndex: state.scopes.length,
         callerLoc: (state.lastInstruction && state.lastInstruction.loc) || null,
+        className: className || fn.owner || null,
     });
     state.scopes.push(functionScope);
     try {
+        if (!fn.body) {
+            throw new Error('Cannot invoke abstract method ' + fn.name);
+        }
         const result = yield* executeStatementGen(fn.body, state, callDepth);
         if (result instanceof ReturnSignal) {
             return fn.returnType === 'void' ? undefined : result.value;
@@ -511,16 +655,41 @@ function* evalBinaryExpressionGen(node, state, callDepth) {
 // Member / index / new expression generators
 // ---------------------------------------------------------------------------
 function* evalMemberExpressionGen(node, state, callDepth) {
+    if (node.object?.type === ASTNodeType.SuperExpression) {
+        const receiver = getVariable(state, 'this');
+        const superClass = state.classes.get(currentClassName(state))?.superClass;
+        return readMemberValue(state, receiver, node.property, superClass);
+    }
     const receiver = yield* evalExpressionGen(node.object, state, callDepth);
-    return readMemberValue(state, receiver, node.property);
+    const lexicalClass = node.object?.type === ASTNodeType.ThisExpression
+        ? currentClassName(state)
+        : null;
+    return readMemberValue(state, receiver, node.property, lexicalClass);
 }
 
-function readMemberValue(state, receiver, property) {
+function readMemberValue(state, receiver, property, startClass = null) {
     if (receiver == null) {
         throw new Error('Cannot read property ' + property + ' of null');
     }
     if (Array.isArray(receiver) && property === 'length') {
         return receiver.length;
+    }
+    if (receiver.__kind === 'class') {
+        const owner = findStaticFieldOwner(state, receiver.name, property);
+        if (owner) {
+            return state.staticFields.get(owner).get(property);
+        }
+    }
+    const fieldOwner = findInstanceFieldOwner(
+        state,
+        startClass || receiver.__className,
+        property
+    );
+    if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
+        return receiver.__fieldScopes[fieldOwner][property];
+    }
+    if (receiver.fields && Object.prototype.hasOwnProperty.call(receiver.fields, property)) {
+        return receiver.fields[property];
     }
     if (typeof state.runtime.getMember === 'function') {
         const resolved = state.runtime.getMember(receiver, property, state.functions);
@@ -562,21 +731,188 @@ function* evalNewExpressionGen(node, state, callDepth) {
     for (const arg of (node.arguments || [])) {
         args.push(yield* evalExpressionGen(arg, state, callDepth));
     }
+    const className = resolveCalleeName(node.callee) || 'Object';
+    if (state.classes.has(className)) {
+        return yield* instantiateClassGen(className, args, state, callDepth, node.loc);
+    }
     if (typeof state.runtime.createObject === 'function') {
-        const className = resolveCalleeName(node.callee) || 'Object';
         // Hamster constructor is a breakpoint (CreateInstruction).
         // Yield BEFORE constructing so the debugger highlights the line
         // that is *about to* run.
-        if (className.endsWith('Hamster')) {
+        if (className.endsWith('Hamster') && args.length >= 4) {
             yield { kind: 'instruction', name: 'createHamster', loc: node.loc || null };
         }
         const obj = state.runtime.createObject(className, args, state.functions);
         return obj;
     }
     return {
-        __className: resolveCalleeName(node.callee) || 'Object',
+        __className: className,
         __args: args,
+        fields: Object.create(null),
     };
+}
+
+function* instantiateClassGen(className, args, state, callDepth, loc) {
+    const declaration = state.classes.get(className);
+    if (!declaration || declaration.type !== ASTNodeType.ClassDecl) {
+        throw new Error('Cannot instantiate unknown or non-class type ' + className);
+    }
+    if ((declaration.modifiers || []).includes('abstract')) {
+        throw new Error('Cannot instantiate abstract class ' + className);
+    }
+    const receiver = {
+        __kind: 'object',
+        __className: className,
+        fields: Object.create(null),
+        __fieldScopes: Object.create(null),
+    };
+    const constructor = (declaration.constructors || []).find(
+        candidate => (candidate.parameters || []).length === args.length
+    );
+    if (!constructor && ((declaration.constructors || []).length > 0 || args.length > 0)) {
+        throw new Error('No matching constructor for ' + className + '(' + args.length + ' arguments)');
+    }
+    yield* invokeConstructorGen(declaration, constructor, args, receiver, state, callDepth + 1, loc);
+    return receiver;
+}
+
+function* invokeConstructorGen(declaration, constructor, args, receiver, state, callDepth, loc) {
+    if (callDepth > 256) {
+        throw new Error('Maximum constructor call depth exceeded');
+    }
+    const constructorScope = new Map([['this', receiver]]);
+    if (constructor) {
+        for (let i = 0; i < constructor.parameters.length; i++) {
+            constructorScope.set(constructor.parameters[i].name, args[i]);
+        }
+    }
+    state.frames.push({
+        name: declaration.name,
+        loc: constructor?.loc || declaration.loc || null,
+        scopeIndex: state.scopes.length,
+        callerLoc: loc || null,
+        className: declaration.name,
+    });
+    state.scopes.push(constructorScope);
+    try {
+        const statements = constructor?.body?.statements || [];
+        const chainingCall = getConstructorChainingCall(statements[0]);
+        if (chainingCall?.kind === 'this') {
+            const chainedArgs = [];
+            for (const argument of chainingCall.arguments) {
+                chainedArgs.push(yield* evalExpressionGen(argument, state, callDepth));
+            }
+            const target = (declaration.constructors || []).find(
+                candidate => candidate !== constructor &&
+                    (candidate.parameters || []).length === chainedArgs.length
+            );
+            if (!target) {
+                throw new Error('No matching constructor for this(...) in ' + declaration.name);
+            }
+            yield* invokeConstructorGen(
+                declaration, target, chainedArgs, receiver, state, callDepth + 1, chainingCall.loc
+            );
+        } else {
+            const superArgs = [];
+            if (chainingCall?.kind === 'super') {
+                for (const argument of chainingCall.arguments) {
+                    superArgs.push(yield* evalExpressionGen(argument, state, callDepth));
+                }
+            }
+            yield* initializeSuperclassGen(
+                declaration, superArgs, receiver, state, callDepth + 1, chainingCall?.loc || loc
+            );
+            const declaredFields = Object.create(null);
+            receiver.__fieldScopes[declaration.name] = declaredFields;
+            const instanceInitializers = [
+                ...(declaration.fields || [])
+                    .filter(field => !(field.modifiers || []).includes('static'))
+                    .map(field => ({ kind: 'field', order: field.order, field })),
+                ...(declaration.initializerBlocks || [])
+                    .filter(initializer => !initializer.isStatic)
+                    .map(initializer => ({
+                        kind: 'block',
+                        order: initializer.order,
+                        body: initializer.body,
+                    })),
+            ].sort((left, right) => left.order - right.order);
+            for (const initializer of instanceInitializers) {
+                if (initializer.kind === 'field') {
+                    const field = initializer.field;
+                    const value = field.initializer
+                        ? yield* evalExpressionGen(field.initializer, state, callDepth)
+                        : defaultValueForType(field.varType);
+                    declaredFields[field.name] = value;
+                    receiver.fields[field.name] = value;
+                } else {
+                    const result = yield* executeStatementGen(
+                        initializer.body,
+                        state,
+                        callDepth
+                    );
+                    if (result instanceof ReturnSignal) {
+                        throw new Error('Instance initializer blocks cannot return');
+                    }
+                }
+            }
+        }
+        for (let i = chainingCall ? 1 : 0; i < statements.length; i++) {
+            const result = yield* executeStatementGen(statements[i], state, callDepth);
+            if (result instanceof ReturnSignal) {
+                if (result.value !== undefined) {
+                    throw new Error('Constructors cannot return a value');
+                }
+                return;
+            }
+        }
+    } finally {
+        state.scopes.pop();
+        state.frames.pop();
+    }
+}
+
+function* initializeSuperclassGen(declaration, args, receiver, state, callDepth, loc) {
+    if (!declaration.superClass || declaration.superClass === 'Object') {
+        return;
+    }
+    const superDeclaration = state.classes.get(declaration.superClass);
+    if (superDeclaration) {
+        const constructor = (superDeclaration.constructors || []).find(
+            candidate => (candidate.parameters || []).length === args.length
+        );
+        if (!constructor && (superDeclaration.constructors || []).length > 0) {
+            throw new Error('No matching superclass constructor for ' + declaration.superClass);
+        }
+        yield* invokeConstructorGen(
+            superDeclaration, constructor, args, receiver, state, callDepth + 1, loc
+        );
+        return;
+    }
+    if (typeof state.runtime.createObject !== 'function') {
+        throw new Error('Unknown superclass ' + declaration.superClass);
+    }
+    if (declaration.superClass.endsWith('Hamster') && args.length >= 4) {
+        yield { kind: 'instruction', name: 'createHamster', loc: loc || declaration.loc || null };
+    }
+    const nativeObject = state.runtime.createObject(declaration.superClass, args, state.functions);
+    Object.assign(receiver, nativeObject, {
+        __className: receiver.__className,
+        fields: receiver.fields,
+    });
+}
+
+function getConstructorChainingCall(statement) {
+    const call = statement?.type === ASTNodeType.ExpressionStmt ? statement.expression : null;
+    if (call?.type !== ASTNodeType.CallExpression) {
+        return null;
+    }
+    if (call.callee?.type === ASTNodeType.SuperExpression) {
+        return { kind: 'super', arguments: call.arguments || [], loc: call.loc };
+    }
+    if (call.callee?.type === ASTNodeType.ThisExpression) {
+        return { kind: 'this', arguments: call.arguments || [], loc: call.loc };
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -589,9 +925,30 @@ function* assignTargetGen(state, targetNode, name, value, callDepth) {
 
 function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
     if (targetNode && targetNode.type === ASTNodeType.Identifier) {
+        const receiver = tryGetVariable(state, 'this');
+        const isLocal = hasLocalVariable(state, targetNode.name);
+        const fieldOwner = !isLocal && receiver
+            ? findInstanceFieldOwner(state, currentClassName(state), targetNode.name)
+            : null;
+        const staticOwner = !isLocal && !fieldOwner
+            ? findStaticFieldOwner(state, currentClassName(state), targetNode.name)
+            : null;
         return {
-            get: () => getVariable(state, targetNode.name),
-            set: value => assignVariable(state, targetNode.name, value),
+            get: () => fieldOwner
+                ? receiver.__fieldScopes[fieldOwner][targetNode.name]
+                : staticOwner
+                    ? state.staticFields.get(staticOwner).get(targetNode.name)
+                    : getVariable(state, targetNode.name),
+            set: value => {
+                if (fieldOwner) {
+                    receiver.__fieldScopes[fieldOwner][targetNode.name] = value;
+                    receiver.fields[targetNode.name] = value;
+                } else if (staticOwner) {
+                    state.staticFields.get(staticOwner).set(targetNode.name, value);
+                } else {
+                    assignVariable(state, targetNode.name, value);
+                }
+            },
         };
     }
     if (!targetNode && name) {
@@ -601,13 +958,50 @@ function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
         };
     }
     if (targetNode && targetNode.type === ASTNodeType.MemberExpression) {
-        const receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
+        let receiver;
+        let fieldStartClass = null;
+        if (targetNode.object?.type === ASTNodeType.SuperExpression) {
+            receiver = getVariable(state, 'this');
+            fieldStartClass = state.classes.get(currentClassName(state))?.superClass;
+        } else {
+            receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
+            if (targetNode.object?.type === ASTNodeType.ThisExpression) {
+                fieldStartClass = currentClassName(state);
+            }
+        }
         if (receiver == null) {
             throw new Error('Cannot assign member on null receiver');
         }
         return {
-            get: () => readMemberValue(state, receiver, targetNode.property),
+            get: () => readMemberValue(
+                state,
+                receiver,
+                targetNode.property,
+                fieldStartClass
+            ),
             set: value => {
+                if (receiver.__kind === 'class') {
+                    const owner = findStaticFieldOwner(state, receiver.name, targetNode.property);
+                    if (owner) {
+                        state.staticFields.get(owner).set(targetNode.property, value);
+                        return;
+                    }
+                }
+                const fieldOwner = findInstanceFieldOwner(
+                    state,
+                    fieldStartClass || receiver.__className,
+                    targetNode.property
+                );
+                if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
+                    receiver.__fieldScopes[fieldOwner][targetNode.property] = value;
+                    receiver.fields[targetNode.property] = value;
+                    return;
+                }
+                if (receiver.fields &&
+                    Object.prototype.hasOwnProperty.call(receiver.fields, targetNode.property)) {
+                    receiver.fields[targetNode.property] = value;
+                    return;
+                }
                 if (typeof state.runtime.setMember === 'function') {
                     const handled = state.runtime.setMember(receiver, targetNode.property, value, state.functions);
                     if (handled === true) {
@@ -661,7 +1055,7 @@ function declareVariable(state, name, value) {
 }
 
 function assignVariable(state, name, value) {
-    for (let i = state.scopes.length - 1; i >= 0; i--) {
+    for (const i of visibleScopeIndices(state)) {
         const scope = state.scopes[i];
         if (scope.has(name)) {
             scope.set(name, value);
@@ -672,7 +1066,7 @@ function assignVariable(state, name, value) {
 }
 
 function getVariable(state, name) {
-    for (let i = state.scopes.length - 1; i >= 0; i--) {
+    for (const i of visibleScopeIndices(state)) {
         const scope = state.scopes[i];
         if (scope.has(name)) {
             return scope.get(name);
@@ -681,18 +1075,203 @@ function getVariable(state, name) {
     throw new Error('Unknown variable: ' + name);
 }
 
+function tryGetVariable(state, name) {
+    for (const i of visibleScopeIndices(state)) {
+        if (state.scopes[i].has(name)) {
+            return state.scopes[i].get(name);
+        }
+    }
+    return undefined;
+}
+
+function hasLocalVariable(state, name) {
+    return localScopeIndices(state).some(index => state.scopes[index].has(name));
+}
+
+function localScopeIndices(state) {
+    return visibleScopeIndices(state).filter(index => index !== 0);
+}
+
+function visibleScopeIndices(state) {
+    const frame = state.frames[state.frames.length - 1];
+    const firstLocalScope = frame?.scopeIndex ?? 1;
+    const indices = [];
+    for (let i = state.scopes.length - 1; i >= firstLocalScope; i--) {
+        indices.push(i);
+    }
+    if (state.scopes.length > 0 && !indices.includes(0)) {
+        indices.push(0);
+    }
+    return indices;
+}
+
 function resolveIdentifierValue(state, name) {
-    try {
-        return getVariable(state, name);
-    } catch (error) {
-        if (typeof state.runtime.resolveIdentifier === 'function') {
-            const resolved = state.runtime.resolveIdentifier(name, state.functions);
-            if (resolved !== undefined) {
-                return resolved;
+    for (const index of localScopeIndices(state)) {
+        if (state.scopes[index].has(name)) {
+            return state.scopes[index].get(name);
+        }
+    }
+    const receiver = tryGetVariable(state, 'this');
+    const fieldOwner = receiver
+        ? findInstanceFieldOwner(state, currentClassName(state), name)
+        : null;
+    if (fieldOwner && receiver.__fieldScopes?.[fieldOwner]) {
+        return receiver.__fieldScopes[fieldOwner][name];
+    }
+    const staticOwner = findStaticFieldOwner(state, currentClassName(state), name);
+    if (staticOwner) {
+        return state.staticFields.get(staticOwner).get(name);
+    }
+    if (state.scopes[0]?.has(name)) {
+        return state.scopes[0].get(name);
+    }
+    if (state.classes.has(name)) {
+        return { __kind: 'class', name };
+    }
+    if (typeof state.runtime.resolveIdentifier === 'function') {
+        const resolved = state.runtime.resolveIdentifier(name, state.functions);
+        if (resolved !== undefined) {
+            return resolved;
+        }
+    }
+    throw new Error('Unknown variable: ' + name);
+}
+
+function currentClassName(state) {
+    return state.frames[state.frames.length - 1]?.className || null;
+}
+
+function flattenClassDeclarations(declarations) {
+    const result = [];
+    for (const declaration of declarations) {
+        result.push(declaration);
+        result.push(...flattenClassDeclarations(declaration.nestedClasses || []));
+    }
+    return result;
+}
+
+function selectMainFunction(candidates) {
+    const runnable = candidates.filter(candidate =>
+        candidate.body &&
+        candidate.returnType === 'void' &&
+        (candidate.parameters || []).length === 0
+    );
+    const topLevel = runnable.filter(candidate => !candidate.owner);
+    if (topLevel.length > 1) {
+        throw new Error('Program defines multiple top-level void main() functions');
+    }
+    if (topLevel.length === 1) {
+        return topLevel[0];
+    }
+    const staticMethods = runnable.filter(candidate =>
+        (candidate.modifiers || []).includes('static')
+    );
+    if (staticMethods.length > 1) {
+        throw new Error('Program defines multiple static void main() methods');
+    }
+    if (staticMethods.length === 1) {
+        return staticMethods[0];
+    }
+    const instanceMethods = runnable.filter(candidate => candidate.owner);
+    if (instanceMethods.length > 1) {
+        throw new Error('Program defines multiple instance void main() methods');
+    }
+    if (instanceMethods.length === 1) {
+        return instanceMethods[0];
+    }
+    throw new Error('Program must define void main()');
+}
+
+function findMethod(state, className, methodName, argumentCount, requireStatic) {
+    let current = className;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+        visited.add(current);
+        const declaration = state.classes.get(current);
+        if (!declaration) {
+            return null;
+        }
+
+        const method = (declaration.methods || []).find(candidate => {
+            const isStatic = (candidate.modifiers || []).includes('static');
+            return candidate.name === methodName &&
+                (candidate.parameters || []).length === argumentCount &&
+                (!requireStatic || isStatic);
+        });
+        if (method) {
+            return method;
+        }
+        current = declaration.superClass;
+    }
+    return null;
+}
+
+function findStaticFieldOwner(state, className, fieldName) {
+    let current = className;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+        visited.add(current);
+        if (state.staticFields.get(current)?.has(fieldName)) {
+            return current;
+        }
+        current = state.classes.get(current)?.superClass;
+    }
+    return null;
+}
+
+function findInstanceFieldOwner(state, className, fieldName) {
+    let current = className;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+        visited.add(current);
+        const declaration = state.classes.get(current);
+        if ((declaration?.fields || []).some(field =>
+            field.name === fieldName && !(field.modifiers || []).includes('static'))) {
+            return current;
+        }
+        current = declaration?.superClass;
+    }
+    return null;
+}
+
+function classHasNativeHamsterBase(state, className) {
+    let current = className;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+        visited.add(current);
+        if (current.endsWith('Hamster') && !state.classes.has(current)) {
+            return true;
+        }
+        current = state.classes.get(current)?.superClass;
+    }
+    return false;
+}
+
+function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, startClass, loc) {
+    const method = findMethod(state, startClass, methodName, args.length, false);
+    if (method) {
+        yield { kind: 'call', name: method.name, loc: loc || null };
+        return yield* invokeUserFunctionGen(
+            method, args, state, callDepth + 1, receiver, method.owner
+        );
+    }
+    if (isHamsterInstruction(methodName)) {
+        yield { kind: 'instruction', name: methodName, loc: loc || null };
+    }
+    if (typeof state.runtime.callMethod === 'function') {
+        while (true) {
+            try {
+                return state.runtime.callMethod(receiver, methodName, args, state.functions);
+            } catch (error) {
+                if (error instanceof RunnerPause) {
+                    yield { kind: 'needsInput', message: error.message };
+                    continue;
+                }
+                throw error;
             }
         }
-        throw error;
     }
+    throw new Error('Unknown method: ' + methodName);
 }
 
 function stringifyReceiver(receiver) {

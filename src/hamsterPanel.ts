@@ -972,6 +972,9 @@ export class HamsterPanel {
                 },
                 createObject(className, args) {
                     if (className.endsWith('Hamster')) {
+                        if (args.length===0) {
+                            return {__kind:'hamster',id:null,className};
+                        }
                         if (args.length<4) throw new Error(className+' constructor expects at least 4 arguments');
                         const id = engine.createHamster(Number(args[0]),Number(args[1]),Number(args[2]),Number(args[3]),args.length>=5?Number(args[4]):1);
                         return {__kind:'hamster',id,className};
@@ -994,6 +997,13 @@ export class HamsterPanel {
                 },
                 callMethod(receiver, methodName, args) {
                     if (receiver && receiver.__kind==='hamster') {
+                        if (methodName==='init'||methodName==='initialisiere') {
+                            if(receiver.id!==null) throw new Error(receiver.className+' is already initialized');
+                            if(args.length<4) throw new Error(methodName+' expects at least 4 arguments');
+                            receiver.id=engine.createHamster(Number(args[0]),Number(args[1]),Number(args[2]),Number(args[3]),args.length>=5?Number(args[4]):1);
+                            return undefined;
+                        }
+                        if (receiver.id===null) throw new Error(receiver.className+' is not initialized');
                         const hid=receiver.id;
                         switch(methodName){
                             case 'vor': return engine.vor(hid);

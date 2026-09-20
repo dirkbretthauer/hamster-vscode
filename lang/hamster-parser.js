@@ -2,7 +2,11 @@ import { HamsterLexer, TokenType } from './hamster-lexer.js';
 
 export const ASTNodeType = Object.freeze({
     Program: 'Program',
+    ClassDecl: 'ClassDeclaration',
+    InterfaceDecl: 'InterfaceDeclaration',
     FunctionDecl: 'FunctionDeclaration',
+    FieldDecl: 'FieldDeclaration',
+    ConstructorDecl: 'ConstructorDeclaration',
     Parameter: 'Parameter',
     Block: 'BlockStatement',
     VariableDecl: 'VariableDeclaration',
@@ -24,6 +28,7 @@ export const ASTNodeType = Object.freeze({
     IndexExpression: 'IndexExpression',
     NewExpression: 'NewExpression',
     ThisExpression: 'ThisExpression',
+    SuperExpression: 'SuperExpression',
 });
 
 export class HamsterParserError extends Error {
@@ -74,13 +79,16 @@ class Parser {
     parseCompatibilityProgram() {
         const functions = [];
         const globals = [];
+        const classes = [];
         while (!this.isAtEnd()) {
             if (this.checkKeyword('package') || this.checkKeyword('import')) {
                 this.skipUntilSymbol(';');
                 continue;
             }
-            if (this.checkKeyword('class') || this.checkKeyword('interface')) {
-                functions.push(...this.parseCompatibilityClassLikeDeclaration());
+            if (this.isClassLikeDeclarationAhead()) {
+                const declaration = this.parseClassLikeDeclaration();
+                classes.push(declaration);
+                functions.push(...collectClassMethods(declaration));
                 continue;
             }
             const fn = this.tryParseFunction(true);
@@ -105,49 +113,204 @@ class Parser {
             }
             this.advance();
         }
-        if (this.options.requireMain && !functions.some(fn => fn.name === 'main' && fn.returnType === 'void')) {
+        if (this.options.requireMain &&
+            !functions.some(fn => fn.name === 'main' && fn.returnType === 'void' && fn.body)) {
             throw new HamsterParserError('Program must define void main()', this.peek());
         }
-        return { type: ASTNodeType.Program, functions, globals };
+        return { type: ASTNodeType.Program, functions, globals, classes };
     }
 
-    parseCompatibilityClassLikeDeclaration() {
-        const functions = [];
+    isClassLikeDeclarationAhead() {
+        let idx = this.current;
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx += 1;
+        }
+        const token = this.tokens[idx];
+        return token?.type === TokenType.KEYWORD &&
+            (token.value === 'class' || token.value === 'interface');
+    }
 
-        // consume class/interface keyword and declaration header
-        this.advance();
-        while (!this.isAtEnd() && !this.checkSymbol('{') && !this.checkSymbol(';')) {
-            this.advance();
+    parseClassLikeDeclaration(leadingModifiers = null) {
+        const modifiers = leadingModifiers || this.parseModifiers();
+        const kindToken = this.advance();
+        const nameToken = this.consumeIdentifier(`Expected ${kindToken.value} name`);
+        const isInterface = kindToken.value === 'interface';
+        let superClass = null;
+        const interfaces = [];
+
+        if (this.matchKeyword('extends')) {
+            if (isInterface) {
+                do {
+                    interfaces.push(this.consumeQualifiedName('Expected interface name after extends'));
+                } while (this.matchSymbol(','));
+            } else {
+                superClass = this.consumeQualifiedName('Expected superclass name after extends');
+            }
         }
-        if (this.matchSymbol(';')) {
-            return functions;
-        }
-        if (!this.matchSymbol('{')) {
-            return functions;
+        if (!isInterface && this.matchKeyword('implements')) {
+            do {
+                interfaces.push(this.consumeQualifiedName('Expected interface name after implements'));
+            } while (this.matchSymbol(','));
         }
 
-        let depth = 1;
-        while (!this.isAtEnd() && depth > 0) {
-            if (depth === 1) {
-                const fn = this.tryParseFunction(true);
-                if (fn) {
-                    functions.push(fn);
-                    continue;
+        this.consumeSymbol('{', `Expected { to start ${kindToken.value} body`);
+        const fields = [];
+        const constructors = [];
+        const methods = [];
+        const nestedClasses = [];
+        const initializerBlocks = [];
+        let initializationOrder = 0;
+        while (!this.checkSymbol('}') && !this.isAtEnd()) {
+            if (this.matchSymbol(';')) {
+                continue;
+            }
+            const memberModifiers = this.parseModifiers();
+            if (this.checkSymbol('{')) {
+                if (memberModifiers.some(modifier => modifier !== 'static')) {
+                    throw new HamsterParserError('Initializer blocks may only be static', this.peek());
                 }
-            }
-
-            if (this.matchSymbol('{')) {
-                depth += 1;
+                initializerBlocks.push({
+                    body: this.parseBlock(),
+                    isStatic: memberModifiers.includes('static'),
+                    order: initializationOrder++,
+                });
                 continue;
             }
-            if (this.matchSymbol('}')) {
-                depth -= 1;
+            if (this.checkKeyword('class') || this.checkKeyword('interface')) {
+                nestedClasses.push(this.parseClassLikeDeclaration(memberModifiers));
                 continue;
             }
-            this.advance();
+            if (!isInterface && this.checkToken(TokenType.IDENTIFIER) &&
+                this.peek().value === nameToken.value && this.checkNextSymbol('(')) {
+                constructors.push(this.parseConstructor(nameToken.value, memberModifiers));
+                continue;
+            }
+            const typeToken = this.consumeTypeName(true);
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in member type');
+            }
+            const memberName = this.consumeIdentifier('Expected member name');
+            if (this.checkSymbol('(')) {
+                methods.push(this.parseMethodRest(
+                    memberName,
+                    typeToken.value,
+                    memberModifiers,
+                    nameToken.value,
+                    isInterface
+                ));
+                continue;
+            }
+            if (typeToken.value === 'void') {
+                throw new HamsterParserError('Fields cannot have type void', typeToken);
+            }
+            const declarations = this.parseFieldRest(memberName, typeToken.value, memberModifiers);
+            for (const field of declarations) {
+                field.order = initializationOrder++;
+                fields.push(field);
+            }
         }
+        this.consumeSymbol('}', `Expected } to close ${kindToken.value} body`);
 
-        return functions;
+        return {
+            type: isInterface ? ASTNodeType.InterfaceDecl : ASTNodeType.ClassDecl,
+            name: nameToken.value,
+            superClass,
+            interfaces,
+            modifiers,
+            fields,
+            constructors,
+            methods,
+            nestedClasses,
+            initializerBlocks,
+            loc: locationFrom(kindToken),
+        };
+    }
+
+    parseConstructor(className, modifiers) {
+        const nameToken = this.consumeIdentifier('Expected constructor name');
+        const parameters = this.parseParameterList();
+        this.parseThrowsClause();
+        const body = this.parseBlock();
+        return {
+            type: ASTNodeType.ConstructorDecl,
+            name: className,
+            parameters,
+            body,
+            modifiers,
+            loc: locationFrom(nameToken),
+        };
+    }
+
+    parseMethodRest(nameToken, returnType, modifiers, owner, allowAbstract) {
+        const parameters = this.parseParameterList();
+        this.parseThrowsClause();
+        let body = null;
+        if (this.matchSymbol(';')) {
+            if (!allowAbstract && !modifiers.includes('abstract')) {
+                throw new HamsterParserError('Expected method body', this.previous());
+            }
+        } else {
+            body = this.parseBlock();
+        }
+        return {
+            type: ASTNodeType.FunctionDecl,
+            name: nameToken.value,
+            returnType,
+            parameters,
+            body,
+            modifiers,
+            owner,
+            loc: locationFrom(nameToken),
+        };
+    }
+
+    parseFieldRest(nameToken, varType, modifiers) {
+        const fields = [];
+        let currentName = nameToken;
+        do {
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in field declarator');
+            }
+            let initializer = null;
+            if (this.matchOperator('=')) {
+                initializer = this.parseExpression();
+            }
+            fields.push({
+                type: ASTNodeType.FieldDecl,
+                varType,
+                name: currentName.value,
+                initializer,
+                modifiers,
+                loc: locationFrom(currentName),
+            });
+            if (!this.matchSymbol(',')) {
+                break;
+            }
+            currentName = this.consumeIdentifier('Expected field name after comma');
+        } while (true);
+        this.consumeSymbol(';', 'Expected ; after field declaration');
+        return fields;
+    }
+
+    parseParameterList() {
+        this.consumeSymbol('(', 'Expected ( before parameter list');
+        const parameters = [];
+        if (!this.checkSymbol(')')) {
+            do {
+                parameters.push(this.parseParameter());
+            } while (this.matchSymbol(','));
+        }
+        this.consumeSymbol(')', 'Expected ) after parameter list');
+        return parameters;
+    }
+
+    parseThrowsClause() {
+        if (!this.matchKeyword('throws')) {
+            return;
+        }
+        do {
+            this.consumeQualifiedName('Expected exception type after throws');
+        } while (this.matchSymbol(','));
     }
 
     parseFunction(requireMain) {
@@ -674,6 +837,13 @@ class Parser {
                 loc: locationFrom(token),
             };
         }
+        if (this.matchKeyword('super')) {
+            const token = this.previous();
+            return {
+                type: ASTNodeType.SuperExpression,
+                loc: locationFrom(token),
+            };
+        }
         if (this.matchKeyword('new')) {
             const newToken = this.previous();
             const ctorName = this.consumeIdentifier('Expected constructor/type name after new');
@@ -747,7 +917,9 @@ class Parser {
     }
 
     isAssignmentAhead() {
-        if (!this.checkToken(TokenType.IDENTIFIER) && !this.checkKeyword('this')) return false;
+        if (!this.checkToken(TokenType.IDENTIFIER) &&
+            !this.checkKeyword('this') &&
+            !this.checkKeyword('super')) return false;
         let idx = this.current + 1;
         while (idx < this.tokens.length) {
             const token = this.tokens[idx];
@@ -813,6 +985,12 @@ class Parser {
                 type: ASTNodeType.ThisExpression,
                 loc: locationFrom(token),
             };
+        } else if (this.matchKeyword('super')) {
+            const token = this.previous();
+            target = {
+                type: ASTNodeType.SuperExpression,
+                loc: locationFrom(token),
+            };
         } else {
             const identifier = this.consumeIdentifier('Expected assignment target');
             target = {
@@ -851,10 +1029,36 @@ class Parser {
     }
 
     skipModifiers() {
-        while (this.checkKeyword('public') || this.checkKeyword('private') || this.checkKeyword('protected') ||
-               this.checkKeyword('static') || this.checkKeyword('final')) {
-            this.advance();
+        this.parseModifiers();
+    }
+
+    parseModifiers() {
+        const modifiers = [];
+        while (this.isModifierToken(this.peek())) {
+            modifiers.push(this.advance().value);
         }
+        return modifiers;
+    }
+
+    isModifierToken(token) {
+        return token?.type === TokenType.KEYWORD &&
+            (token.value === 'public' || token.value === 'private' ||
+             token.value === 'protected' || token.value === 'static' ||
+             token.value === 'final' || token.value === 'abstract');
+    }
+
+    consumeQualifiedName(message) {
+        const first = this.consumeIdentifier(message);
+        let name = first.value;
+        while (this.matchSymbol('.')) {
+            name += '.' + this.consumeIdentifier(message).value;
+        }
+        return name;
+    }
+
+    checkNextSymbol(symbol) {
+        const token = this.tokens[this.current + 1];
+        return token?.type === TokenType.SYMBOL && token.value === symbol;
     }
 
     tryParseGlobalVariable() {
@@ -902,7 +1106,8 @@ class Parser {
         while (idx < this.tokens.length) {
             const t = this.tokens[idx];
             if (t.type === TokenType.KEYWORD && (t.value === 'public' || t.value === 'private' ||
-                t.value === 'protected' || t.value === 'static' || t.value === 'final')) {
+                t.value === 'protected' || t.value === 'static' || t.value === 'final' ||
+                t.value === 'abstract')) {
                 idx++;
             } else {
                 break;
@@ -971,31 +1176,6 @@ class Parser {
         }
         if (this.matchSymbol(symbol)) {
             return;
-        }
-    }
-
-    skipClassLikeDeclaration() {
-        this.advance();
-        while (!this.isAtEnd() && !this.checkSymbol('{') && !this.checkSymbol(';')) {
-            this.advance();
-        }
-        if (this.matchSymbol(';')) {
-            return;
-        }
-        if (!this.matchSymbol('{')) {
-            return;
-        }
-        let depth = 1;
-        while (!this.isAtEnd() && depth > 0) {
-            if (this.matchSymbol('{')) {
-                depth += 1;
-                continue;
-            }
-            if (this.matchSymbol('}')) {
-                depth -= 1;
-                continue;
-            }
-            this.advance();
         }
     }
 
@@ -1114,6 +1294,14 @@ function makeBinary(operatorToken, left, right) {
         right,
         loc: locationFrom(operatorToken),
     };
+}
+
+function collectClassMethods(declaration) {
+    const methods = [...(declaration.methods || [])];
+    for (const nested of declaration.nestedClasses || []) {
+        methods.push(...collectClassMethods(nested));
+    }
+    return methods;
 }
 
 function locationFrom(token) {
