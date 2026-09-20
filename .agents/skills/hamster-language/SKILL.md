@@ -113,7 +113,7 @@ The parser currently only supports `=`. To add compound assignment:
 - **Global variables** – `createRunnerState()` iterates `ast.globals[]` and pre-populates the root scope. Currently only literal initializers are evaluated eagerly; complex initializers would need generator-based evaluation.
 - **`for` loops already work** – `parseForStatement()` always desugars into `BlockStatement`/`WhileStatement` nodes, so the runner's `case ASTNodeType.ForStatement:` handler (which throws) is unreachable dead code, not an active gap.
 - **Compound assignment** – Modify the `case ASTNodeType.Assignment:` handler to read the current value, apply the operator, then assign.
-- **String concatenation** – The `+` operator in `evalBinaryExpressionGen` currently coerces both sides to `Number`. To support `String + x`, check if either operand is a string and concatenate instead.
+- **String concatenation** – The `+` operator in `evalBinaryExpressionGen` performs numeric addition unless either operand is a string, in which case it concatenates their string representations.
 
 **Generator protocol:**
 - `yield { kind: 'instruction', name, loc }` – pauses for one "step" in the UI (each hamster command is one visible step).
@@ -155,7 +155,6 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ### Runner gaps
 - Postfix `++`/`--` only works on plain identifiers (not `arr[i]++` or `this.x++`)
-- String `+` concatenation (always coerces to Number)
 - `super`, `instanceof`, `try/catch/throw` – not handled
 - No `Territorium`/`Territory` static API
 - No English alias names for built-in commands
