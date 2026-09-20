@@ -69,8 +69,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 
 ### 5. Terrain Editor (`terrainEditor.ts`)
 - 🟡 No UI to edit the default hamster's mouth/corn inventory.
-- 🟡 `setWall()` does not prevent placing a wall under an existing hamster (original enforced this invariant).
-- 🔴 `setWall()` does not clear the cell's corn count when a wall is placed, unlike the original (`simulation-ui.md`: "toggles walls and clears corn unless a hamster occupies the tile"). Corn can be silently left underneath a wall and resurface if the wall is removed.
+- 🟢 `setWall()` prevents placing a wall under any hamster and clears the cell's corn count when a wall is placed, matching the original terrain-editing invariants.
 - 🟡 Width/height inputs don't refresh to reflect a loaded `.ter` file's actual dimensions (canvas resizes correctly; text inputs stay stale).
 - 🟡 Malformed/short `.ter` files silently fall back to a default 10×8 terrain with no user-visible error.
 - 🟢 On-disk `.ter` format (dimensions, wall/corn grid, corn-count lines, mouth count) is compatible with the original — existing original `.ter` files should load correctly for the common case.
