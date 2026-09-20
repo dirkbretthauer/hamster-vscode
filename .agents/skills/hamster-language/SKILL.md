@@ -138,20 +138,18 @@ Usually no changes needed. The diagnostics system runs the parser in `{ compatib
 These features exist in the spec but are **not yet implemented**. Use this as a backlog reference:
 
 ### Lexer gaps
-- `switch`, `case`, `default`, `break`, `try`, `catch`, `throw`, `instanceof` – not keywords
+- `instanceof` – not a keyword
 - `$` not allowed in identifiers
 - `+=`, `-=` – not recognized as operators
 
 ### Parser gaps
-- `switch/case/break` statement
-- `try/catch/throw` statement
 - Prefix `++`/`--` (only postfix is supported)
 - `+=`, `-=` assignment
 - `instanceof` expression
 - Type cast `(Type) expr`
 
 ### Runner gaps
-- `instanceof`, `try/catch/throw` – not handled
+- `instanceof` – not handled
 - No `Territorium`/`Territory` static API
 - No English alias names for built-in commands
 - No concurrency (`start()`/`run()`)

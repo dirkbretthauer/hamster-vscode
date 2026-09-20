@@ -16,6 +16,11 @@ export const ASTNodeType = Object.freeze({
     WhileStatement: 'WhileStatement',
     DoWhileStatement: 'DoWhileStatement',
     ForStatement: 'ForStatement',
+    SwitchStatement: 'SwitchStatement',
+    SwitchCase: 'SwitchCase',
+    BreakStatement: 'BreakStatement',
+    TryStatement: 'TryStatement',
+    ThrowStatement: 'ThrowStatement',
     ReturnStatement: 'ReturnStatement',
     ConditionalExpression: 'ConditionalExpression',
     BinaryExpression: 'BinaryExpression',
@@ -49,6 +54,7 @@ class Parser {
     constructor(source, options = {}) {
         this.tokens = new HamsterLexer(source).tokenize();
         this.current = 0;
+        this.breakableDepth = 0;
         this.options = {
             requireMain: options.requireMain !== undefined ? options.requireMain : true,
             compatibility: options.compatibility === true,
@@ -399,6 +405,18 @@ class Parser {
         if (this.checkKeyword('for')) {
             return this.parseForStatement();
         }
+        if (this.checkKeyword('switch')) {
+            return this.parseSwitchStatement();
+        }
+        if (this.checkKeyword('try')) {
+            return this.parseTryStatement();
+        }
+        if (this.checkKeyword('throw')) {
+            return this.parseThrowStatement();
+        }
+        if (this.checkKeyword('break')) {
+            return this.parseBreakStatement();
+        }
         if (this.checkKeyword('return')) {
             return this.parseReturnStatement();
         }
@@ -413,7 +431,7 @@ class Parser {
 
     parseDoWhileStatement() {
         const doToken = this.consumeKeyword('do', 'Expected do');
-        const body = this.parseStatement();
+        const body = this.parseBreakableStatement();
         this.consumeKeyword('while', 'Expected while after do-body');
         this.consumeSymbol('(', 'Expected ( after while');
         const test = this.parseExpression();
@@ -451,7 +469,7 @@ class Parser {
         this.consumeSymbol('(', 'Expected ( after while');
         const test = this.parseExpression();
         this.consumeSymbol(')', 'Expected ) after condition');
-        const body = this.parseStatement();
+        const body = this.parseBreakableStatement();
         return {
             type: ASTNodeType.WhileStatement,
             test,
@@ -472,6 +490,122 @@ class Parser {
             argument,
             loc: locationFrom(returnToken),
         };
+    }
+
+    parseSwitchStatement() {
+        const switchToken = this.consumeKeyword('switch', 'Expected switch');
+        this.consumeSymbol('(', 'Expected ( after switch');
+        const discriminant = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after switch expression');
+        this.consumeSymbol('{', 'Expected { to start switch');
+
+        const cases = [];
+        let hasDefault = false;
+        this.breakableDepth += 1;
+        try {
+            while (!this.checkSymbol('}') && !this.isAtEnd()) {
+                let test = null;
+                let clauseToken;
+                if (this.matchKeyword('case')) {
+                    clauseToken = this.previous();
+                    test = this.parseExpression();
+                } else if (this.matchKeyword('default')) {
+                    clauseToken = this.previous();
+                    if (hasDefault) {
+                        throw new HamsterParserError('Switch may only contain one default clause', clauseToken);
+                    }
+                    hasDefault = true;
+                } else {
+                    throw new HamsterParserError('Expected case or default in switch', this.peek());
+                }
+                this.consumeSymbol(':', 'Expected : after switch label');
+                const statements = [];
+                while (!this.checkKeyword('case') &&
+                       !this.checkKeyword('default') &&
+                       !this.checkSymbol('}') &&
+                       !this.isAtEnd()) {
+                    statements.push(this.parseStatement());
+                }
+                cases.push({
+                    type: ASTNodeType.SwitchCase,
+                    test,
+                    statements,
+                    loc: locationFrom(clauseToken),
+                });
+            }
+        } finally {
+            this.breakableDepth -= 1;
+        }
+        this.consumeSymbol('}', 'Expected } to close switch');
+        return {
+            type: ASTNodeType.SwitchStatement,
+            discriminant,
+            cases,
+            loc: locationFrom(switchToken),
+        };
+    }
+
+    parseTryStatement() {
+        const tryToken = this.consumeKeyword('try', 'Expected try');
+        const block = this.parseBlock();
+        if (this.peek().value === 'finally') {
+            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        }
+        this.consumeKeyword('catch', 'Expected catch after try block');
+        this.consumeSymbol('(', 'Expected ( after catch');
+        const typeToken = this.consumeTypeName(false);
+        const parameter = this.consumeIdentifier('Expected catch parameter name');
+        this.consumeSymbol(')', 'Expected ) after catch parameter');
+        const handler = this.parseBlock();
+        if (this.checkKeyword('catch')) {
+            throw new HamsterParserError('Multiple catch clauses are not supported', this.peek());
+        }
+        if (this.peek().value === 'finally') {
+            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        }
+        return {
+            type: ASTNodeType.TryStatement,
+            block,
+            handler: {
+                paramType: typeToken.value,
+                paramName: parameter.value,
+                body: handler,
+                loc: locationFrom(typeToken),
+            },
+            loc: locationFrom(tryToken),
+        };
+    }
+
+    parseThrowStatement() {
+        const throwToken = this.consumeKeyword('throw', 'Expected throw');
+        const argument = this.parseExpression();
+        this.consumeSymbol(';', 'Expected ; after throw');
+        return {
+            type: ASTNodeType.ThrowStatement,
+            argument,
+            loc: locationFrom(throwToken),
+        };
+    }
+
+    parseBreakStatement() {
+        const breakToken = this.consumeKeyword('break', 'Expected break');
+        if (this.breakableDepth === 0) {
+            throw new HamsterParserError('break is only valid inside a loop or switch', breakToken);
+        }
+        this.consumeSymbol(';', 'Expected ; after break');
+        return {
+            type: ASTNodeType.BreakStatement,
+            loc: locationFrom(breakToken),
+        };
+    }
+
+    parseBreakableStatement() {
+        this.breakableDepth += 1;
+        try {
+            return this.parseStatement();
+        } finally {
+            this.breakableDepth -= 1;
+        }
     }
 
     parseForStatement() {
@@ -516,7 +650,7 @@ class Parser {
         }
         this.consumeSymbol(')', 'Expected ) after for-loop update');
 
-        const body = this.parseStatement();
+        const body = this.parseBreakableStatement();
         let whileBody = body;
         if (update) {
             if (whileBody.type === ASTNodeType.Block) {

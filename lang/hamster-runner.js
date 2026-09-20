@@ -16,6 +16,35 @@ class ReturnSignal {
     }
 }
 
+class BreakSignal {}
+
+export class HamsterLanguageException extends Error {
+    constructor(value) {
+        const typeName = exceptionTypeName(value);
+        const detail = value?.message ? ': ' + value.message : '';
+        super(typeName + detail);
+        this.name = typeName;
+        this.value = value;
+    }
+}
+
+const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
+    ['WallInFrontException', 'MauerDaException'],
+    ['MauerDaException', 'HamsterException'],
+    ['TileEmptyException', 'KachelLeerException'],
+    ['KachelLeerException', 'HamsterException'],
+    ['MouthEmptyException', 'MaulLeerException'],
+    ['MaulLeerException', 'HamsterException'],
+    ['HamsterInitializationException', 'HamsterInitialisierungsException'],
+    ['HamsterInitialisierungsException', 'HamsterException'],
+    ['HamsterNotInitializedException', 'HamsterNichtInitialisiertException'],
+    ['HamsterNichtInitialisiertException', 'HamsterException'],
+    ['HamsterException', 'RuntimeException'],
+    ['RuntimeException', 'Exception'],
+    ['Exception', 'Throwable'],
+    ['Throwable', 'Object'],
+]);
+
 // ---------------------------------------------------------------------------
 // Hamster instructions that constitute breakpoints (mode A1/B).
 // One step = one hamster instruction.  Everything else executes invisibly.
@@ -269,7 +298,7 @@ function* executeStatementGen(node, state, callDepth) {
             try {
                 for (const stmt of node.statements || []) {
                     const result = yield* executeStatementGen(stmt, state, callDepth);
-                    if (result instanceof ReturnSignal) return result;
+                    if (isControlSignal(result)) return result;
                 }
             } finally {
                 if (state.scopes.length > 1) state.scopes.pop();
@@ -292,6 +321,7 @@ function* executeStatementGen(node, state, callDepth) {
             while (truthy(yield* evalExpressionGen(node.test, state, callDepth))) {
                 if (++guard > 100000) throw new Error('Loop iteration limit exceeded');
                 const result = yield* executeStatementGen(node.body, state, callDepth);
+                if (result instanceof BreakSignal) return undefined;
                 if (result instanceof ReturnSignal) return result;
             }
             return undefined;
@@ -302,6 +332,7 @@ function* executeStatementGen(node, state, callDepth) {
             do {
                 if (++guard > 100000) throw new Error('Loop iteration limit exceeded');
                 const result = yield* executeStatementGen(node.body, state, callDepth);
+                if (result instanceof BreakSignal) return undefined;
                 if (result instanceof ReturnSignal) return result;
             } while (truthy(yield* evalExpressionGen(node.test, state, callDepth)));
             return undefined;
@@ -309,6 +340,62 @@ function* executeStatementGen(node, state, callDepth) {
 
         case ASTNodeType.ForStatement:
             throw new Error('For statements are not supported at runtime');
+
+        case ASTNodeType.SwitchStatement: {
+            const discriminant = yield* evalExpressionGen(node.discriminant, state, callDepth);
+            let startIndex = -1;
+            let defaultIndex = -1;
+            for (let i = 0; i < node.cases.length; i++) {
+                const switchCase = node.cases[i];
+                if (!switchCase.test) {
+                    defaultIndex = i;
+                    continue;
+                }
+                const caseValue = yield* evalExpressionGen(switchCase.test, state, callDepth);
+                if (javaEquals(discriminant, caseValue)) {
+                    startIndex = i;
+                    break;
+                }
+            }
+            if (startIndex < 0) startIndex = defaultIndex;
+            state.scopes.push(new Map());
+            try {
+                for (let i = startIndex; i >= 0 && i < node.cases.length; i++) {
+                    for (const statement of node.cases[i].statements || []) {
+                        const result = yield* executeStatementGen(statement, state, callDepth);
+                        if (result instanceof BreakSignal) return undefined;
+                        if (result instanceof ReturnSignal) return result;
+                    }
+                }
+            } finally {
+                state.scopes.pop();
+            }
+            return undefined;
+        }
+
+        case ASTNodeType.BreakStatement:
+            return new BreakSignal();
+
+        case ASTNodeType.TryStatement:
+            try {
+                return yield* executeStatementGen(node.block, state, callDepth);
+            } catch (error) {
+                if (!(error instanceof HamsterLanguageException) ||
+                    !exceptionMatchesType(error.value, node.handler.paramType, state)) {
+                    throw error;
+                }
+                state.scopes.push(new Map([[node.handler.paramName, error.value]]));
+                try {
+                    return yield* executeStatementGen(node.handler.body, state, callDepth);
+                } finally {
+                    state.scopes.pop();
+                }
+            }
+
+        case ASTNodeType.ThrowStatement: {
+            const value = yield* evalExpressionGen(node.argument, state, callDepth);
+            throw new HamsterLanguageException(value);
+        }
 
         case ASTNodeType.VariableDecl: {
             let value = defaultValueForType(node.varType);
@@ -463,6 +550,11 @@ function* evalCallExpressionGen(node, state, callDepth) {
             }
         }
 
+        if (receiver?.__kind === 'exception' ||
+            (receiver?.__className && exceptionMatchesType(receiver, 'Throwable', state))) {
+            return invokeExceptionMethod(receiver, methodName, args);
+        }
+
         // Stop before executing a hamster instruction so the debugger can
         // highlight the line that is *about to* run.
         if (isHamsterInstruction(methodName)) {
@@ -485,7 +577,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
                     yield { kind: 'needsInput', message: e.message };
                     continue;
                 }
-                throw e;
+                throw normalizeBuiltinFailure(e);
             }
         }
         return result;
@@ -562,7 +654,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
                 yield { kind: 'needsInput', message: e.message };
                 continue;
             }
-            throw e;
+            throw normalizeBuiltinFailure(e);
         }
     }
     return result;
@@ -735,6 +827,9 @@ function* evalNewExpressionGen(node, state, callDepth) {
     if (state.classes.has(className)) {
         return yield* instantiateClassGen(className, args, state, callDepth, node.loc);
     }
+    if (BUILTIN_EXCEPTION_SUPERTYPES.has(className)) {
+        return createExceptionValue(className, args);
+    }
     if (typeof state.runtime.createObject === 'function') {
         // Hamster constructor is a breakpoint (CreateInstruction).
         // Yield BEFORE constructing so the debugger highlights the line
@@ -888,6 +983,12 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
         );
         return;
     }
+    if (BUILTIN_EXCEPTION_SUPERTYPES.has(declaration.superClass)) {
+        const exception = createExceptionValue(declaration.superClass, args);
+        receiver.message = exception.message;
+        receiver.cause = exception.cause;
+        return;
+    }
     if (typeof state.runtime.createObject !== 'function') {
         throw new Error('Unknown superclass ' + declaration.superClass);
     }
@@ -1038,6 +1139,87 @@ function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
 // ---------------------------------------------------------------------------
 function truthy(value) {
     return !!value;
+}
+
+function isControlSignal(value) {
+    return value instanceof ReturnSignal || value instanceof BreakSignal;
+}
+
+function javaEquals(left, right) {
+    return left === right;
+}
+
+function createExceptionValue(typeName, args = [], cause = null) {
+    const message = args.length > 0 ? String(args[0]) : '';
+    return {
+        __kind: 'exception',
+        __className: typeName,
+        message,
+        cause,
+        toString() {
+            return typeName + (message ? ': ' + message : '');
+        },
+    };
+}
+
+function invokeExceptionMethod(exception, methodName, args) {
+    if (args.length > 0) {
+        throw new Error(methodName + ' expects 0 arguments but got ' + args.length);
+    }
+    const message = exception.fields &&
+        Object.prototype.hasOwnProperty.call(exception.fields, 'message')
+        ? exception.fields.message
+        : exception.message || '';
+    const cause = exception.fields &&
+        Object.prototype.hasOwnProperty.call(exception.fields, 'cause')
+        ? exception.fields.cause
+        : exception.cause || null;
+    if (methodName === 'getMessage' || methodName === 'getNachricht') {
+        return message;
+    }
+    if (methodName === 'getCause') {
+        return cause;
+    }
+    if (methodName === 'toString') {
+        const typeName = exception.__className || 'HamsterException';
+        return typeName + (message ? ': ' + message : '');
+    }
+    throw new Error('Unknown exception method: ' + methodName);
+}
+
+function exceptionTypeName(value) {
+    if (value && typeof value === 'object' && value.__className) {
+        return value.__className;
+    }
+    if (value === null) return 'null';
+    if (typeof value === 'number') return 'int';
+    if (typeof value === 'boolean') return 'boolean';
+    if (typeof value === 'string') return 'String';
+    return 'Throwable';
+}
+
+function exceptionMatchesType(value, catchType, state) {
+    let currentType = exceptionTypeName(value);
+    if (catchType === 'Object') return true;
+    const visited = new Set();
+    while (currentType && !visited.has(currentType)) {
+        if (currentType === catchType) return true;
+        visited.add(currentType);
+        currentType = state.classes.get(currentType)?.superClass ||
+            BUILTIN_EXCEPTION_SUPERTYPES.get(currentType) ||
+            null;
+    }
+    return false;
+}
+
+function normalizeBuiltinFailure(error) {
+    if (error instanceof RunnerPause || error instanceof HamsterLanguageException) {
+        return error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const typeName = error?.hamsterExceptionType;
+    if (!typeName) return error;
+    return new HamsterLanguageException(createExceptionValue(typeName, [message], error));
 }
 
 function defaultValueForType(typeName) {
@@ -1267,7 +1449,7 @@ function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, 
                     yield { kind: 'needsInput', message: error.message };
                     continue;
                 }
-                throw error;
+                throw normalizeBuiltinFailure(error);
             }
         }
     }

@@ -354,9 +354,14 @@ class HamsterPanel {
         function isWall(x, y) {
             return !inside(x, y) || engineState.terrain.walls[y][x] === 1;
         }
+        function hamsterError(type, message) {
+            const error = new Error(message);
+            error.hamsterExceptionType = type;
+            return error;
+        }
         function getHamster(id) {
             const h = engineState.terrain.hamsters.find(x => x.id === id);
-            if (!h) throw new Error('Hamster not initialised');
+            if (!h) throw hamsterError('HamsterNotInitializedException', 'Hamster not initialised');
             return h;
         }
         function engineLog(msg) {
@@ -400,17 +405,17 @@ class HamsterPanel {
             reset() { if(snapshot) engineState=clone(snapshot); engineState.state=0; render(engineState); return clone(engineState); },
             vor(id=-1) {
                 const h=getHamster(id); const nx=h.x+DX[h.dir], ny=h.y+DY[h.dir];
-                if(isWall(nx,ny)) throw new Error('Wall at row='+ny+', col='+nx);
+                if(isWall(nx,ny)) throw hamsterError('WallInFrontException', 'Wall at row='+ny+', col='+nx);
                 h.x=nx; h.y=ny; engineLog('[H'+id+'] vor()'); return clone(engineState);
             },
             linksUm(id=-1) { const h=getHamster(id); h.dir=(h.dir+3)%4; engineLog('[H'+id+'] linksUm()'); return clone(engineState); },
             nimm(id=-1) {
                 const h=getHamster(id); const c=engineState.terrain.corn[h.y][h.x];
-                if(c<=0) throw new Error('No grain at row='+h.y+', col='+h.x);
+                if(c<=0) throw hamsterError('TileEmptyException', 'No grain at row='+h.y+', col='+h.x);
                 engineState.terrain.corn[h.y][h.x]=c-1; h.mouth+=1; engineLog('[H'+id+'] nimm()'); return clone(engineState);
             },
             gib(id=-1) {
-                const h=getHamster(id); if(h.mouth<=0) throw new Error('Hamster mouth is empty');
+                const h=getHamster(id); if(h.mouth<=0) throw hamsterError('MouthEmptyException', 'Hamster mouth is empty');
                 engineState.terrain.corn[h.y][h.x]+=1; h.mouth-=1; engineLog('[H'+id+'] gib()'); return clone(engineState);
             },
             vornFrei(id=-1) { const h=getHamster(id); return !isWall(h.x+DX[h.dir], h.y+DY[h.dir]); },
@@ -981,12 +986,12 @@ class HamsterPanel {
                 callMethod(receiver, methodName, args) {
                     if (receiver && receiver.__kind==='hamster') {
                         if (methodName==='init'||methodName==='initialisiere') {
-                            if(receiver.id!==null) throw new Error(receiver.className+' is already initialized');
+                            if(receiver.id!==null) throw hamsterError('HamsterInitializationException', receiver.className+' is already initialized');
                             if(args.length<4) throw new Error(methodName+' expects at least 4 arguments');
                             receiver.id=engine.createHamster(Number(args[0]),Number(args[1]),Number(args[2]),Number(args[3]),args.length>=5?Number(args[4]):1);
                             return undefined;
                         }
-                        if (receiver.id===null) throw new Error(receiver.className+' is not initialized');
+                        if (receiver.id===null) throw hamsterError('HamsterNotInitializedException', receiver.className+' is not initialized');
                         const hid=receiver.id;
                         switch(methodName){
                             case 'vor': return engine.vor(hid);
