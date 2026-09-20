@@ -452,7 +452,10 @@ export class HamsterPanel {
                 engineState.terminal.needsInput=true; engineState.terminal.prompt=String(prompt||'Enter text:'); return '';
             },
             setWall(col,row,value) {
-                if(inside(col,row)) engineState.terrain.walls[row][col]=value?1:0;
+                if(!inside(col,row)) return clone(engineState);
+                if(value && engineState.terrain.hamsters.some(h => h.x===col && h.y===row)) return clone(engineState);
+                engineState.terrain.walls[row][col]=value?1:0;
+                if(value) engineState.terrain.corn[row][col]=0;
                 return clone(engineState);
             },
             setCorn(col,row,count) {

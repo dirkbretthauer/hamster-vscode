@@ -223,7 +223,10 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
                 render(engineState);
             },
             setWall(col,row,value) {
-                if(inside(col,row)) engineState.terrain.walls[row][col]=value?1:0;
+                if(!inside(col,row)) return;
+                if(value && engineState.terrain.hamsters.some(h => h.x===col && h.y===row)) return;
+                engineState.terrain.walls[row][col]=value?1:0;
+                if(value) engineState.terrain.corn[row][col]=0;
             },
             setCorn(col,row,count) {
                 if(inside(col,row)) engineState.terrain.corn[row][col]=Math.max(0,count|0);
