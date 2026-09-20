@@ -296,12 +296,13 @@ function* evalExpressionGen(node, state, callDepth) {
         }
 
         case ASTNodeType.PostfixExpression: {
-            if ((node.operator !== '--' && node.operator !== '++') || node.argument.type !== ASTNodeType.Identifier) {
-                throw new Error('Only identifier++/identifier-- is supported');
+            if (node.operator !== '--' && node.operator !== '++') {
+                throw new Error('Unsupported postfix operator: ' + node.operator);
             }
-            const current = Number(getVariable(state, node.argument.name));
+            const reference = yield* resolveAssignmentTargetGen(state, node.argument, null, callDepth);
+            const current = Number(reference.get());
             const delta = node.operator === '++' ? 1 : -1;
-            assignVariable(state, node.argument.name, current + delta);
+            reference.set(current + delta);
             return current;
         }
 
@@ -511,27 +512,35 @@ function* evalBinaryExpressionGen(node, state, callDepth) {
 // ---------------------------------------------------------------------------
 function* evalMemberExpressionGen(node, state, callDepth) {
     const receiver = yield* evalExpressionGen(node.object, state, callDepth);
+    return readMemberValue(state, receiver, node.property);
+}
+
+function readMemberValue(state, receiver, property) {
     if (receiver == null) {
-        throw new Error('Cannot read property ' + node.property + ' of null');
+        throw new Error('Cannot read property ' + property + ' of null');
     }
-    if (Array.isArray(receiver) && node.property === 'length') {
+    if (Array.isArray(receiver) && property === 'length') {
         return receiver.length;
     }
     if (typeof state.runtime.getMember === 'function') {
-        const resolved = state.runtime.getMember(receiver, node.property, state.functions);
+        const resolved = state.runtime.getMember(receiver, property, state.functions);
         if (resolved !== undefined) {
             return resolved;
         }
     }
-    if (typeof receiver === 'object' && Object.prototype.hasOwnProperty.call(receiver, node.property)) {
-        return receiver[node.property];
+    if (typeof receiver === 'object' && Object.prototype.hasOwnProperty.call(receiver, property)) {
+        return receiver[property];
     }
-    throw new Error('Unknown member: ' + node.property);
+    throw new Error('Unknown member: ' + property);
 }
 
 function* evalIndexExpressionGen(node, state, callDepth) {
     const target = yield* evalExpressionGen(node.object, state, callDepth);
     const index = Number(yield* evalExpressionGen(node.index, state, callDepth));
+    return readIndexValue(target, index);
+}
+
+function readIndexValue(target, index) {
     if (Array.isArray(target)) {
         return target[index];
     }
@@ -574,39 +583,58 @@ function* evalNewExpressionGen(node, state, callDepth) {
 // Assignment target generator
 // ---------------------------------------------------------------------------
 function* assignTargetGen(state, targetNode, name, value, callDepth) {
+    const reference = yield* resolveAssignmentTargetGen(state, targetNode, name, callDepth);
+    reference.set(value);
+}
+
+function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
     if (targetNode && targetNode.type === ASTNodeType.Identifier) {
-        assignVariable(state, targetNode.name, value);
-        return;
+        return {
+            get: () => getVariable(state, targetNode.name),
+            set: value => assignVariable(state, targetNode.name, value),
+        };
     }
     if (!targetNode && name) {
-        assignVariable(state, name, value);
-        return;
+        return {
+            get: () => getVariable(state, name),
+            set: value => assignVariable(state, name, value),
+        };
     }
     if (targetNode && targetNode.type === ASTNodeType.MemberExpression) {
         const receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
         if (receiver == null) {
             throw new Error('Cannot assign member on null receiver');
         }
-        if (typeof state.runtime.setMember === 'function') {
-            const handled = state.runtime.setMember(receiver, targetNode.property, value, state.functions);
-            if (handled === true) {
-                return;
-            }
-        }
-        if (typeof receiver === 'object') {
-            receiver[targetNode.property] = value;
-            return;
-        }
-        throw new Error('Unsupported assignment target');
+        return {
+            get: () => readMemberValue(state, receiver, targetNode.property),
+            set: value => {
+                if (typeof state.runtime.setMember === 'function') {
+                    const handled = state.runtime.setMember(receiver, targetNode.property, value, state.functions);
+                    if (handled === true) {
+                        return;
+                    }
+                }
+                if (typeof receiver === 'object') {
+                    receiver[targetNode.property] = value;
+                    return;
+                }
+                throw new Error('Unsupported assignment target');
+            },
+        };
     }
     if (targetNode && targetNode.type === ASTNodeType.IndexExpression) {
         const receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
         const index = Number(yield* evalExpressionGen(targetNode.index, state, callDepth));
-        if (Array.isArray(receiver)) {
-            receiver[index] = value;
-            return;
-        }
-        throw new Error('Unsupported index assignment target');
+        return {
+            get: () => readIndexValue(receiver, index),
+            set: value => {
+                if (Array.isArray(receiver)) {
+                    receiver[index] = value;
+                    return;
+                }
+                throw new Error('Unsupported index assignment target');
+            },
+        };
     }
     throw new Error('Unsupported assignment target');
 }

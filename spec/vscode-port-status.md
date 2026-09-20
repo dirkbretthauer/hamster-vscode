@@ -53,7 +53,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 
 ### 3. Language: Runner/Interpreter (`lang/hamster-runner.js`)
 - 🟢 Binary `+` performs numeric addition unless either operand is a string, matching Java string concatenation semantics.
-- 🔴 Postfix `++`/`--` only supports plain identifiers (`arr[i]++`, `this.x++` fail).
+- 🟢 Postfix `++`/`--` supports identifiers, array elements, and object members.
 - 🔴 No exception system: no `HamsterException` hierarchy, no catchable `MauerDaException`/`WallInFrontException`/etc. — runtime errors are fatal, not catchable via (nonexistent) `try/catch`.
 - 🟡 English API aliases (`move`, `turnLeft`, `pickGrain`, `putGrain`, `frontIsClear`, `grainAvailable`, `mouthEmpty`, `write`, `readNumber`, `readString`) are largely absent from `KNOWN_BUILTINS`; only German names dispatch reliably. `readInt` is used instead of spec's `readNumber`.
 - 🟡 No `Territorium`/`Territory` static API, no direction/color constants beyond ad-hoc `NORD/OST/SUED/WEST` in `createRuntime()`.
