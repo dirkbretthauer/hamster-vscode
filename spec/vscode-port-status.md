@@ -31,13 +31,13 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 | Compiler pipeline | `compiler-pipeline.md` | 🟡 "Compile" is parse-validate only; no program-type marker handling |
 | Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement); 🟡 step-in/out not distinct |
 | Hamster language — Band 1 | `hamster-language.md` | 🟡 ~70–75% complete |
-| Hamster language — Band 2 (OO) | `hamster-language.md` | 🔴 ~15–25% complete |
+| Hamster language — Band 2 (OO) | `hamster-language.md` | 🟡 Core class model implemented; exceptions/concurrency remain |
 | Alternate frontends / 3D / i18n | `alternate-frontends.md`, `platform-concerns.md` | 🟢 Correctly out of scope, no confusing remnants |
 
 ## Detailed Findings
 
 ### 1. Language: Lexer (`lang/hamster-lexer.js`)
-- 🔴 Missing keywords: `switch`, `case`, `default`, `break`, `try`, `catch`, `throw`, `instanceof`, `super`, `abstract`.
+- 🔴 Missing keywords: `switch`, `case`, `default`, `break`, `try`, `catch`, `throw`, `instanceof`.
 - 🔴 Missing compound-assignment operators `+=`, `-=`.
 - 🟡 Identifier grammar excludes `$` (spec allows `[A-Za-z_$][A-Za-z0-9_$]*`).
 - 🟡 Unknown string escapes are silently accepted (drops backslash) instead of raising a lexical error.
@@ -45,8 +45,8 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 
 ### 2. Language: Parser (`lang/hamster-parser.js`)
 - 🟢 Full Band 1 statement/expression grammar: `if/else`, `while`, `do/while`, `for` (desugared), `return`, blocks, calls, member access, indexing, postfix `++`/`--`.
-- 🔴 No real class AST: "compatibility mode" scans class/interface headers and discards name, `extends`, `implements`, fields, constructors, modifiers — only flattens methods into the global function list.
-- 🔴 No `super`, `instanceof`, casts, `switch/case/break`, `try/catch/throw`, `abstract`.
+- 🟢 Compatibility mode retains classes and interfaces with modifiers, inheritance, implemented interfaces, fields, constructors, and methods.
+- 🔴 No `instanceof`, casts, `switch/case/break`, or `try/catch/throw`.
 - 🟡 Prefix `++`/`--` not parsed (only postfix).
 - 🟡 Array creation (`new Type[n]`) parses multi-dimensional syntax but the parser/runner combination only really supports one dimension.
 - 🟡 Unsupported top-level syntax can be silently skipped in non-strict compatibility mode rather than reported as an error.
@@ -54,6 +54,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 ### 3. Language: Runner/Interpreter (`lang/hamster-runner.js`)
 - 🟢 Binary `+` performs numeric addition unless either operand is a string, matching Java string concatenation semantics.
 - 🟢 Postfix `++`/`--` supports identifiers, array elements, and object members.
+- 🟢 User-defined objects support inherited fields, constructor chaining, virtual method dispatch, and `this`/`super` access.
 - 🔴 No exception system: no `HamsterException` hierarchy, no catchable `MauerDaException`/`WallInFrontException`/etc. — runtime errors are fatal, not catchable via (nonexistent) `try/catch`.
 - 🟡 English API aliases (`move`, `turnLeft`, `pickGrain`, `putGrain`, `frontIsClear`, `grainAvailable`, `mouthEmpty`, `write`, `readNumber`, `readString`) are largely absent from `KNOWN_BUILTINS`; only German names dispatch reliably. `readInt` is used instead of spec's `readNumber`.
 - 🟡 No `Territorium`/`Territory` static API, no direction/color constants beyond ad-hoc `NORD/OST/SUED/WEST` in `createRuntime()`.

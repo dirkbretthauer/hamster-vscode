@@ -24,11 +24,13 @@ const KEYWORDS = new Set([
     'protected',
     'static',
     'final',
+    'abstract',
     'package',
     'import',
     'extends',
     'implements',
     'this',
+    'super',
 ]);
 
 const SINGLE_CHAR_TOKENS = new Map([

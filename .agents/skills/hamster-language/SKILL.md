@@ -138,7 +138,7 @@ Usually no changes needed. The diagnostics system runs the parser in `{ compatib
 These features exist in the spec but are **not yet implemented**. Use this as a backlog reference:
 
 ### Lexer gaps
-- `super`, `abstract`, `switch`, `case`, `default`, `break`, `try`, `catch`, `throw`, `instanceof` – not keywords
+- `switch`, `case`, `default`, `break`, `try`, `catch`, `throw`, `instanceof` – not keywords
 - `$` not allowed in identifiers
 - `+=`, `-=` – not recognized as operators
 
@@ -147,14 +147,11 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 - `try/catch/throw` statement
 - Prefix `++`/`--` (only postfix is supported)
 - `+=`, `-=` assignment
-- `super.method()` expression
 - `instanceof` expression
 - Type cast `(Type) expr`
-- Full class/interface/constructor/field declarations (only compatibility-mode extraction)
-- `abstract` methods
 
 ### Runner gaps
-- `super`, `instanceof`, `try/catch/throw` – not handled
+- `instanceof`, `try/catch/throw` – not handled
 - No `Territorium`/`Territory` static API
 - No English alias names for built-in commands
 - No concurrency (`start()`/`run()`)
