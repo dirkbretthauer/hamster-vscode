@@ -89,6 +89,84 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 (async () => {
     const { parser, runner } = await loadLanguageModules();
 
+    assert.equal(
+        parser.detectProgramType('void main() {}'),
+        parser.ProgramType.Imperative
+    );
+    assert.equal(
+        parser.detectProgramType('/*object-oriented program*/void main() {}'),
+        parser.ProgramType.ObjectOriented
+    );
+    assert.equal(
+        parser.detectProgramType('\uFEFF/*class*/class TestHamster extends Hamster {}'),
+        parser.ProgramType.Class
+    );
+    assert.equal(
+        parser.detectProgramType('/*python program*/vor()'),
+        parser.ProgramType.Python
+    );
+
+    const imperativeProgram = parser.parseProgram(`
+        /*imperative program*/
+        void main() {
+            vor();
+        }
+    `);
+    assert.equal(imperativeProgram.programType, parser.ProgramType.Imperative);
+
+    const objectProgram = parser.parseProgram(`
+        /*object-oriented program*/
+        class Helper {}
+        void main() {
+            Hamster hamster = new Hamster();
+        }
+    `);
+    assert.equal(objectProgram.programType, parser.ProgramType.ObjectOriented);
+    assert.equal(objectProgram.classes.length, 1);
+
+    const classProgram = parser.parseProgram(`
+        /*class*/
+        class TestHamster extends Hamster {
+            void turn() {
+                linksUm();
+            }
+        }
+    `, { strict: true });
+    assert.equal(classProgram.programType, parser.ProgramType.Class);
+    assert.equal(classProgram.classes.length, 1);
+    assert.throws(
+        () => parser.parseProgram('/*object-oriented program*/class Helper {}', { strict: true }),
+        /Program must define void main/
+    );
+    assert.throws(
+        () => parser.parseProgram('class Helper {}', { strict: true }),
+        /Program must define void main/
+    );
+    assert.throws(
+        () => parser.parseProgram('/*python program*/vor()'),
+        /Program type 'python' is not supported/
+    );
+    assert.throws(
+        () => parser.parseProgram('/*functional program*/void main() {}'),
+        /Unsupported program type marker 'functional program'/
+    );
+
+    const helperBeforeMain = parser.parseProgram(`
+        void helper() {
+            vor();
+        }
+        void main() {
+            helper();
+        }
+    `, { strict: true });
+    assert.equal(helperBeforeMain.functions[0].name, 'helper');
+    assert.deepEqual(helperBeforeMain.classes, []);
+
+    const incompleteProgram = parser.parseProgram('int result = 1;', {
+        requireMain: false,
+    });
+    assert.equal(incompleteProgram.globals.length, 1);
+
     const switchState = runProgram(parser, runner, `
         int result = 0;
         void main() {

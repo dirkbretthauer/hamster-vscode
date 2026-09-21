@@ -977,7 +977,7 @@ class HamsterPanel {
             }
             clearLog();
             try {
-                window.parseProgram(currentSource, {compatibility:true, requireMain:true, strict:true});
+                window.parseProgram(currentSource, {strict:true});
                 appendLog('Compilation successful \\u2013 no errors found.');
                 statusEl.textContent = 'Compiled successfully';
                 vscode.postMessage({type:'info', message:'Compilation successful \\u2013 no errors found.'});
@@ -1055,7 +1055,9 @@ class HamsterPanel {
             runnerState = null;
             clearLog();
             try {
-                const ast = window.parseProgram(currentSource, {compatibility:true, requireMain:true});
+                const ast = window.parseProgram(currentSource);
+                if (ast.programType==='class')
+                    throw new Error('Class programs cannot be run directly.');
                 runnerState = window.createRunnerState(ast, createRuntime());
                 return true;
             } catch(e) {
@@ -1550,7 +1552,7 @@ class HamsterDiagnostics {
             return;
         const diagnostics = [];
         try {
-            this.parseProgram(document.getText(), { compatibility: true, requireMain: false });
+            this.parseProgram(document.getText(), { requireMain: false });
         }
         catch (e) {
             const line = (e.token?.line ?? 1) - 1;

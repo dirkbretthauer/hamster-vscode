@@ -46,9 +46,79 @@ export class HamsterParserError extends Error {
     }
 }
 
+export const ProgramType = Object.freeze({
+    Imperative: 'imperative',
+    ObjectOriented: 'object-oriented',
+    Class: 'class',
+    Scheme: 'scheme',
+    Prolog: 'prolog',
+    Python: 'python',
+    JavaScript: 'javascript',
+    Ruby: 'ruby',
+    Lego: 'lego',
+});
+
+const PROGRAM_TYPE_MARKERS = new Map([
+    ['imperative program', ProgramType.Imperative],
+    ['object-oriented program', ProgramType.ObjectOriented],
+    ['class', ProgramType.Class],
+    ['scheme program', ProgramType.Scheme],
+    ['prolog program', ProgramType.Prolog],
+    ['python program', ProgramType.Python],
+    ['javascript program', ProgramType.JavaScript],
+    ['ruby program', ProgramType.Ruby],
+    ['lego program', ProgramType.Lego],
+]);
+
+function readProgramTypeMarker(source) {
+    const marker = /^\uFEFF?\s*\/\*\s*([^*]+?)\s*\*\//.exec(source ?? '');
+    if (!marker) return null;
+    const markerText = marker[1];
+    if (PROGRAM_TYPE_MARKERS.has(markerText) || markerText.endsWith('program')) {
+        return markerText;
+    }
+    return null;
+}
+
+export function detectProgramType(source) {
+    const marker = readProgramTypeMarker(source);
+    return marker ? PROGRAM_TYPE_MARKERS.get(marker) : ProgramType.Imperative;
+}
+
 export function parseProgram(source, options = {}) {
-    const parser = new Parser(source, options);
-    return parser.parseProgram();
+    const marker = readProgramTypeMarker(source);
+    const programType = marker ? PROGRAM_TYPE_MARKERS.get(marker) : ProgramType.Imperative;
+    if (marker && !programType) {
+        throw new HamsterParserError(
+            `Unsupported program type marker '${marker}'`,
+            { line: 1, column: 1 }
+        );
+    }
+    const supportedTypes = new Set([
+        ProgramType.Imperative,
+        ProgramType.ObjectOriented,
+        ProgramType.Class,
+    ]);
+    if (!supportedTypes.has(programType)) {
+        throw new HamsterParserError(
+            `Program type '${programType}' is not supported by this extension`,
+            { line: 1, column: 1 }
+        );
+    }
+    const parserOptions = {
+        ...options,
+        compatibility: options.compatibility !== undefined
+            ? options.compatibility
+            : true,
+        requireMain: options.requireMain !== undefined
+            ? options.requireMain
+            : programType !== ProgramType.Class,
+    };
+    if (options.strict === undefined) {
+        parserOptions.strict = parserOptions.requireMain;
+    }
+    const ast = new Parser(source, parserOptions).parseProgram();
+    return { ...ast, programType };
 }
 
 class Parser {
@@ -68,7 +138,10 @@ class Parser {
             return this.parseCompatibilityProgram();
         }
         if (this.isAtEnd()) {
-            throw new HamsterParserError('Program must define void main()', this.peek());
+            if (this.options.requireMain) {
+                throw new HamsterParserError('Program must define void main()', this.peek());
+            }
+            return { type: ASTNodeType.Program, functions: [], globals: [], classes: [] };
         }
         const functions = [];
         const globals = [];
@@ -76,11 +149,17 @@ class Parser {
         while (!this.isAtEnd() && this.isTypeKeywordAhead() && !this.isFunctionAhead()) {
             globals.push(this.parseVariableDeclaration());
         }
-        functions.push(this.parseFunction(true));
+        if (this.isAtEnd()) {
+            if (this.options.requireMain) {
+                throw new HamsterParserError('Program must define void main()', this.peek());
+            }
+            return { type: ASTNodeType.Program, functions, globals, classes: [] };
+        }
+        functions.push(this.parseFunction(this.options.requireMain));
         while (!this.isAtEnd()) {
             functions.push(this.parseFunction(false));
         }
-        return { type: ASTNodeType.Program, functions, globals };
+        return { type: ASTNodeType.Program, functions, globals, classes: [] };
     }
 
     parseCompatibilityProgram() {
