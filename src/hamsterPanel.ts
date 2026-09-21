@@ -697,6 +697,9 @@ export class HamsterPanel {
         let dbgRunning = false;
         let dbgBreakpoints = new Set();
         let dbgTimerId = null;
+        let dbgOperationId = 0;
+        const DEBUG_STEP_BATCH_SIZE = 100;
+        const DEBUG_STEP_TIME_SLICE_MS = 8;
 
         // ── Message handling from extension host ──
         window.addEventListener('message', event => {
@@ -750,11 +753,24 @@ export class HamsterPanel {
             if (dbgTimerId !== null) { clearTimeout(dbgTimerId); dbgTimerId = null; }
         }
 
-        function dbgLaunch(msg) {
-            dbgActive = true;
-            dbgRunning = false;
-            dbgBreakpoints = new Set((msg.breakpoints||[]).map(n => n|0));
+        function dbgStartOperation() {
+            dbgOperationId++;
             dbgClearTimer();
+            cancelTerminalInput();
+            return dbgOperationId;
+        }
+
+        function dbgCancelOperation() {
+            dbgOperationId++;
+            dbgRunning = false;
+            dbgClearTimer();
+            cancelTerminalInput();
+        }
+
+        function dbgLaunch(msg) {
+            dbgCancelOperation();
+            dbgActive = true;
+            dbgBreakpoints = new Set((msg.breakpoints||[]).map(n => n|0));
             if (runTimerId !== null) { clearTimeout(runTimerId); runTimerId = null; }
             runnerState = null;
             engine.reset();
@@ -815,6 +831,10 @@ export class HamsterPanel {
 
         function dbgStepOut() {
             const startingDepth = dbgFrameDepth();
+            if (startingDepth <= 1) {
+                dbgContinue();
+                return;
+            }
             dbgStepUntil('step', () => dbgFrameDepth() < startingDepth);
         }
 
@@ -824,28 +844,65 @@ export class HamsterPanel {
                 dbgTerminate();
                 return;
             }
-            dbgClearTimer();
+            const operationId = dbgStartOperation();
+            const startingLoc = runnerState.lastInstruction && runnerState.lastInstruction.loc;
+            const startingLine = startingLoc ? startingLoc.line : null;
+            let hasLeftStartingLine = false;
             dbgRunning = true;
 
-            function advance() {
-                if (!dbgRunning || !dbgActive) return;
-                try {
-                    const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
-                    render(engineState);
-                    dbgFlushNewLogs();
-                    if (!hasMore) { dbgTerminate(); return; }
+            function stop(reason, loc) {
+                dbgRunning = false;
+                render(engineState);
+                dbgFlushNewLogs();
+                vscode.postMessage({
+                    type:'dbg:stopped',
+                    reason,
+                    line: loc ? loc.line : 1,
+                    column: loc ? loc.column : 1,
+                });
+            }
 
-                    if (shouldStop()) {
-                        dbgRunning = false;
-                        const loc = runnerState.lastInstruction && runnerState.lastInstruction.loc;
-                        vscode.postMessage({type:'dbg:stopped', reason, line: loc ? loc.line : 1, column: loc ? loc.column : 1});
-                        return;
+            function advance() {
+                if (!dbgRunning || !dbgActive || operationId !== dbgOperationId) return;
+                try {
+                    const batchStartedAt = performance.now();
+                    let batchSize = 0;
+                    let shouldRender = false;
+                    while (batchSize < DEBUG_STEP_BATCH_SIZE &&
+                           performance.now() - batchStartedAt < DEBUG_STEP_TIME_SLICE_MS) {
+                        const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
+                        const instruction = runnerState.lastInstruction || {};
+                        const loc = instruction.loc;
+                        batchSize++;
+                        shouldRender ||= instruction.kind === 'instruction';
+                        if (loc && (startingLine === null || loc.line !== startingLine)) {
+                            hasLeftStartingLine = true;
+                        }
+                        if (!hasMore) {
+                            render(engineState);
+                            dbgFlushNewLogs();
+                            dbgTerminate();
+                            return;
+                        }
+                        if (loc && hasLeftStartingLine && dbgBreakpoints.has(loc.line)) {
+                            stop('breakpoint', loc);
+                            return;
+                        }
+                        if (shouldStop()) {
+                            stop(reason, loc);
+                            return;
+                        }
+                    }
+                    if (shouldRender) {
+                        render(engineState);
+                        dbgFlushNewLogs();
                     }
                     dbgTimerId = setTimeout(advance, 0);
                 } catch(e) {
                     if (window.RunnerPause && e instanceof window.RunnerPause) {
                         dbgRunning = false;
                         requestTerminalInput(e.message, () => {
+                            if (!dbgActive || operationId !== dbgOperationId) return;
                             dbgRunning = true;
                             advance();
                         });
@@ -864,9 +921,10 @@ export class HamsterPanel {
 
         function dbgContinue() {
             if (!dbgActive) return;
+            const operationId = dbgStartOperation();
             dbgRunning = true;
             function tick() {
-                if (!dbgRunning || !dbgActive) return;
+                if (!dbgRunning || !dbgActive || operationId !== dbgOperationId) return;
                 if (!runnerState || runnerState.finished) { dbgTerminate(); return; }
                 try {
                     const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
@@ -892,7 +950,11 @@ export class HamsterPanel {
                 } catch(e) {
                     if (window.RunnerPause && e instanceof window.RunnerPause) {
                         dbgRunning = false;
-                        requestTerminalInput(e.message, dbgContinue);
+                        requestTerminalInput(e.message, () => {
+                            if (!dbgActive || operationId !== dbgOperationId) return;
+                            dbgRunning = true;
+                            tick();
+                        });
                         return;
                     }
                     const m = 'Runtime error: ' + (e.message||e);
@@ -906,25 +968,20 @@ export class HamsterPanel {
         }
 
         function dbgPause() {
-            dbgRunning = false;
-            dbgClearTimer();
+            dbgCancelOperation();
             const loc = runnerState && runnerState.lastInstruction && runnerState.lastInstruction.loc;
             vscode.postMessage({type:'dbg:stopped', reason:'pause', line: loc ? loc.line : 1, column: loc ? loc.column : 1});
         }
 
         function dbgTerminate() {
-            dbgRunning = false;
-            dbgClearTimer();
-            cancelTerminalInput();
+            dbgCancelOperation();
             vscode.postMessage({type:'dbg:terminated'});
             statusEl.textContent = 'Debug session ended';
         }
 
         function dbgDisconnect() {
             dbgActive = false;
-            dbgRunning = false;
-            dbgClearTimer();
-            cancelTerminalInput();
+            dbgCancelOperation();
             vscode.postMessage({type:'clearHighlight'});
         }
 
