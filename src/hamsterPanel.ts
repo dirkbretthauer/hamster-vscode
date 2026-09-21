@@ -394,6 +394,7 @@ export class HamsterPanel {
         const spriteNames = ['hamsternorth.png','hamstereast.png','hamstersouth.png','hamsterwest.png'];
         const sprites = spriteNames.map(name => {
             const img = new Image();
+            img.crossOrigin = 'anonymous';
             img.src = '${assetsUri}/' + name;
             img.onload = () => {
                 tintedSprites.clear();
@@ -580,43 +581,52 @@ export class HamsterPanel {
             for(const h of hamsters) drawHamster(h);
         }
 
-        function getHamsterColor(color) {
-            const index = Number.isFinite(color) ? Math.trunc(color) : 0;
-            return HAMSTER_COLORS[((index%HAMSTER_COLORS.length)+HAMSTER_COLORS.length)%HAMSTER_COLORS.length];
+        function getHamsterColorIndex(color) {
+            const numericColor = Number(color);
+            const index = Number.isFinite(numericColor) ? Math.trunc(numericColor) : 0;
+            return ((index%HAMSTER_COLORS.length)+HAMSTER_COLORS.length)%HAMSTER_COLORS.length;
         }
 
-        function getTintedSprite(sprite, dir, color) {
-            const colorIndex = HAMSTER_COLORS.indexOf(color);
+        function getTintedSprite(sprite, dir, colorIndex) {
             const cacheKey = dir+':'+colorIndex;
             const cached = tintedSprites.get(cacheKey);
             if(cached) return cached;
 
-            const tinted = document.createElement('canvas');
-            tinted.width = sprite.naturalWidth;
-            tinted.height = sprite.naturalHeight;
-            const tintedContext = tinted.getContext('2d');
-            tintedContext.drawImage(sprite,0,0);
-            const imageData = tintedContext.getImageData(0,0,tinted.width,tinted.height);
-            const pixels = imageData.data;
-            for(let i=0;i<pixels.length;i+=4) {
-                if(pixels[i+2]>pixels[i] && pixels[i+2]>pixels[i+1]) {
-                    pixels[i]=color.rgb[0];
-                    pixels[i+1]=color.rgb[1];
-                    pixels[i+2]=color.rgb[2];
+            try {
+                const color = HAMSTER_COLORS[colorIndex];
+                const tinted = document.createElement('canvas');
+                tinted.width = sprite.naturalWidth;
+                tinted.height = sprite.naturalHeight;
+                const tintedContext = tinted.getContext('2d');
+                if(!tintedContext) throw new Error('Could not create a canvas context for sprite tinting.');
+                tintedContext.drawImage(sprite,0,0);
+                const imageData = tintedContext.getImageData(0,0,tinted.width,tinted.height);
+                const pixels = imageData.data;
+                for(let i=0;i<pixels.length;i+=4) {
+                    if(pixels[i+2]>pixels[i] && pixels[i+2]>pixels[i+1]) {
+                        pixels[i]=color.rgb[0];
+                        pixels[i+1]=color.rgb[1];
+                        pixels[i+2]=color.rgb[2];
+                    }
                 }
+                tintedContext.putImageData(imageData,0,0);
+                tintedSprites.set(cacheKey,tinted);
+                return tinted;
+            } catch(error) {
+                console.error('Failed to tint hamster sprite; using the original sprite.',error);
+                tintedSprites.set(cacheKey,sprite);
+                return sprite;
             }
-            tintedContext.putImageData(imageData,0,0);
-            tintedSprites.set(cacheKey,tinted);
-            return tinted;
         }
 
         function drawHamster(h) {
             const dir=((h.dir%4)+4)%4;
             const sprite=sprites[dir];
-            const color=getHamsterColor(h.color);
+            const colorIndex=getHamsterColorIndex(h.color);
+            const color=HAMSTER_COLORS[colorIndex];
             if(sprite && sprite.complete && sprite.naturalWidth>0) {
                 const x=h.x*cellSize, y=h.y*cellSize, pad=Math.max(1,Math.floor(cellSize*0.08));
-                ctx.drawImage(getTintedSprite(sprite,dir,color),x+pad,y+pad,cellSize-pad*2,cellSize-pad*2);
+                ctx.drawImage(getTintedSprite(sprite,dir,colorIndex),x+pad,y+pad,cellSize-pad*2,cellSize-pad*2);
                 if(h.mouth>0) {
                     const bx=x+cellSize*0.78, by=y+cellSize*0.22;
                     ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(bx,by,cellSize*0.16,0,Math.PI*2); ctx.fill();
