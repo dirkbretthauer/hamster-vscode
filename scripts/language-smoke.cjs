@@ -101,6 +101,10 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         parser.detectProgramType('\uFEFF/*class*/class TestHamster extends Hamster {}'),
         parser.ProgramType.Class
     );
+    assert.equal(
+        parser.detectProgramType('/*python program*/vor()'),
+        parser.ProgramType.Python
+    );
 
     const imperativeProgram = parser.parseProgram(`
         /*imperative program*/
@@ -136,8 +140,32 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     );
     assert.throws(
         () => parser.parseProgram('class Helper {}', { strict: true }),
-        /Expected type keyword/
+        /Program must define void main/
     );
+    assert.throws(
+        () => parser.parseProgram('/*python program*/vor()'),
+        /Program type 'python' is not supported/
+    );
+    assert.throws(
+        () => parser.parseProgram('/*functional program*/void main() {}'),
+        /Unsupported program type marker 'functional program'/
+    );
+
+    const helperBeforeMain = parser.parseProgram(`
+        void helper() {
+            vor();
+        }
+        void main() {
+            helper();
+        }
+    `, { strict: true });
+    assert.equal(helperBeforeMain.functions[0].name, 'helper');
+    assert.deepEqual(helperBeforeMain.classes, []);
+
+    const incompleteProgram = parser.parseProgram('int result = 1;', {
+        requireMain: false,
+    });
+    assert.equal(incompleteProgram.globals.length, 1);
 
     const switchState = runProgram(parser, runner, `
         int result = 0;
