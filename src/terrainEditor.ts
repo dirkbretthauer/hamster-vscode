@@ -144,7 +144,10 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         const ctx = canvas.getContext('2d');
 
         const CELL = 48;
-        const COLORS = ['#f5c518','#e74c3c','#2ecc71','#3498db','#9b59b6','#e67e22'];
+        const HAMSTER_COLORS = [
+            '#0000ff','#ff0000','#00ff00','#ffff00','#00ffff',
+            '#ff00ff','#ffc800','#ffafaf','#808080','#ffffff',
+        ];
         const DIRS = ['\\u2191','\\u2192','\\u2193','\\u2190'];
         const DIR_TO_TER = ['^','>','v','<'];
         const DX = [0, 1, 0, -1];
@@ -279,7 +282,10 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
                 return;
             }
             const px=h.x*CELL+CELL/2, py=h.y*CELL+CELL/2, r=CELL*0.36;
-            ctx.fillStyle=COLORS[h.color%COLORS.length];
+            const numericColor=Number(h.color);
+            const colorIndex=Number.isFinite(numericColor)?Math.trunc(numericColor):0;
+            const normalizedColorIndex=((colorIndex%HAMSTER_COLORS.length)+HAMSTER_COLORS.length)%HAMSTER_COLORS.length;
+            ctx.fillStyle=HAMSTER_COLORS[normalizedColorIndex];
             ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
             ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.font='bold '+(CELL*0.4)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(DIRS[dir],px,py);
             if(h.mouth>0) {

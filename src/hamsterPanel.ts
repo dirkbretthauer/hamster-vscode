@@ -374,16 +374,32 @@ export class HamsterPanel {
         const MIN_CELL_SIZE = 4;
         const MAX_CELL_SIZE = 96;
         const ZOOM_STEP = 4;
-        const COLORS = ['#f5c518','#e74c3c','#2ecc71','#3498db','#9b59b6','#e67e22'];
+        const HAMSTER_COLORS = [
+            {css:'#0000ff', rgb:[0,0,255]},
+            {css:'#ff0000', rgb:[255,0,0]},
+            {css:'#00ff00', rgb:[0,255,0]},
+            {css:'#ffff00', rgb:[255,255,0]},
+            {css:'#00ffff', rgb:[0,255,255]},
+            {css:'#ff00ff', rgb:[255,0,255]},
+            {css:'#ffc800', rgb:[255,200,0]},
+            {css:'#ffafaf', rgb:[255,175,175]},
+            {css:'#808080', rgb:[128,128,128]},
+            {css:'#ffffff', rgb:[255,255,255]},
+        ];
         const DIRS = ['\\u2191','\\u2192','\\u2193','\\u2190'];
         const DX = [0, 1, 0, -1];
         const DY = [-1, 0, 1, 0];
 
+        const tintedSprites = new Map();
         const spriteNames = ['hamsternorth.png','hamstereast.png','hamstersouth.png','hamsterwest.png'];
         const sprites = spriteNames.map(name => {
             const img = new Image();
+            img.crossOrigin = 'anonymous';
             img.src = '${assetsUri}/' + name;
-            img.onload = () => { if (engineState) render(engineState); };
+            img.onload = () => {
+                tintedSprites.clear();
+                if (engineState) render(engineState);
+            };
             return img;
         });
 
@@ -565,12 +581,52 @@ export class HamsterPanel {
             for(const h of hamsters) drawHamster(h);
         }
 
+        function getHamsterColorIndex(color) {
+            const numericColor = Number(color);
+            const index = Number.isFinite(numericColor) ? Math.trunc(numericColor) : 0;
+            return ((index%HAMSTER_COLORS.length)+HAMSTER_COLORS.length)%HAMSTER_COLORS.length;
+        }
+
+        function getTintedSprite(sprite, dir, colorIndex) {
+            const cacheKey = dir+':'+colorIndex;
+            const cached = tintedSprites.get(cacheKey);
+            if(cached) return cached;
+
+            try {
+                const color = HAMSTER_COLORS[colorIndex];
+                const tinted = document.createElement('canvas');
+                tinted.width = sprite.naturalWidth;
+                tinted.height = sprite.naturalHeight;
+                const tintedContext = tinted.getContext('2d');
+                if(!tintedContext) throw new Error('Could not create a canvas context for sprite tinting.');
+                tintedContext.drawImage(sprite,0,0);
+                const imageData = tintedContext.getImageData(0,0,tinted.width,tinted.height);
+                const pixels = imageData.data;
+                for(let i=0;i<pixels.length;i+=4) {
+                    if(pixels[i+2]>pixels[i] && pixels[i+2]>pixels[i+1]) {
+                        pixels[i]=color.rgb[0];
+                        pixels[i+1]=color.rgb[1];
+                        pixels[i+2]=color.rgb[2];
+                    }
+                }
+                tintedContext.putImageData(imageData,0,0);
+                tintedSprites.set(cacheKey,tinted);
+                return tinted;
+            } catch(error) {
+                console.error('Failed to tint hamster sprite; using the original sprite.',error);
+                tintedSprites.set(cacheKey,sprite);
+                return sprite;
+            }
+        }
+
         function drawHamster(h) {
             const dir=((h.dir%4)+4)%4;
             const sprite=sprites[dir];
+            const colorIndex=getHamsterColorIndex(h.color);
+            const color=HAMSTER_COLORS[colorIndex];
             if(sprite && sprite.complete && sprite.naturalWidth>0) {
                 const x=h.x*cellSize, y=h.y*cellSize, pad=Math.max(1,Math.floor(cellSize*0.08));
-                ctx.drawImage(sprite,x+pad,y+pad,cellSize-pad*2,cellSize-pad*2);
+                ctx.drawImage(getTintedSprite(sprite,dir,colorIndex),x+pad,y+pad,cellSize-pad*2,cellSize-pad*2);
                 if(h.mouth>0) {
                     const bx=x+cellSize*0.78, by=y+cellSize*0.22;
                     ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(bx,by,cellSize*0.16,0,Math.PI*2); ctx.fill();
@@ -579,8 +635,7 @@ export class HamsterPanel {
                 return;
             }
             const px=h.x*cellSize+cellSize/2, py=h.y*cellSize+cellSize/2, r=cellSize*0.36;
-            const color=COLORS[h.color%COLORS.length];
-            ctx.fillStyle=color; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
+            ctx.fillStyle=color.css; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
             ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.font='bold '+(cellSize*0.4)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(DIRS[dir],px,py);
             if(h.mouth>0) {
                 ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(px+r*0.7,py-r*0.7,cellSize*0.18,0,Math.PI*2); ctx.fill();
