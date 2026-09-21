@@ -66,7 +66,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users.
 
 ### 4. Simulation Rendering (`hamsterPanel.ts` webview)
-- 🟡 No zoom control — fixed `CELL = 48`px; spec (`simulation-ui.md`) describes a 32px default with ±4 zoom steps.
+- 🟢 Simulation zoom controls use the original 32px default, ±4px steps, and 4px minimum.
 - 🟡 All hamsters render with the same 4 direction sprites (`assets/hamster{north,south,east,west}.png`); the `COLORS` palette only applies in the image-failed-to-load circle fallback, not the primary rendering path — no true per-hamster-color visuals as in the original's `ColorFilter`-recolored sprites.
 - 🟡 `.ter` loading only ever updates the single default hamster (`id:-1`) for each direction marker; multiple direction markers in one file do not spawn independent hamsters.
 - 🟢 Terrain/corn/wall model (width/height/walls/corn grids, default hamster id -1) matches `domain-model.md` semantics.
