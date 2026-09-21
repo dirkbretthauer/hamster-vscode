@@ -64,6 +64,8 @@ const MULTI_CHAR_OPERATORS = new Map([
     ['||', 'OR'],
     ['++', 'INC'],
     ['--', 'DEC'],
+    ['+=', 'PLUS_ASSIGN'],
+    ['-=', 'MINUS_ASSIGN'],
 ]);
 
 const SINGLE_CHAR_OPERATORS = new Map([

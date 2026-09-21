@@ -25,6 +25,7 @@ export const ASTNodeType = Object.freeze({
     ConditionalExpression: 'ConditionalExpression',
     BinaryExpression: 'BinaryExpression',
     UnaryExpression: 'UnaryExpression',
+    PrefixExpression: 'PrefixExpression',
     PostfixExpression: 'PostfixExpression',
     Literal: 'Literal',
     Identifier: 'Identifier',
@@ -717,12 +718,13 @@ class Parser {
 
     parseForAssignment() {
         const target = this.parseAssignableExpression();
-        this.consumeOperator('=', 'Expected = in assignment');
+        const operator = this.consumeAssignmentOperator();
         const value = this.parseExpression();
         return {
             type: ASTNodeType.Assignment,
             name: target.type === ASTNodeType.Identifier ? target.name : null,
             target,
+            operator: operator.value,
             value,
             loc: target.loc,
         };
@@ -755,16 +757,24 @@ class Parser {
 
     parseAssignmentStatement() {
         const target = this.parseAssignableExpression();
-        this.consumeOperator('=', 'Expected = in assignment');
+        const operator = this.consumeAssignmentOperator();
         const value = this.parseExpression();
         this.consumeSymbol(';', 'Expected ; after assignment');
         return {
             type: ASTNodeType.Assignment,
             name: target.type === ASTNodeType.Identifier ? target.name : null,
             target,
+            operator: operator.value,
             value,
             loc: target.loc,
         };
+    }
+
+    consumeAssignmentOperator() {
+        if (this.matchOperator('=') || this.matchOperator('+=') || this.matchOperator('-=')) {
+            return this.previous();
+        }
+        throw new HamsterParserError('Expected =, +=, or -= in assignment', this.peek());
     }
 
     parseExpressionStatement() {
@@ -860,6 +870,17 @@ class Parser {
     }
 
     parseUnary() {
+        if (this.matchOperator('++') || this.matchOperator('--')) {
+            const operator = this.previous();
+            const argument = this.parseUnary();
+            this.ensureAssignableUpdateTarget(argument, operator);
+            return {
+                type: ASTNodeType.PrefixExpression,
+                operator: operator.value,
+                argument,
+                loc: locationFrom(operator),
+            };
+        }
         if (this.matchOperator('!') || this.matchOperator('-')) {
             const operator = this.previous();
             const argument = this.parseUnary();
@@ -917,6 +938,7 @@ class Parser {
         }
         if (this.matchOperator('++') || this.matchOperator('--')) {
             const operator = this.previous();
+            this.ensureAssignableUpdateTarget(expr, operator);
             expr = {
                 type: ASTNodeType.PostfixExpression,
                 operator: operator.value,
@@ -925,6 +947,18 @@ class Parser {
             };
         }
         return expr;
+    }
+
+    ensureAssignableUpdateTarget(argument, operator) {
+        if (argument.type === ASTNodeType.Identifier ||
+            argument.type === ASTNodeType.MemberExpression ||
+            argument.type === ASTNodeType.IndexExpression) {
+            return;
+        }
+        throw new HamsterParserError(
+            `Operator ${operator.value} requires an assignable target`,
+            operator
+        );
     }
 
     parsePrimary() {
@@ -1074,7 +1108,8 @@ class Parser {
                 if (depth !== 0) return false;
                 continue;
             }
-            return token.type === TokenType.OPERATOR && token.value === '=';
+            return token.type === TokenType.OPERATOR &&
+                (token.value === '=' || token.value === '+=' || token.value === '-=');
         }
         return false;
     }

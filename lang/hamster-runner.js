@@ -52,10 +52,13 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
 const HAMSTER_INSTRUCTIONS = new Set([
     'vor', 'linksUm', 'nimm', 'gib',
     'vornFrei', 'kornDa', 'maulLeer',
+    'move', 'turnLeft', 'pickGrain', 'putGrain',
+    'frontIsClear', 'grainAvailable', 'mouthEmpty',
     'getReihe', 'getSpalte', 'getBlickrichtung',
     'getAnzahlKoerner', 'anzahlKoerner',
-    'schreib',
-    'readInt', 'readString',
+    'getRow', 'getColumn', 'getDirection', 'getNumberOfGrains',
+    'schreib', 'write',
+    'readInt', 'readNumber', 'readString',
     'liesZahl', 'liesZeichenkette', 'liesString',
     'createHamster',
     'init', 'initialisiere',
@@ -74,22 +77,38 @@ const KNOWN_BUILTINS = new Set([
     'vornFrei',
     'kornDa',
     'maulLeer',
+    'move',
+    'turnLeft',
+    'pickGrain',
+    'putGrain',
+    'frontIsClear',
+    'grainAvailable',
+    'mouthEmpty',
     'getReihe',
     'getSpalte',
     'getBlickrichtung',
     'getAnzahlKoerner',
     'anzahlKoerner',
+    'getRow',
+    'getColumn',
+    'getDirection',
+    'getNumberOfGrains',
     'createHamster',
     'init',
     'initialisiere',
+    'schreib',
+    'write',
+    'liesZahl',
+    'liesZeichenkette',
+    'liesString',
     'readInt',
+    'readNumber',
     'readString',
 ]);
 
 function isKnownBuiltinName(name) {
     if (KNOWN_BUILTINS.has(name)) return true;
     if (name === 'Math.random') return true;
-    if (name.endsWith('.getStandardHamster') || name.endsWith('.getStandardHamsterAlsDrehHamster')) return true;
     return false;
 }
 
@@ -407,8 +426,13 @@ function* executeStatementGen(node, state, callDepth) {
         }
 
         case ASTNodeType.Assignment: {
-            const value = yield* evalExpressionGen(node.value, state, callDepth);
-            yield* assignTargetGen(state, node.target ?? null, node.name, value, callDepth);
+            const reference = yield* resolveAssignmentTargetGen(
+                state, node.target ?? null, node.name, callDepth
+            );
+            const operator = node.operator || '=';
+            const current = operator === '=' ? undefined : reference.get();
+            const right = yield* evalExpressionGen(node.value, state, callDepth);
+            reference.set(applyAssignmentOperator(operator, current, right));
             return undefined;
         }
 
@@ -460,6 +484,17 @@ function* evalExpressionGen(node, state, callDepth) {
             if (node.operator === '!') return !truthy(value);
             if (node.operator === '-') return -Number(value);
             throw new Error('Unsupported unary operator: ' + node.operator);
+        }
+
+        case ASTNodeType.PrefixExpression: {
+            if (node.operator !== '--' && node.operator !== '++') {
+                throw new Error('Unsupported prefix operator: ' + node.operator);
+            }
+            const reference = yield* resolveAssignmentTargetGen(state, node.argument, null, callDepth);
+            const delta = node.operator === '++' ? 1 : -1;
+            const updated = Number(reference.get()) + delta;
+            reference.set(updated);
+            return updated;
         }
 
         case ASTNodeType.PostfixExpression: {
@@ -1022,6 +1057,18 @@ function getConstructorChainingCall(statement) {
 function* assignTargetGen(state, targetNode, name, value, callDepth) {
     const reference = yield* resolveAssignmentTargetGen(state, targetNode, name, callDepth);
     reference.set(value);
+}
+
+function applyAssignmentOperator(operator, current, right) {
+    if (operator === '=') return right;
+    if (operator === '+=') {
+        if (typeof current === 'string' || typeof right === 'string') {
+            return String(current) + String(right);
+        }
+        return Number(current) + Number(right);
+    }
+    if (operator === '-=') return Number(current) - Number(right);
+    throw new Error('Unsupported assignment operator: ' + operator);
 }
 
 function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {

@@ -207,6 +207,29 @@ class HamsterPanel {
             background: var(--vscode-editor-background);
         }
         #log .log-error { color: var(--vscode-errorForeground); }
+        #terminal-input {
+            display: none;
+            gap: 6px;
+            align-items: center;
+            padding: 6px 0;
+        }
+        #terminal-input.visible { display: flex; }
+        #terminal-prompt { flex: 0 1 auto; }
+        #terminal-value {
+            flex: 1;
+            min-width: 80px;
+            padding: 3px 5px;
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border, #3a3d41);
+        }
+        #terminal-input button {
+            padding: 4px 10px;
+            cursor: pointer;
+            color: var(--vscode-button-foreground);
+            background: var(--vscode-button-background);
+            border: none;
+        }
         #status {
             font-size: 12px;
             opacity: 0.8;
@@ -290,6 +313,11 @@ class HamsterPanel {
         <canvas id="terrain" width="480" height="384"></canvas>
     </div>
     <div id="status">Loading...</div>
+    <form id="terminal-input">
+        <label id="terminal-prompt" for="terminal-value"></label>
+        <input id="terminal-value" type="text" autocomplete="off">
+        <button type="submit">Enter</button>
+    </form>
     <div id="log"></div>
 
     <script nonce="${nonce}">
@@ -299,6 +327,9 @@ class HamsterPanel {
         const ctx = canvas.getContext('2d');
         const logEl = document.getElementById('log');
         const statusEl = document.getElementById('status');
+        const terminalForm = document.getElementById('terminal-input');
+        const terminalPrompt = document.getElementById('terminal-prompt');
+        const terminalValue = document.getElementById('terminal-value');
         const speedInput = document.getElementById('speed');
 
         const CELL = 48;
@@ -322,6 +353,7 @@ class HamsterPanel {
         let runTimerId = null;
         let runnerState = null;
         let currentSource = '';
+        let resumeAfterInput = null;
 
         const clone = obj => JSON.parse(JSON.stringify(obj));
 
@@ -647,7 +679,7 @@ class HamsterPanel {
                 vscode.postMessage({type:'dbg:stopped', reason, line: loc ? loc.line : 1, column: loc ? loc.column : 1});
             } catch(e) {
                 if (window.RunnerPause && e instanceof window.RunnerPause) {
-                    vscode.postMessage({type:'dbg:stopped', reason:'pause', line: 1, column: 1});
+                    requestTerminalInput(e.message, () => dbgStepOnce(reason));
                     return;
                 }
                 const m = 'Runtime error: ' + (e.message||e);
@@ -688,7 +720,7 @@ class HamsterPanel {
                 } catch(e) {
                     if (window.RunnerPause && e instanceof window.RunnerPause) {
                         dbgRunning = false;
-                        vscode.postMessage({type:'dbg:stopped', reason:'pause'});
+                        requestTerminalInput(e.message, dbgContinue);
                         return;
                     }
                     const m = 'Runtime error: ' + (e.message||e);
@@ -711,6 +743,7 @@ class HamsterPanel {
         function dbgTerminate() {
             dbgRunning = false;
             dbgClearTimer();
+            cancelTerminalInput();
             vscode.postMessage({type:'dbg:terminated'});
             statusEl.textContent = 'Debug session ended';
         }
@@ -719,6 +752,7 @@ class HamsterPanel {
             dbgActive = false;
             dbgRunning = false;
             dbgClearTimer();
+            cancelTerminalInput();
             vscode.postMessage({type:'clearHighlight'});
         }
 
@@ -856,7 +890,14 @@ class HamsterPanel {
             engine.start();
             statusEl.textContent = 'Running...';
             function tick() {
-                const hasMore = doStepInternal();
+                const hasMore = doStepInternal(() => {
+                    statusEl.textContent = 'Running...';
+                    runTimerId = setTimeout(tick, 0);
+                });
+                if (resumeAfterInput) {
+                    runTimerId = null;
+                    return;
+                }
                 if (hasMore) {
                     runTimerId = setTimeout(tick, parseInt(speedInput.value));
                 } else {
@@ -872,12 +913,14 @@ class HamsterPanel {
                 if (!compileProgram()) return;
                 engine.start();
             }
-            const hasMore = doStepInternal();
+            const hasMore = doStepInternal(doStep);
+            if (resumeAfterInput) return;
             statusEl.textContent = hasMore ? 'Stepped' : 'Finished';
         }
 
         function doStop() {
             if (runTimerId !== null) { clearTimeout(runTimerId); runTimerId = null; }
+            cancelTerminalInput();
             statusEl.textContent = 'Stopped';
         }
 
@@ -912,7 +955,7 @@ class HamsterPanel {
             }
         }
 
-        function doStepInternal() {
+        function doStepInternal(resumeOnInput) {
             if (!runnerState || runnerState.finished) return false;
             try {
                 const progressed = window.executeRunnerStep(runnerState);
@@ -934,6 +977,7 @@ class HamsterPanel {
             } catch(e) {
                 if (window.RunnerPause && e instanceof window.RunnerPause) {
                     render(engineState);
+                    requestTerminalInput(e.message, resumeOnInput);
                     return true;
                 }
                 appendLog('Runtime error: '+(e.message||e), true);
@@ -949,6 +993,100 @@ class HamsterPanel {
             const first=args[0];
             if(first && typeof first==='object' && first.__kind==='hamster') return Number(first.id);
             return Number(first);
+        }
+
+        const hamsterMethodAliases = Object.freeze({
+            move:'vor',
+            turnLeft:'linksUm',
+            pickGrain:'nimm',
+            putGrain:'gib',
+            frontIsClear:'vornFrei',
+            grainAvailable:'kornDa',
+            mouthEmpty:'maulLeer',
+            getRow:'getReihe',
+            getColumn:'getSpalte',
+            getDirection:'getBlickrichtung',
+            getNumberOfGrains:'getAnzahlKoerner',
+            write:'schreib',
+            readNumber:'liesZahl',
+            readInt:'liesZahl',
+            readString:'liesZeichenkette',
+            liesString:'liesZeichenkette',
+        });
+
+        function normalizeHamsterMethodName(name) {
+            return hamsterMethodAliases[name]||name;
+        }
+
+        function readTerminalValue(kind, hamsterId, prompt) {
+            const value=kind==='number'
+                ? engine.readInt(hamsterId,prompt)
+                : engine.readString(hamsterId,prompt);
+            if(engineState.terminal.needsInput) {
+                throw new window.RunnerPause(engineState.terminal.prompt);
+            }
+            return value;
+        }
+
+        function requestTerminalInput(prompt, resume) {
+            resumeAfterInput = resume;
+            terminalPrompt.textContent = String(prompt||'Input:');
+            terminalValue.value = '';
+            terminalForm.classList.add('visible');
+            statusEl.textContent = 'Waiting for input';
+            terminalValue.focus();
+        }
+
+        function cancelTerminalInput() {
+            resumeAfterInput = null;
+            terminalForm.classList.remove('visible');
+            if(engineState) {
+                engineState.terminal.needsInput = false;
+                engineState.terminal.prompt = '';
+            }
+        }
+
+        terminalForm.addEventListener('submit', event => {
+            event.preventDefault();
+            if(!resumeAfterInput) return;
+            const resume = resumeAfterInput;
+            engine.provideInput(terminalValue.value);
+            resumeAfterInput = null;
+            terminalForm.classList.remove('visible');
+            resume();
+        });
+
+        function territoryHamsters(args) {
+            let hamsters=engineState.terrain.hamsters;
+            if(args.length>=2) {
+                const row=Number(args[0]), col=Number(args[1]);
+                hamsters=hamsters.filter(h => h.y===row && h.x===col);
+            }
+            return hamsters.map(h => ({__kind:'hamster',id:h.id,className:'Hamster'}));
+        }
+
+        function callTerritoryBuiltin(methodName, args) {
+            switch(methodName) {
+                case 'getAnzahlReihen':
+                case 'getNumberOfRows': return engineState.terrain.height;
+                case 'getAnzahlSpalten':
+                case 'getNumberOfColumns': return engineState.terrain.width;
+                case 'mauerDa':
+                case 'wall': return isWall(Number(args[1]),Number(args[0]));
+                case 'getAnzahlKoerner':
+                case 'getNumberOfGrains':
+                    if(args.length>=2) {
+                        const row=Number(args[0]), col=Number(args[1]);
+                        return inside(col,row)?engineState.terrain.corn[row][col]:0;
+                    }
+                    return engineState.terrain.corn.reduce(
+                        (total,row) => total+row.reduce((sum,count) => sum+count,0),0
+                    );
+                case 'getAnzahlHamster':
+                case 'getNumberOfHamsters': return territoryHamsters(args).length;
+                case 'getHamster': return territoryHamsters(args);
+                default: throw new Error('Unknown territory function: '+methodName);
+            }
         }
 
         function createRuntime() {
@@ -971,10 +1109,13 @@ class HamsterPanel {
                 },
                 getMember(receiver, property) {
                     if (receiver && receiver.__kind==='class' && receiver.name==='Hamster') {
-                        if (property==='NORD') return 0;
-                        if (property==='OST') return 1;
-                        if (property==='SUED') return 2;
-                        if (property==='WEST') return 3;
+                        const constants={
+                            NORD:0,NORTH:0,OST:1,EAST:1,SUED:2,SOUTH:2,WEST:3,
+                            BLAU:0,BLUE:0,ROT:1,RED:1,GRUEN:2,GREEN:2,
+                            GELB:3,YELLOW:3,CYAN:4,MAGENTA:5,ORANGE:6,PINK:7,
+                            GRAU:8,GRAY:8,WEISS:9,WHITE:9,
+                        };
+                        if (Object.prototype.hasOwnProperty.call(constants,property)) return constants[property];
                     }
                     if (receiver && receiver.__kind==='object') return receiver.fields[property];
                     return undefined;
@@ -985,6 +1126,7 @@ class HamsterPanel {
                 },
                 callMethod(receiver, methodName, args) {
                     if (receiver && receiver.__kind==='hamster') {
+                        methodName=normalizeHamsterMethodName(methodName);
                         if (methodName==='init'||methodName==='initialisiere') {
                             if(receiver.id!==null) throw hamsterError('HamsterInitializationException', receiver.className+' is already initialized');
                             if(args.length<4) throw new Error(methodName+' expects at least 4 arguments');
@@ -1008,6 +1150,8 @@ class HamsterPanel {
                             case 'anzahlKoerner':
                             case 'getAnzahlKoerner': return engine.getAnzahlKoerner(hid);
                             case 'schreib': appendLog(String(args.length>0?args[0]:'')); return undefined;
+                            case 'liesZahl': return readTerminalValue('number',hid,args[0]);
+                            case 'liesZeichenkette': return readTerminalValue('string',hid,args[0]);
                         }
                     }
                     if (receiver && receiver.__kind==='class') return this.callBuiltin(receiver.name+'.'+methodName, args);
@@ -1020,9 +1164,24 @@ class HamsterPanel {
                 },
                 callBuiltin(name, args) {
                     if (name==='Math.random') return Math.random();
-                    if (name.endsWith('.getStandardHamster')||name.endsWith('.getStandardHamsterAlsDrehHamster'))
+                    const separator=name.lastIndexOf('.');
+                    const receiverName=separator>=0?name.slice(0,separator):'';
+                    const rawMethodName=separator>=0?name.slice(separator+1):name;
+                    if(receiverName==='Territorium'||receiverName==='Territory')
+                        return callTerritoryBuiltin(rawMethodName,args);
+                    if ((receiverName==='Hamster'||receiverName.endsWith('Hamster')) &&
+                        (rawMethodName==='getStandardHamster'||
+                         rawMethodName==='getStandardHamsterAlsDrehHamster'||
+                         rawMethodName==='getDefaultHamster'))
                         return {__kind:'hamster',id:-1,className:'Hamster'};
-                    switch(name){
+                    if ((receiverName==='Hamster'||receiverName.endsWith('Hamster')) &&
+                        (rawMethodName==='getAnzahlHamster'||rawMethodName==='getNumberOfHamsters'))
+                        return engineState.terrain.hamsters.length;
+                    const isHamsterReceiver=receiverName==='Hamster'||receiverName.endsWith('Hamster');
+                    const methodName=!receiverName||isHamsterReceiver
+                        ? normalizeHamsterMethodName(rawMethodName)
+                        : rawMethodName;
+                    switch(methodName){
                         case 'vor': return engine.vor(defaultHamsterId(args));
                         case 'linksUm': return engine.linksUm(defaultHamsterId(args));
                         case 'nimm': return engine.nimm(defaultHamsterId(args));
@@ -1039,6 +1198,8 @@ class HamsterPanel {
                             if(args.length<4) throw new Error('createHamster expects at least 4 arguments');
                             return engine.createHamster(Number(args[0]),Number(args[1]),Number(args[2]),Number(args[3]),args.length>=5?Number(args[4]):1);
                         case 'schreib': appendLog(String(args.length>0?args[0]:'')); return undefined;
+                        case 'liesZahl': return readTerminalValue('number',defaultHamsterId([]),args[0]);
+                        case 'liesZeichenkette': return readTerminalValue('string',defaultHamsterId([]),args[0]);
                         default: throw new Error('Unknown function: '+name);
                     }
                 },

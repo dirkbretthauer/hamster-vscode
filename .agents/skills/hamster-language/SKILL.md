@@ -140,18 +140,13 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 ### Lexer gaps
 - `instanceof` – not a keyword
 - `$` not allowed in identifiers
-- `+=`, `-=` – not recognized as operators
 
 ### Parser gaps
-- Prefix `++`/`--` (only postfix is supported)
-- `+=`, `-=` assignment
 - `instanceof` expression
 - Type cast `(Type) expr`
 
 ### Runner gaps
 - `instanceof` – not handled
-- No `Territorium`/`Territory` static API
-- No English alias names for built-in commands
 - No concurrency (`start()`/`run()`)
 
 ## Conventions
