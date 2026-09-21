@@ -449,6 +449,7 @@ class HamsterPanel {
                 const w = parseInt(lines[0],10), h = parseInt(lines[1],10);
                 initEngine(w, h);
                 const cornCells = [];
+                let hasDefaultHamster = false;
                 for (let row=0; row<h; row++) {
                     const line = lines[row+2]||'';
                     for (let col=0; col<w; col++) {
@@ -458,7 +459,14 @@ class HamsterPanel {
                         if (c==='^'||c==='>'||c==='v'||c==='<') {
                             const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
                             const def = getHamster(-1);
+                            if (hasDefaultHamster) {
+                                const id=nextId++;
+                                engineState.terrain.hamsters.push({
+                                    id,x:def.x,y:def.y,dir:def.dir,mouth:0,color:1,
+                                });
+                            }
                             def.x=col; def.y=row; def.dir=dir;
+                            hasDefaultHamster = true;
                         }
                     }
                 }
@@ -1738,6 +1746,7 @@ class TerrainEditorProvider {
                 if (isNaN(w)||isNaN(h)||w<1||h<1) { initEngine(10,8); return; }
                 initEngine(w, h);
                 const cornCells = [];
+                let hasDefaultHamster = false;
                 for (let row=0; row<h; row++) {
                     const line = lines[row+2]||'';
                     for (let col=0; col<w; col++) {
@@ -1747,7 +1756,14 @@ class TerrainEditorProvider {
                         if (c==='^'||c==='>'||c==='v'||c==='<') {
                             const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
                             const def = getHamster(-1);
+                            if (hasDefaultHamster) {
+                                const id=nextId++;
+                                engineState.terrain.hamsters.push({
+                                    id,x:def.x,y:def.y,dir:def.dir,mouth:0,color:1,
+                                });
+                            }
                             def.x=col; def.y=row; def.dir=dir;
+                            hasDefaultHamster = true;
                         }
                     }
                 }
@@ -1842,9 +1858,9 @@ class TerrainEditorProvider {
                 let line='';
                 for (let col=0; col<t.width; col++) {
                     if (t.walls[row][col]) { line+='#'; continue; }
-                    const isDef = def.x===col && def.y===row;
+                    const hamster = t.hamsters.find(h => h.x===col && h.y===row);
                     const c = t.corn[row][col]||0;
-                    if (isDef) { line+=DIR_TO_TER[((def.dir%4)+4)%4]||'>'; cornPos.push({x:col,y:row}); }
+                    if (hamster) { line+=DIR_TO_TER[((hamster.dir%4)+4)%4]||'>'; cornPos.push({x:col,y:row}); }
                     else if (c>0) { line+='*'; cornPos.push({x:col,y:row}); }
                     else { line+=' '; }
                 }

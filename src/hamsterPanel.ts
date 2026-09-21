@@ -466,6 +466,7 @@ export class HamsterPanel {
                 const w = parseInt(lines[0],10), h = parseInt(lines[1],10);
                 initEngine(w, h);
                 const cornCells = [];
+                let hasDefaultHamster = false;
                 for (let row=0; row<h; row++) {
                     const line = lines[row+2]||'';
                     for (let col=0; col<w; col++) {
@@ -475,7 +476,14 @@ export class HamsterPanel {
                         if (c==='^'||c==='>'||c==='v'||c==='<') {
                             const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
                             const def = getHamster(-1);
+                            if (hasDefaultHamster) {
+                                const id=nextId++;
+                                engineState.terrain.hamsters.push({
+                                    id,x:def.x,y:def.y,dir:def.dir,mouth:0,color:1,
+                                });
+                            }
                             def.x=col; def.y=row; def.dir=dir;
+                            hasDefaultHamster = true;
                         }
                     }
                 }
