@@ -191,10 +191,15 @@ export class HamsterPanel {
             border-radius: 2px;
             font-size: 13px;
         }
-        .toolbar button:hover {
+        .toolbar button:not(:disabled):hover {
             background: var(--vscode-button-hoverBackground);
         }
-        .toolbar .speed-control {
+        .toolbar button:disabled {
+            cursor: default;
+            opacity: 0.5;
+        }
+        .toolbar .speed-control,
+        .toolbar .zoom-control {
             display: flex;
             align-items: center;
             gap: 4px;
@@ -206,6 +211,10 @@ export class HamsterPanel {
         }
         .toolbar .speed-control input[type="range"] {
             width: 80px;
+        }
+        .toolbar .zoom-control span {
+            min-width: 36px;
+            text-align: center;
         }
         #canvas-container {
             border: 1px solid var(--vscode-panel-border);
@@ -312,9 +321,9 @@ export class HamsterPanel {
         <button id="btn-step" title="Step">&#9193; Step</button>
         <button id="btn-stop" title="Stop">&#9209; Stop</button>
         <button id="btn-reset" title="Reset">&#8634; Reset</button>
-        <div class="speed-control">
+        <div class="zoom-control" role="group" aria-label="Zoom">
             <button id="btn-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
-            <span id="zoom-value" aria-live="polite">32 px</span>
+            <span id="zoom-value" aria-live="polite"></span>
             <button id="btn-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
         </div>
         <div class="speed-control">
@@ -358,10 +367,12 @@ export class HamsterPanel {
         const terminalValue = document.getElementById('terminal-value');
         const speedInput = document.getElementById('speed');
         const zoomOutButton = document.getElementById('btn-zoom-out');
+        const zoomInButton = document.getElementById('btn-zoom-in');
         const zoomValue = document.getElementById('zoom-value');
 
         const DEFAULT_CELL_SIZE = 32;
         const MIN_CELL_SIZE = 4;
+        const MAX_CELL_SIZE = 96;
         const ZOOM_STEP = 4;
         const COLORS = ['#f5c518','#e74c3c','#2ecc71','#3498db','#9b59b6','#e67e22'];
         const DIRS = ['\\u2191','\\u2192','\\u2193','\\u2190'];
@@ -578,9 +589,10 @@ export class HamsterPanel {
         }
 
         function setZoom(nextCellSize) {
-            cellSize = Math.max(MIN_CELL_SIZE, nextCellSize);
+            cellSize = Math.min(MAX_CELL_SIZE, Math.max(MIN_CELL_SIZE, nextCellSize));
             zoomValue.textContent = cellSize + ' px';
             zoomOutButton.disabled = cellSize === MIN_CELL_SIZE;
+            zoomInButton.disabled = cellSize === MAX_CELL_SIZE;
             render(engineState);
         }
 
@@ -881,7 +893,8 @@ export class HamsterPanel {
         document.getElementById('btn-stop').addEventListener('click', () => handleCommand('stop'));
         document.getElementById('btn-reset').addEventListener('click', () => handleCommand('reset'));
         zoomOutButton.addEventListener('click', () => setZoom(cellSize - ZOOM_STEP));
-        document.getElementById('btn-zoom-in').addEventListener('click', () => setZoom(cellSize + ZOOM_STEP));
+        zoomInButton.addEventListener('click', () => setZoom(cellSize + ZOOM_STEP));
+        setZoom(DEFAULT_CELL_SIZE);
 
         function handleCommand(cmd) {
             switch(cmd) {

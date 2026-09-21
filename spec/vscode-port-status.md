@@ -26,7 +26,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 | --- | --- | --- |
 | Editor & syntax highlighting | `editor.md` | 🟢 Appropriate simplification via native VS Code + TextMate grammar |
 | Terrain custom editor (`.ter`) | `simulation-ui.md`, `domain-model.md` | 🟡 Mostly compatible, some gaps |
-| Simulation rendering | `simulation-ui.md` | 🟡 Functional, missing zoom + per-hamster color sprites |
+| Simulation rendering | `simulation-ui.md` | 🟡 Functional, missing per-hamster color sprites |
 | Console/Terminal I/O | `console.md` | 🟢 Reasonably simplified (log panel + cooperative input) |
 | Compiler pipeline | `compiler-pipeline.md` | 🟡 "Compile" is parse-validate only; no program-type marker handling |
 | Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement); 🟡 step-in/out not distinct |
@@ -102,7 +102,7 @@ No confusing partial/stub remnants found for: Scheme/JavaScript/Python/Ruby/Prol
 ## Prioritization for Fixes
 1. **P0 — correctness bugs likely to confuse users immediately:** postfix `++`/`--` restricted to identifiers, wall-under-hamster placement.
 2. **P1 — core language gaps blocking Band 2 curriculum content:** real classes/inheritance/interfaces/constructors, `try/catch/throw` + exception hierarchy, `switch/case/break`, English API aliases, `+=`/`-=`, prefix `++`/`--`.
-3. **P2 — fidelity/UX gaps:** zoom controls, per-hamster color sprites, multi-hamster `.ter` loading, program-type marker handling, step-in/out distinction, terrain editor mouth-count UI.
+3. **P2 — fidelity/UX gaps:** per-hamster color sprites, multi-hamster `.ter` loading, program-type marker handling, step-in/out distinction, terrain editor mouth-count UI.
 4. **P3 — polish/maintainability:** `new Function()` replacement, multi-error diagnostics, breakpoint verification, expression evaluation in debugger.
 
 ## Issue Filing
