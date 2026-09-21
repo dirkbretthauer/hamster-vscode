@@ -46,9 +46,38 @@ export class HamsterParserError extends Error {
     }
 }
 
+export const ProgramType = Object.freeze({
+    Imperative: 'imperative',
+    ObjectOriented: 'object-oriented',
+    Class: 'class',
+});
+
+const PROGRAM_TYPE_MARKERS = new Map([
+    ['imperative program', ProgramType.Imperative],
+    ['object-oriented program', ProgramType.ObjectOriented],
+    ['class', ProgramType.Class],
+]);
+
+export function detectProgramType(source) {
+    const marker = /^\uFEFF?\s*\/\*\s*(imperative program|object-oriented program|class)\s*\*\//.exec(
+        source ?? ''
+    );
+    return marker ? PROGRAM_TYPE_MARKERS.get(marker[1]) : ProgramType.Imperative;
+}
+
 export function parseProgram(source, options = {}) {
-    const parser = new Parser(source, options);
-    return parser.parseProgram();
+    const programType = detectProgramType(source);
+    const parserOptions = {
+        ...options,
+        compatibility: options.compatibility !== undefined
+            ? options.compatibility
+            : programType !== ProgramType.Imperative,
+        requireMain: options.requireMain !== undefined
+            ? options.requireMain
+            : programType !== ProgramType.Class,
+    };
+    const ast = new Parser(source, parserOptions).parseProgram();
+    return { ...ast, programType };
 }
 
 class Parser {

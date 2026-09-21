@@ -37,7 +37,7 @@ export class HamsterDiagnostics implements vscode.Disposable {
 
         const diagnostics: vscode.Diagnostic[] = [];
         try {
-            this.parseProgram(document.getText(), { compatibility: true, requireMain: false });
+            this.parseProgram(document.getText(), { requireMain: false });
         } catch (e: any) {
             const line = (e.token?.line ?? 1) - 1;
             const col = (e.token?.column ?? 1) - 1;

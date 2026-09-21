@@ -89,6 +89,56 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 (async () => {
     const { parser, runner } = await loadLanguageModules();
 
+    assert.equal(
+        parser.detectProgramType('void main() {}'),
+        parser.ProgramType.Imperative
+    );
+    assert.equal(
+        parser.detectProgramType('/*object-oriented program*/void main() {}'),
+        parser.ProgramType.ObjectOriented
+    );
+    assert.equal(
+        parser.detectProgramType('\uFEFF/*class*/class TestHamster extends Hamster {}'),
+        parser.ProgramType.Class
+    );
+
+    const imperativeProgram = parser.parseProgram(`
+        /*imperative program*/
+        void main() {
+            vor();
+        }
+    `);
+    assert.equal(imperativeProgram.programType, parser.ProgramType.Imperative);
+
+    const objectProgram = parser.parseProgram(`
+        /*object-oriented program*/
+        class Helper {}
+        void main() {
+            Hamster hamster = new Hamster();
+        }
+    `);
+    assert.equal(objectProgram.programType, parser.ProgramType.ObjectOriented);
+    assert.equal(objectProgram.classes.length, 1);
+
+    const classProgram = parser.parseProgram(`
+        /*class*/
+        class TestHamster extends Hamster {
+            void turn() {
+                linksUm();
+            }
+        }
+    `, { strict: true });
+    assert.equal(classProgram.programType, parser.ProgramType.Class);
+    assert.equal(classProgram.classes.length, 1);
+    assert.throws(
+        () => parser.parseProgram('/*object-oriented program*/class Helper {}', { strict: true }),
+        /Program must define void main/
+    );
+    assert.throws(
+        () => parser.parseProgram('class Helper {}', { strict: true }),
+        /Expected type keyword/
+    );
+
     const switchState = runProgram(parser, runner, `
         int result = 0;
         void main() {
