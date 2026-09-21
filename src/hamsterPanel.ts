@@ -722,9 +722,9 @@ export class HamsterPanel {
                 case 'dbg:launch':           dbgLaunch(msg); break;
                 case 'dbg:setBreakpoints':   dbgSetBreakpoints(msg.lines||[]); break;
                 case 'dbg:continue':         dbgContinue(); break;
-                case 'dbg:next':             dbgStepOnce('step'); break;
-                case 'dbg:stepIn':           dbgStepOnce('step'); break;
-                case 'dbg:stepOut':          dbgStepOnce('step'); break;
+                case 'dbg:next':             dbgNext(); break;
+                case 'dbg:stepIn':           dbgStepIn(); break;
+                case 'dbg:stepOut':          dbgStepOut(); break;
                 case 'dbg:pause':            dbgPause(); break;
                 case 'dbg:stackTrace':       dbgSendStackTrace(msg.requestId); break;
                 case 'dbg:scopes':           dbgSendScopes(msg.requestId, msg.frameId); break;
@@ -771,7 +771,7 @@ export class HamsterPanel {
                 dbgContinue();
             } else {
                 // Step once so we have a real lastInstruction location, then stop.
-                dbgStepOnce('entry');
+                dbgStepIn('entry');
             }
         }
 
@@ -788,30 +788,78 @@ export class HamsterPanel {
             }
         }
 
-        function dbgStepOnce(reason) {
+        function dbgFrameDepth() {
+            return runnerState && Array.isArray(runnerState.frames)
+                ? runnerState.frames.length
+                : 0;
+        }
+
+        function dbgIsAtCallSite() {
+            return runnerState && runnerState.lastInstruction &&
+                runnerState.lastInstruction.kind === 'call';
+        }
+
+        function dbgStepIn(reason = 'step') {
+            const startingDepth = dbgFrameDepth();
+            dbgStepUntil(reason, () =>
+                dbgFrameDepth() > startingDepth || !dbgIsAtCallSite()
+            );
+        }
+
+        function dbgNext() {
+            const startingDepth = dbgFrameDepth();
+            dbgStepUntil('step', () =>
+                dbgFrameDepth() <= startingDepth && !dbgIsAtCallSite()
+            );
+        }
+
+        function dbgStepOut() {
+            const startingDepth = dbgFrameDepth();
+            dbgStepUntil('step', () => dbgFrameDepth() < startingDepth);
+        }
+
+        function dbgStepUntil(reason, shouldStop) {
             if (!dbgActive) return;
             if (!runnerState || runnerState.finished) {
                 dbgTerminate();
                 return;
             }
-            try {
-                const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
-                render(engineState);
-                dbgFlushNewLogs();
-                if (!hasMore) { dbgTerminate(); return; }
-                const loc = runnerState.lastInstruction && runnerState.lastInstruction.loc;
-                vscode.postMessage({type:'dbg:stopped', reason, line: loc ? loc.line : 1, column: loc ? loc.column : 1});
-            } catch(e) {
-                if (window.RunnerPause && e instanceof window.RunnerPause) {
-                    requestTerminalInput(e.message, () => dbgStepOnce(reason));
-                    return;
+            dbgClearTimer();
+            dbgRunning = true;
+
+            function advance() {
+                if (!dbgRunning || !dbgActive) return;
+                try {
+                    const hasMore = window.executeRunnerStep(runnerState, {granularity:'statement'});
+                    render(engineState);
+                    dbgFlushNewLogs();
+                    if (!hasMore) { dbgTerminate(); return; }
+
+                    if (shouldStop()) {
+                        dbgRunning = false;
+                        const loc = runnerState.lastInstruction && runnerState.lastInstruction.loc;
+                        vscode.postMessage({type:'dbg:stopped', reason, line: loc ? loc.line : 1, column: loc ? loc.column : 1});
+                        return;
+                    }
+                    dbgTimerId = setTimeout(advance, 0);
+                } catch(e) {
+                    if (window.RunnerPause && e instanceof window.RunnerPause) {
+                        dbgRunning = false;
+                        requestTerminalInput(e.message, () => {
+                            dbgRunning = true;
+                            advance();
+                        });
+                        return;
+                    }
+                    const m = 'Runtime error: ' + (e.message||e);
+                    appendLog(m, true);
+                    vscode.postMessage({type:'dbg:output', category:'stderr', output: m + '\\n'});
+                    vscode.postMessage({type:'dbg:stopped', reason:'exception', text: m});
+                    dbgRunning = false;
                 }
-                const m = 'Runtime error: ' + (e.message||e);
-                appendLog(m, true);
-                vscode.postMessage({type:'dbg:output', category:'stderr', output: m + '\\n'});
-                vscode.postMessage({type:'dbg:stopped', reason:'exception', text: m});
-                dbgRunning = false;
             }
+
+            advance();
         }
 
         function dbgContinue() {
