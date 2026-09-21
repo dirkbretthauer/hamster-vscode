@@ -68,7 +68,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 ### 4. Simulation Rendering (`hamsterPanel.ts` webview)
 - 🟢 Simulation zoom controls use the original 32px default, ±4px steps, and 4px minimum.
 - 🟢 Direction sprites are recolored and cached per hamster color, preserving their black details while supporting all ten German/English `Hamster` color constants.
-- 🟢 `.ter` loading preserves multiple direction markers as independent hamsters while keeping the last marker as the default hamster (`id:-1`), matching the reference loader.
+- 🟢 `.ter` loading preserves multiple direction markers as a VS Code extension. Legacy files keep the reference loader's last-marker default, while an optional trailing `@default x y` line preserves default-hamster identity across editor round trips and is ignored by the reference loader.
 - 🟢 Terrain/corn/wall model (width/height/walls/corn grids, default hamster id -1) matches `domain-model.md` semantics.
 
 ### 5. Terrain Editor (`terrainEditor.ts`)

@@ -449,7 +449,7 @@ class HamsterPanel {
                 const w = parseInt(lines[0],10), h = parseInt(lines[1],10);
                 initEngine(w, h);
                 const cornCells = [];
-                let hasDefaultHamster = false;
+                const terrainHamsters = [];
                 for (let row=0; row<h; row++) {
                     const line = lines[row+2]||'';
                     for (let col=0; col<w; col++) {
@@ -458,15 +458,7 @@ class HamsterPanel {
                         if (c==='*'||c==='^'||c==='>'||c==='v'||c==='<') cornCells.push([row,col]);
                         if (c==='^'||c==='>'||c==='v'||c==='<') {
                             const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
-                            const def = getHamster(-1);
-                            if (hasDefaultHamster) {
-                                const id=nextId++;
-                                engineState.terrain.hamsters.push({
-                                    id,x:def.x,y:def.y,dir:def.dir,mouth:0,color:1,
-                                });
-                            }
-                            def.x=col; def.y=row; def.dir=dir;
-                            hasDefaultHamster = true;
+                            terrainHamsters.push({x:col,y:row,dir});
                         }
                     }
                 }
@@ -478,6 +470,24 @@ class HamsterPanel {
                 }
                 const mouthLine = base+cornCells.length;
                 const mouth = parseInt(lines[mouthLine]||'0',10);
+                const defaultMetadata = /^@default\\s+(\\d+)\\s+(\\d+)\\s*$/.exec(lines[mouthLine+1]||'');
+                const metadataX = defaultMetadata ? parseInt(defaultMetadata[1],10) : -1;
+                const metadataY = defaultMetadata ? parseInt(defaultMetadata[2],10) : -1;
+                let defaultIndex = terrainHamsters.findIndex(h => h.x===metadataX && h.y===metadataY);
+                if (defaultIndex<0) defaultIndex=terrainHamsters.length-1;
+                if (defaultIndex>=0) {
+                    const def = getHamster(-1);
+                    const defaultState = terrainHamsters[defaultIndex];
+                    def.x=defaultState.x; def.y=defaultState.y; def.dir=defaultState.dir;
+                    for (let i=0; i<terrainHamsters.length; i++) {
+                        if (i===defaultIndex) continue;
+                        const hamster = terrainHamsters[i];
+                        const id=nextId++;
+                        engineState.terrain.hamsters.push({
+                            id,x:hamster.x,y:hamster.y,dir:hamster.dir,mouth:0,color:0,
+                        });
+                    }
+                }
                 getHamster(-1).mouth = isNaN(mouth)?0:mouth;
                 render(engineState);
                 return clone(engineState);
@@ -1746,7 +1756,7 @@ class TerrainEditorProvider {
                 if (isNaN(w)||isNaN(h)||w<1||h<1) { initEngine(10,8); return; }
                 initEngine(w, h);
                 const cornCells = [];
-                let hasDefaultHamster = false;
+                const terrainHamsters = [];
                 for (let row=0; row<h; row++) {
                     const line = lines[row+2]||'';
                     for (let col=0; col<w; col++) {
@@ -1755,15 +1765,7 @@ class TerrainEditorProvider {
                         if (c==='*'||c==='^'||c==='>'||c==='v'||c==='<') cornCells.push([row,col]);
                         if (c==='^'||c==='>'||c==='v'||c==='<') {
                             const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
-                            const def = getHamster(-1);
-                            if (hasDefaultHamster) {
-                                const id=nextId++;
-                                engineState.terrain.hamsters.push({
-                                    id,x:def.x,y:def.y,dir:def.dir,mouth:0,color:1,
-                                });
-                            }
-                            def.x=col; def.y=row; def.dir=dir;
-                            hasDefaultHamster = true;
+                            terrainHamsters.push({x:col,y:row,dir});
                         }
                     }
                 }
@@ -1775,6 +1777,24 @@ class TerrainEditorProvider {
                 }
                 const mouthLine = base+cornCells.length;
                 const mouth = parseInt(lines[mouthLine]||'0',10);
+                const defaultMetadata = /^@default\\s+(\\d+)\\s+(\\d+)\\s*$/.exec(lines[mouthLine+1]||'');
+                const metadataX = defaultMetadata ? parseInt(defaultMetadata[1],10) : -1;
+                const metadataY = defaultMetadata ? parseInt(defaultMetadata[2],10) : -1;
+                let defaultIndex = terrainHamsters.findIndex(h => h.x===metadataX && h.y===metadataY);
+                if (defaultIndex<0) defaultIndex=terrainHamsters.length-1;
+                if (defaultIndex>=0) {
+                    const def = getHamster(-1);
+                    const defaultState = terrainHamsters[defaultIndex];
+                    def.x=defaultState.x; def.y=defaultState.y; def.dir=defaultState.dir;
+                    for (let i=0; i<terrainHamsters.length; i++) {
+                        if (i===defaultIndex) continue;
+                        const hamster = terrainHamsters[i];
+                        const id=nextId++;
+                        engineState.terrain.hamsters.push({
+                            id,x:hamster.x,y:hamster.y,dir:hamster.dir,mouth:0,color:0,
+                        });
+                    }
+                }
                 getHamster(-1).mouth = isNaN(mouth)?0:mouth;
                 render(engineState);
             },
@@ -1790,10 +1810,17 @@ class TerrainEditorProvider {
             setDefaultHamster(col,row) {
                 if(!inside(col,row)) throw new Error('Outside terrain');
                 if(engineState.terrain.walls[row][col]) throw new Error('Cannot place on wall');
+                if(engineState.terrain.hamsters.some(h => h.id!==-1 && h.x===col && h.y===row))
+                    throw new Error('Cannot place on another hamster');
                 const h=getHamster(-1); h.x=col; h.y=row;
             },
             rotateDefaultHamster(turns) {
                 const h=getHamster(-1); h.dir=((h.dir+(turns|0))%4+4)%4;
+            },
+            removeAdditionalHamster(col,row) {
+                engineState.terrain.hamsters = engineState.terrain.hamsters.filter(
+                    h => h.id===-1 || h.x!==col || h.y!==row
+                );
             },
         };
 
@@ -1866,9 +1893,11 @@ class TerrainEditorProvider {
                 }
                 lines.push(line);
             }
-            return [String(t.width), String(t.height), ...lines,
+            const result = [String(t.width), String(t.height), ...lines,
                 ...cornPos.map(p => String(t.corn[p.y][p.x]||0)),
-                String(def.mouth||0)].join('\\n');
+                String(def.mouth||0)];
+            if (t.hamsters.length>1) result.push('@default '+def.x+' '+def.y);
+            return result.join('\\n');
         }
 
         function notifyChanged() {
@@ -1951,7 +1980,7 @@ class TerrainEditorProvider {
                     case 'wall':
                         if(!cell) return; engine.setWall(cell.x,cell.y,1); changed=true; break;
                     case 'erase':
-                        if(!cell) return; engine.setWall(cell.x,cell.y,0); engine.setCorn(cell.x,cell.y,0); changed=true; break;
+                        if(!cell) return; engine.setWall(cell.x,cell.y,0); engine.setCorn(cell.x,cell.y,0); engine.removeAdditionalHamster(cell.x,cell.y); changed=true; break;
                     case 'corn':
                         if(!cell) return; engine.setWall(cell.x,cell.y,0); engine.setCorn(cell.x,cell.y,getCornAmount()); changed=true; break;
                     case 'hamster':
