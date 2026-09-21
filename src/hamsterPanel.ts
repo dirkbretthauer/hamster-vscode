@@ -466,6 +466,7 @@ export class HamsterPanel {
                 const w = parseInt(lines[0],10), h = parseInt(lines[1],10);
                 initEngine(w, h);
                 const cornCells = [];
+                const terrainHamsters = [];
                 for (let row=0; row<h; row++) {
                     const line = lines[row+2]||'';
                     for (let col=0; col<w; col++) {
@@ -474,8 +475,7 @@ export class HamsterPanel {
                         if (c==='*'||c==='^'||c==='>'||c==='v'||c==='<') cornCells.push([row,col]);
                         if (c==='^'||c==='>'||c==='v'||c==='<') {
                             const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
-                            const def = getHamster(-1);
-                            def.x=col; def.y=row; def.dir=dir;
+                            terrainHamsters.push({x:col,y:row,dir});
                         }
                     }
                 }
@@ -487,6 +487,24 @@ export class HamsterPanel {
                 }
                 const mouthLine = base+cornCells.length;
                 const mouth = parseInt(lines[mouthLine]||'0',10);
+                const defaultMetadata = /^@default\\s+(\\d+)\\s+(\\d+)\\s*$/.exec(lines[mouthLine+1]||'');
+                const metadataX = defaultMetadata ? parseInt(defaultMetadata[1],10) : -1;
+                const metadataY = defaultMetadata ? parseInt(defaultMetadata[2],10) : -1;
+                let defaultIndex = terrainHamsters.findIndex(h => h.x===metadataX && h.y===metadataY);
+                if (defaultIndex<0) defaultIndex=terrainHamsters.length-1;
+                if (defaultIndex>=0) {
+                    const def = getHamster(-1);
+                    const defaultState = terrainHamsters[defaultIndex];
+                    def.x=defaultState.x; def.y=defaultState.y; def.dir=defaultState.dir;
+                    for (let i=0; i<terrainHamsters.length; i++) {
+                        if (i===defaultIndex) continue;
+                        const hamster = terrainHamsters[i];
+                        const id=nextId++;
+                        engineState.terrain.hamsters.push({
+                            id,x:hamster.x,y:hamster.y,dir:hamster.dir,mouth:0,color:0,
+                        });
+                    }
+                }
                 getHamster(-1).mouth = isNaN(mouth)?0:mouth;
                 render(engineState);
                 return clone(engineState);
