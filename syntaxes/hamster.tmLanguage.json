@@ -53,7 +53,7 @@
       "patterns": [
         {
           "name": "support.function.hamster",
-          "match": "\\b(vor|linksUm|nimm|gib|vornFrei|kornDa|maulLeer|getReihe|getSpalte|getBlickrichtung|getAnzahlKoerner|anzahlKoerner|createHamster|readInt|readString|liesZahl|liesZeichenkette|liesString|schreib|rechtsUm)\\b"
+          "match": "\\b(vor|move|linksUm|turnLeft|nimm|pickGrain|gib|putGrain|vornFrei|frontIsClear|kornDa|grainAvailable|maulLeer|mouthEmpty|getReihe|getRow|getSpalte|getColumn|getBlickrichtung|getDirection|getAnzahlKoerner|getNumberOfGrains|anzahlKoerner|getStandardHamster|getDefaultHamster|getAnzahlHamster|getNumberOfHamsters|getAnzahlReihen|getNumberOfRows|getAnzahlSpalten|getNumberOfColumns|mauerDa|wall|getHamster|createHamster|readInt|readNumber|readString|liesZahl|liesZeichenkette|liesString|schreib|write|rechtsUm)\\b"
         }
       ]
     },
@@ -66,8 +66,8 @@
       "patterns": [
         { "name": "keyword.operator.comparison.hamster", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.logical.hamster", "match": "&&|\\|\\||!" },
-        { "name": "keyword.operator.arithmetic.hamster", "match": "\\+\\+|--|\\+|-|\\*|/|%" },
-        { "name": "keyword.operator.assignment.hamster", "match": "=" }
+        { "name": "keyword.operator.assignment.hamster", "match": "\\+=|-=|=" },
+        { "name": "keyword.operator.arithmetic.hamster", "match": "\\+\\+|--|\\+|-|\\*|/|%" }
       ]
     }
   }

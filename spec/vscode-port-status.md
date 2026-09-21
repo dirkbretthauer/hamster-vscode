@@ -39,7 +39,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 ### 1. Language: Lexer (`lang/hamster-lexer.js`)
 - 🟢 Control-flow keywords `switch`, `case`, `default`, `break`, `try`, `catch`, and `throw` are recognized.
 - 🔴 Missing keyword: `instanceof`.
-- 🔴 Missing compound-assignment operators `+=`, `-=`.
+- 🟢 Compound-assignment operators `+=`, `-=` are recognized.
 - 🟡 Identifier grammar excludes `$` (spec allows `[A-Za-z_$][A-Za-z0-9_$]*`).
 - 🟡 Unknown string escapes are silently accepted (drops backslash) instead of raising a lexical error.
 - 🟢 Core Band-1 keywords, comments, numeric/boolean/null/string literals, common operators all present.
@@ -49,7 +49,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 Compatibility mode retains classes and interfaces with modifiers, inheritance, implemented interfaces, fields, constructors, and methods.
 - 🟢 `switch/case/default/break` and `try/catch/throw` parse to dedicated AST nodes.
 - 🔴 No `instanceof` or casts.
-- 🟡 Prefix `++`/`--` not parsed (only postfix).
+- 🟢 Prefix and postfix `++`/`--` are parsed.
 - 🟡 Array creation (`new Type[n]`) parses multi-dimensional syntax but the parser/runner combination only really supports one dimension.
 - 🟡 Unsupported top-level syntax can be silently skipped in non-strict compatibility mode rather than reported as an error.
 
@@ -59,8 +59,8 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 User-defined objects support inherited fields, constructor chaining, virtual method dispatch, and `this`/`super` access.
 - 🟢 `try/catch/throw` supports typed catches, user-thrown values and objects, and the documented German/English `HamsterException` hierarchy. Failed `vor`/`nimm`/`gib` calls surface as catchable `WallInFrontException`/`TileEmptyException`/`MouthEmptyException`; uncaught exceptions remain fatal.
 - 🟢 `switch` uses Java-style matching and fall-through; `break` exits the nearest loop or switch.
-- 🟡 English API aliases (`move`, `turnLeft`, `pickGrain`, `putGrain`, `frontIsClear`, `grainAvailable`, `mouthEmpty`, `write`, `readNumber`, `readString`) are largely absent from `KNOWN_BUILTINS`; only German names dispatch reliably. `readInt` is used instead of spec's `readNumber`.
-- 🟡 No `Territorium`/`Territory` static API, no direction/color constants beyond ad-hoc `NORD/OST/SUED/WEST` in `createRuntime()`.
+- 🟢 German and English Hamster API names dispatch consistently for top-level and object calls, including console input/output and property getters.
+- 🟢 `Territorium`/`Territory` static queries and German/English direction and color constants are available.
 - 🟡 No `start()`/`run()` concurrency — single hamster, single generator, single synthetic DAP thread.
 - 🟡 Program-type markers (`/*imperative program*/`, `/*object-oriented program*/`, `/*class*/`) are discarded as ordinary comments; no differentiated semantics.
 - ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users.
@@ -80,7 +80,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 
 ### 6. Console / Terminal I/O
 - 🟢 `schreib`/output routed to a webview log panel — a reasonable, simpler substitute for the original's threaded `Console`.
-- 🟢 `liesZahl`/`liesZeichenkette` implemented via a cooperative pause (`needsInput`/`provideInput`) rather than a modal `DialogTerminal` — architecturally simpler and appropriate for a single-threaded JS interpreter.
+- 🟢 `liesZahl`/`liesZeichenkette` and their English aliases use a cooperative pause with an inline webview prompt, then resume the pending Run, Step, or debugger operation.
 
 ### 7. Compiler Pipeline Equivalent
 - 🟡 `hamster.compile` command is a **strict parse/validate** (`requireMain: true, strict: true`), not a real compilation step — reasonable given there's no bytecode target, but should be labeled/documented as "Check" rather than "Compile" to avoid confusing users familiar with the original.
