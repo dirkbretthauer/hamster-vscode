@@ -26,7 +26,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 | --- | --- | --- |
 | Editor & syntax highlighting | `editor.md` | 🟢 Appropriate simplification via native VS Code + TextMate grammar |
 | Terrain custom editor (`.ter`) | `simulation-ui.md`, `domain-model.md` | 🟡 Mostly compatible, some gaps |
-| Simulation rendering | `simulation-ui.md` | 🟡 Functional, missing zoom + per-hamster color sprites |
+| Simulation rendering | `simulation-ui.md` | 🟡 Functional, missing per-hamster color sprites |
 | Console/Terminal I/O | `console.md` | 🟢 Reasonably simplified (log panel + cooperative input) |
 | Compiler pipeline | `compiler-pipeline.md` | 🟡 "Compile" is parse-validate only; no program-type marker handling |
 | Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement); 🟡 step-in/out not distinct |
@@ -66,7 +66,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users.
 
 ### 4. Simulation Rendering (`hamsterPanel.ts` webview)
-- 🟡 No zoom control — fixed `CELL = 48`px; spec (`simulation-ui.md`) describes a 32px default with ±4 zoom steps.
+- 🟢 Simulation zoom controls use the original 32px default, ±4px steps, and 4px minimum.
 - 🟡 All hamsters render with the same 4 direction sprites (`assets/hamster{north,south,east,west}.png`); the `COLORS` palette only applies in the image-failed-to-load circle fallback, not the primary rendering path — no true per-hamster-color visuals as in the original's `ColorFilter`-recolored sprites.
 - 🟡 `.ter` loading only ever updates the single default hamster (`id:-1`) for each direction marker; multiple direction markers in one file do not spawn independent hamsters.
 - 🟢 Terrain/corn/wall model (width/height/walls/corn grids, default hamster id -1) matches `domain-model.md` semantics.
@@ -102,7 +102,7 @@ No confusing partial/stub remnants found for: Scheme/JavaScript/Python/Ruby/Prol
 ## Prioritization for Fixes
 1. **P0 — correctness bugs likely to confuse users immediately:** postfix `++`/`--` restricted to identifiers, wall-under-hamster placement.
 2. **P1 — core language gaps blocking Band 2 curriculum content:** real classes/inheritance/interfaces/constructors, `try/catch/throw` + exception hierarchy, `switch/case/break`, English API aliases, `+=`/`-=`, prefix `++`/`--`.
-3. **P2 — fidelity/UX gaps:** zoom controls, per-hamster color sprites, multi-hamster `.ter` loading, program-type marker handling, step-in/out distinction, terrain editor mouth-count UI.
+3. **P2 — fidelity/UX gaps:** per-hamster color sprites, multi-hamster `.ter` loading, program-type marker handling, step-in/out distinction, terrain editor mouth-count UI.
 4. **P3 — polish/maintainability:** `new Function()` replacement, multi-error diagnostics, breakpoint verification, expression evaluation in debugger.
 
 ## Issue Filing

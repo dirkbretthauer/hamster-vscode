@@ -191,10 +191,15 @@ export class HamsterPanel {
             border-radius: 2px;
             font-size: 13px;
         }
-        .toolbar button:hover {
+        .toolbar button:not(:disabled):hover {
             background: var(--vscode-button-hoverBackground);
         }
-        .toolbar .speed-control {
+        .toolbar button:disabled {
+            cursor: default;
+            opacity: 0.5;
+        }
+        .toolbar .speed-control,
+        .toolbar .zoom-control {
             display: flex;
             align-items: center;
             gap: 4px;
@@ -207,13 +212,21 @@ export class HamsterPanel {
         .toolbar .speed-control input[type="range"] {
             width: 80px;
         }
+        .toolbar .zoom-control span {
+            min-width: 36px;
+            text-align: center;
+        }
         #canvas-container {
             border: 1px solid var(--vscode-panel-border);
             background: #f9f5e7;
-            display: inline-block;
+            display: block;
+            overflow: auto;
             margin-bottom: 8px;
         }
-        canvas { display: block; }
+        canvas {
+            display: block;
+            margin: 0 auto;
+        }
         #log {
             max-height: 160px;
             overflow-y: auto;
@@ -308,6 +321,11 @@ export class HamsterPanel {
         <button id="btn-step" title="Step">&#9193; Step</button>
         <button id="btn-stop" title="Stop">&#9209; Stop</button>
         <button id="btn-reset" title="Reset">&#8634; Reset</button>
+        <div class="zoom-control" role="group" aria-label="Zoom">
+            <button id="btn-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+            <span id="zoom-value" aria-live="polite"></span>
+            <button id="btn-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+        </div>
         <div class="speed-control">
             <label for="speed">Speed:</label>
             <input type="range" id="speed" min="50" max="1000" value="400" step="50">
@@ -348,8 +366,14 @@ export class HamsterPanel {
         const terminalPrompt = document.getElementById('terminal-prompt');
         const terminalValue = document.getElementById('terminal-value');
         const speedInput = document.getElementById('speed');
+        const zoomOutButton = document.getElementById('btn-zoom-out');
+        const zoomInButton = document.getElementById('btn-zoom-in');
+        const zoomValue = document.getElementById('zoom-value');
 
-        const CELL = 48;
+        const DEFAULT_CELL_SIZE = 32;
+        const MIN_CELL_SIZE = 4;
+        const MAX_CELL_SIZE = 96;
+        const ZOOM_STEP = 4;
         const COLORS = ['#f5c518','#e74c3c','#2ecc71','#3498db','#9b59b6','#e67e22'];
         const DIRS = ['\\u2191','\\u2192','\\u2193','\\u2190'];
         const DX = [0, 1, 0, -1];
@@ -371,6 +395,7 @@ export class HamsterPanel {
         let runnerState = null;
         let currentSource = '';
         let resumeAfterInput = null;
+        let cellSize = DEFAULT_CELL_SIZE;
 
         const clone = obj => JSON.parse(JSON.stringify(obj));
 
@@ -517,22 +542,23 @@ export class HamsterPanel {
             if (!state) return;
             const {terrain} = state;
             const {width,height,walls,corn,hamsters} = terrain;
-            canvas.width = width*CELL; canvas.height = height*CELL;
+            const cell = cellSize;
+            canvas.width = width*cell; canvas.height = height*cell;
 
             ctx.fillStyle='#f9f5e7'; ctx.fillRect(0,0,canvas.width,canvas.height);
             ctx.strokeStyle='#ccc'; ctx.lineWidth=1;
-            for(let x=0;x<=width;x++){ctx.beginPath();ctx.moveTo(x*CELL,0);ctx.lineTo(x*CELL,height*CELL);ctx.stroke();}
-            for(let y=0;y<=height;y++){ctx.beginPath();ctx.moveTo(0,y*CELL);ctx.lineTo(width*CELL,y*CELL);ctx.stroke();}
+            for(let x=0;x<=width;x++){ctx.beginPath();ctx.moveTo(x*cell,0);ctx.lineTo(x*cell,height*cell);ctx.stroke();}
+            for(let y=0;y<=height;y++){ctx.beginPath();ctx.moveTo(0,y*cell);ctx.lineTo(width*cell,y*cell);ctx.stroke();}
 
             for(let row=0;row<height;row++) for(let col=0;col<width;col++){
-                const px=col*CELL, py=row*CELL;
-                if(walls[row][col]) { ctx.fillStyle='#555'; ctx.fillRect(px+1,py+1,CELL-2,CELL-2); }
+                const px=col*cell, py=row*cell;
+                if(walls[row][col]) { ctx.fillStyle='#555'; ctx.fillRect(px+1,py+1,cell-2,cell-2); }
                 else {
                     const c=corn[row][col];
                     if(c>0) {
-                        ctx.fillStyle='#27ae60'; ctx.beginPath(); ctx.arc(px+CELL/2,py+CELL/2,CELL*0.22,0,Math.PI*2); ctx.fill();
-                        ctx.fillStyle='#fff'; ctx.font='bold '+(CELL*0.28)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-                        ctx.fillText(c,px+CELL/2,py+CELL/2);
+                        ctx.fillStyle='#27ae60'; ctx.beginPath(); ctx.arc(px+cell/2,py+cell/2,cell*0.22,0,Math.PI*2); ctx.fill();
+                        ctx.fillStyle='#fff'; ctx.font='bold '+(cell*0.28)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+                        ctx.fillText(c,px+cell/2,py+cell/2);
                     }
                 }
             }
@@ -543,23 +569,31 @@ export class HamsterPanel {
             const dir=((h.dir%4)+4)%4;
             const sprite=sprites[dir];
             if(sprite && sprite.complete && sprite.naturalWidth>0) {
-                const x=h.x*CELL, y=h.y*CELL, pad=Math.max(2,Math.floor(CELL*0.08));
-                ctx.drawImage(sprite,x+pad,y+pad,CELL-pad*2,CELL-pad*2);
+                const x=h.x*cellSize, y=h.y*cellSize, pad=Math.max(1,Math.floor(cellSize*0.08));
+                ctx.drawImage(sprite,x+pad,y+pad,cellSize-pad*2,cellSize-pad*2);
                 if(h.mouth>0) {
-                    const bx=x+CELL*0.78, by=y+CELL*0.22;
-                    ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(bx,by,CELL*0.16,0,Math.PI*2); ctx.fill();
-                    ctx.fillStyle='#fff'; ctx.font='bold '+(CELL*0.2)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(h.mouth,bx,by);
+                    const bx=x+cellSize*0.78, by=y+cellSize*0.22;
+                    ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(bx,by,cellSize*0.16,0,Math.PI*2); ctx.fill();
+                    ctx.fillStyle='#fff'; ctx.font='bold '+(cellSize*0.2)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(h.mouth,bx,by);
                 }
                 return;
             }
-            const px=h.x*CELL+CELL/2, py=h.y*CELL+CELL/2, r=CELL*0.36;
+            const px=h.x*cellSize+cellSize/2, py=h.y*cellSize+cellSize/2, r=cellSize*0.36;
             const color=COLORS[h.color%COLORS.length];
             ctx.fillStyle=color; ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2); ctx.fill();
-            ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.font='bold '+(CELL*0.4)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(DIRS[dir],px,py);
+            ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.font='bold '+(cellSize*0.4)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(DIRS[dir],px,py);
             if(h.mouth>0) {
-                ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(px+r*0.7,py-r*0.7,CELL*0.18,0,Math.PI*2); ctx.fill();
-                ctx.fillStyle='#fff'; ctx.font='bold '+(CELL*0.22)+'px sans-serif'; ctx.fillText(h.mouth,px+r*0.7,py-r*0.7);
+                ctx.fillStyle='#e74c3c'; ctx.beginPath(); ctx.arc(px+r*0.7,py-r*0.7,cellSize*0.18,0,Math.PI*2); ctx.fill();
+                ctx.fillStyle='#fff'; ctx.font='bold '+(cellSize*0.22)+'px sans-serif'; ctx.fillText(h.mouth,px+r*0.7,py-r*0.7);
             }
+        }
+
+        function setZoom(nextCellSize) {
+            cellSize = Math.min(MAX_CELL_SIZE, Math.max(MIN_CELL_SIZE, nextCellSize));
+            zoomValue.textContent = cellSize + ' px';
+            zoomOutButton.disabled = cellSize === MIN_CELL_SIZE;
+            zoomInButton.disabled = cellSize === MAX_CELL_SIZE;
+            render(engineState);
         }
 
         function appendLog(text, isError) {
@@ -858,6 +892,9 @@ export class HamsterPanel {
         document.getElementById('btn-step').addEventListener('click', () => handleCommand('step'));
         document.getElementById('btn-stop').addEventListener('click', () => handleCommand('stop'));
         document.getElementById('btn-reset').addEventListener('click', () => handleCommand('reset'));
+        zoomOutButton.addEventListener('click', () => setZoom(cellSize - ZOOM_STEP));
+        zoomInButton.addEventListener('click', () => setZoom(cellSize + ZOOM_STEP));
+        setZoom(DEFAULT_CELL_SIZE);
 
         function handleCommand(cmd) {
             switch(cmd) {
