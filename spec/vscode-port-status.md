@@ -85,7 +85,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 ### 7. Compiler Pipeline Equivalent
 - 🟡 `hamster.compile` command is a **strict parse/validate** (`requireMain: true, strict: true`), not a real compilation step — reasonable given there's no bytecode target, but should be labeled/documented as "Check" rather than "Compile" to avoid confusing users familiar with the original.
 - 🟢 Program-type markers select validation behavior consistently across diagnostics, compile, run, and debug paths; class files do not require `main()` and cannot be run directly.
-- 🟡 Live diagnostics (`diagnostics.ts`) report only the **first** parse error, with a fixed 10-column-wide range that can overshoot short lines.
+- 🟢 Live diagnostics (`diagnostics.ts`) recover after independent lexer/parser errors and underline each offending token using its exact source length.
 - 🟡 `new Function()` is used in `diagnostics.ts` to eval the bundled lexer+parser JS at runtime in the extension host — a maintainability/code-smell concern (not a real vulnerability since the code is extension-bundled, not user-supplied), better replaced with a static import/bundle step.
 
 ### 8. Debugger (`hamsterDebugSession.ts` + debug bridge in `hamsterPanel.ts`)

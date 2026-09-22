@@ -1,4 +1,4 @@
-import { HamsterLexer, TokenType } from './hamster-lexer.js';
+import { HamsterLexer, HamsterLexerError, TokenType } from './hamster-lexer.js';
 
 export const ASTNodeType = Object.freeze({
     Program: 'Program',
@@ -121,9 +121,29 @@ export function parseProgram(source, options = {}) {
     return { ...ast, programType };
 }
 
+export function collectProgramErrors(source, options = {}) {
+    const errors = [];
+    try {
+        parseProgram(source, {
+            ...options,
+            strict: true,
+            errors,
+        });
+    } catch (error) {
+        if (!isLanguageError(error)) {
+            throw error;
+        }
+        if (!errors.includes(error)) {
+            errors.push(error);
+        }
+    }
+    return errors;
+}
+
 class Parser {
     constructor(source, options = {}) {
-        this.tokens = new HamsterLexer(source).tokenize();
+        this.errors = Array.isArray(options.errors) ? options.errors : null;
+        this.tokens = new HamsterLexer(source).tokenize(this.errors);
         this.current = 0;
         this.breakableDepth = 0;
         this.options = {
@@ -167,37 +187,38 @@ class Parser {
         const globals = [];
         const classes = [];
         while (!this.isAtEnd()) {
-            if (this.checkKeyword('package') || this.checkKeyword('import')) {
-                this.skipUntilSymbol(';');
-                continue;
+            try {
+                if (this.checkKeyword('package') || this.checkKeyword('import')) {
+                    this.skipUntilSymbol(';');
+                    continue;
+                }
+                if (this.isClassLikeDeclarationAhead()) {
+                    const declaration = this.parseClassLikeDeclaration();
+                    classes.push(declaration);
+                    functions.push(...collectClassMethods(declaration));
+                    continue;
+                }
+                const fn = this.tryParseFunction(true);
+                if (fn) {
+                    functions.push(fn);
+                    continue;
+                }
+                const varDecl = this.tryParseGlobalVariable();
+                if (varDecl) {
+                    globals.push(varDecl);
+                    continue;
+                }
+                if (this.options.strict) {
+                    functions.push(this.parseFunction(false));
+                    continue;
+                }
+                this.advance();
+            } catch (error) {
+                if (!this.captureError(error)) {
+                    throw error;
+                }
+                this.synchronizeTopLevel();
             }
-            if (this.isClassLikeDeclarationAhead()) {
-                const declaration = this.parseClassLikeDeclaration();
-                classes.push(declaration);
-                functions.push(...collectClassMethods(declaration));
-                continue;
-            }
-            const fn = this.tryParseFunction(true);
-            if (fn) {
-                functions.push(fn);
-                continue;
-            }
-            const varDecl = this.tryParseGlobalVariable();
-            if (varDecl) {
-                globals.push(varDecl);
-                continue;
-            }
-            if (this.options.strict) {
-                // Re-run a strict function parse to surface the precise error
-                // (parseFunction throws on the first malformed construct).
-                this.parseFunction(false);
-                // parseFunction always throws here; safety net just in case:
-                throw new HamsterParserError(
-                    `Unexpected token '${this.peek().value ?? this.peek().type}' at top level`,
-                    this.peek()
-                );
-            }
-            this.advance();
         }
         if (this.options.requireMain &&
             !functions.some(fn => fn.name === 'main' && fn.returnType === 'void' && fn.body)) {
@@ -452,7 +473,14 @@ class Parser {
         const lbrace = this.consumeSymbol('{', 'Expected { to start block');
         const statements = [];
         while (!this.checkSymbol('}') && !this.isAtEnd()) {
-            statements.push(this.parseStatement());
+            try {
+                statements.push(this.parseStatement());
+            } catch (error) {
+                if (!this.captureError(error)) {
+                    throw error;
+                }
+                this.synchronizeStatement();
+            }
         }
         this.consumeSymbol('}', 'Expected } to close block');
         return {
@@ -604,7 +632,14 @@ class Parser {
                        !this.checkKeyword('default') &&
                        !this.checkSymbol('}') &&
                        !this.isAtEnd()) {
-                    statements.push(this.parseStatement());
+                    try {
+                        statements.push(this.parseStatement());
+                    } catch (error) {
+                        if (!this.captureError(error)) {
+                            throw error;
+                        }
+                        this.synchronizeStatement(true);
+                    }
                 }
                 cases.push({
                     type: ASTNodeType.SwitchCase,
@@ -1427,6 +1462,73 @@ class Parser {
         }
     }
 
+    captureError(error) {
+        if (!this.errors || !(error instanceof HamsterParserError)) {
+            return false;
+        }
+        if (!this.errors.some(existing => haveSameDiagnostic(existing, error))) {
+            this.errors.push(error);
+        }
+        return true;
+    }
+
+    synchronizeStatement(stopsAtSwitchClause = false) {
+        let nestedBlockDepth = 0;
+        while (!this.isAtEnd()) {
+            if (nestedBlockDepth === 0) {
+                if (this.checkSymbol('}')) {
+                    return;
+                }
+                if (stopsAtSwitchClause &&
+                    (this.checkKeyword('case') || this.checkKeyword('default'))) {
+                    return;
+                }
+            }
+            const token = this.advance();
+            if (token.value === '{') {
+                nestedBlockDepth += 1;
+            } else if (token.value === '}') {
+                nestedBlockDepth -= 1;
+                if (nestedBlockDepth === 0) {
+                    return;
+                }
+            } else if (token.value === ';' && nestedBlockDepth === 0) {
+                return;
+            }
+        }
+    }
+
+    synchronizeTopLevel() {
+        let nestedBlockDepth = 0;
+        while (!this.isAtEnd()) {
+            const token = this.advance();
+            if (token.value === '{') {
+                nestedBlockDepth += 1;
+                continue;
+            }
+            if (token.value === '}') {
+                if (nestedBlockDepth > 0) {
+                    nestedBlockDepth -= 1;
+                }
+                if (nestedBlockDepth === 0) {
+                    this.skipTopLevelSeparators();
+                    return;
+                }
+                continue;
+            }
+            if (token.value === ';' && nestedBlockDepth === 0) {
+                this.skipTopLevelSeparators();
+                return;
+            }
+        }
+    }
+
+    skipTopLevelSeparators() {
+        while (this.checkSymbol(';') || this.checkSymbol('}')) {
+            this.advance();
+        }
+    }
+
     consumeIdentifier(message) {
         if (this.checkToken(TokenType.IDENTIFIER)) {
             return this.advance();
@@ -1554,4 +1656,17 @@ function collectClassMethods(declaration) {
 
 function locationFrom(token) {
     return { line: token.line, column: token.column };
+}
+
+function isLanguageError(error) {
+    return error instanceof HamsterParserError || error instanceof HamsterLexerError;
+}
+
+function haveSameDiagnostic(left, right) {
+    const leftLocation = left.token || left;
+    const rightLocation = right.token || right;
+    return left.name === right.name &&
+        left.message === right.message &&
+        leftLocation.line === rightLocation.line &&
+        leftLocation.column === rightLocation.column;
 }

@@ -167,6 +167,83 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     });
     assert.equal(incompleteProgram.globals.length, 1);
 
+    const syntaxErrors = parser.collectProgramErrors(`
+        void main() {
+            int first = ;
+            int second = ;
+        }
+    `, { requireMain: false });
+    assert.equal(syntaxErrors.length, 2);
+    assert.equal(syntaxErrors[0].token.value, ';');
+    assert.equal(syntaxErrors[0].token.length, 1);
+    assert.equal(syntaxErrors[1].token.value, ';');
+
+    const tokenLengthError = parser.collectProgramErrors(
+        'void main() { int value duplicate; }',
+        { requireMain: false }
+    );
+    assert.equal(tokenLengthError[0].token.value, 'duplicate');
+    assert.equal(tokenLengthError[0].token.length, 'duplicate'.length);
+
+    const lexerErrors = parser.collectProgramErrors(`
+        void main() {
+            @
+            #
+        }
+    `, { requireMain: false });
+    assert.equal(lexerErrors.filter(error => error.name === 'HamsterLexerError').length, 2);
+
+    const switchErrors = parser.collectProgramErrors(`
+        void main() {
+            switch (1) {
+                case 0:
+                    int value = ;
+                    break;
+            }
+            vor();
+        }
+    `, { requireMain: false });
+    assert.equal(switchErrors.length, 1);
+    assert.match(switchErrors[0].message, /Unexpected token in expression/);
+
+    const unterminatedStringErrors = parser.collectProgramErrors(`
+        void main() {
+            String value = "unterminated
+            int second = ;
+        }
+    `, { requireMain: false });
+    assert.equal(
+        unterminatedStringErrors.filter(error => error.name === 'HamsterLexerError').length,
+        1
+    );
+    assert.ok(unterminatedStringErrors.some(error => error.token?.line === 4));
+
+    const malformedFunctionErrors = parser.collectProgramErrors(`
+        void main( {
+            vor();
+        }
+        void helper( {
+            linksUm();
+        }
+    `, { requireMain: false });
+    assert.equal(malformedFunctionErrors.length, 2);
+    assert.ok(malformedFunctionErrors.every(error => /Expected type keyword/.test(error.message)));
+
+    assert.throws(
+        () => parser.parseProgram(`
+            void main() {
+                int first = ;
+                int second = ;
+            }
+        `, { requireMain: false, strict: true }),
+        error => error.token?.line === 3
+    );
+
+    assert.deepEqual(
+        parser.collectProgramErrors('void main() { vor(); }', { requireMain: false }),
+        []
+    );
+
     const switchState = runProgram(parser, runner, `
         int result = 0;
         void main() {
