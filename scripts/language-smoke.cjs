@@ -167,6 +167,32 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     });
     assert.equal(incompleteProgram.globals.length, 1);
 
+    const syntaxErrors = parser.collectProgramErrors(`
+        void main() {
+            int first = ;
+            int second = ;
+        }
+    `, { requireMain: false });
+    assert.equal(syntaxErrors.length, 2);
+    assert.equal(syntaxErrors[0].token.value, ';');
+    assert.equal(syntaxErrors[0].token.length, 1);
+    assert.equal(syntaxErrors[1].token.value, ';');
+
+    const tokenLengthError = parser.collectProgramErrors(
+        'void main() { int value duplicate; }',
+        { requireMain: false }
+    );
+    assert.equal(tokenLengthError[0].token.value, 'duplicate');
+    assert.equal(tokenLengthError[0].token.length, 'duplicate'.length);
+
+    const lexerErrors = parser.collectProgramErrors(`
+        void main() {
+            @
+            #
+        }
+    `, { requireMain: false });
+    assert.equal(lexerErrors.filter(error => error.name === 'HamsterLexerError').length, 2);
+
     const switchState = runProgram(parser, runner, `
         int result = 0;
         void main() {

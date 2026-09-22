@@ -93,20 +93,22 @@ export const TokenType = Object.freeze({
 });
 
 export class Token {
-    constructor(type, value, line, column) {
+    constructor(type, value, line, column, length = 0) {
         this.type = type;
         this.value = value;
         this.line = line;
         this.column = column;
+        this.length = length;
     }
 }
 
 export class HamsterLexerError extends Error {
-    constructor(message, line, column) {
+    constructor(message, line, column, length = 1) {
         super(`Line ${line}, column ${column}: ${message}`);
         this.name = 'HamsterLexerError';
         this.line = line;
         this.column = column;
+        this.length = length;
     }
 }
 
@@ -119,60 +121,72 @@ export class HamsterLexer {
         this.column = 1;
     }
 
-    tokenize() {
+    tokenize(errors = null) {
         const tokens = [];
         while (true) {
-            this.skipTrivia();
-            if (this.isAtEnd()) {
-                tokens.push(new Token(TokenType.EOF, null, this.line, this.column));
-                break;
+            try {
+                this.skipTrivia();
+                if (this.isAtEnd()) {
+                    tokens.push(new Token(TokenType.EOF, null, this.line, this.column));
+                    break;
+                }
+                const token = this.scanToken();
+                if (token) tokens.push(token);
+            } catch (error) {
+                if (!errors || !(error instanceof HamsterLexerError)) {
+                    throw error;
+                }
+                errors.push(error);
+                if (this.isAtEnd()) {
+                    tokens.push(new Token(TokenType.EOF, null, this.line, this.column));
+                    break;
+                }
             }
-            const token = this.scanToken();
-            if (token) tokens.push(token);
         }
         return tokens;
     }
 
     scanToken() {
+        const startIndex = this.index;
         const startLine = this.line;
         const startColumn = this.column;
         const ch = this.advance();
 
         if (isDigit(ch)) {
             const value = this.readNumber(ch);
-            return new Token(TokenType.INTEGER, value, startLine, startColumn);
+            return new Token(TokenType.INTEGER, value, startLine, startColumn, this.index - startIndex);
         }
 
         if (isIdentifierStart(ch)) {
             const text = this.readIdentifier(ch);
             if (text === 'true' || text === 'false') {
-                return new Token(TokenType.BOOLEAN, text === 'true', startLine, startColumn);
+                return new Token(TokenType.BOOLEAN, text === 'true', startLine, startColumn, this.index - startIndex);
             }
             if (text === 'null') {
-                return new Token(TokenType.NULL, null, startLine, startColumn);
+                return new Token(TokenType.NULL, null, startLine, startColumn, this.index - startIndex);
             }
             if (KEYWORDS.has(text)) {
-                return new Token(TokenType.KEYWORD, text, startLine, startColumn);
+                return new Token(TokenType.KEYWORD, text, startLine, startColumn, this.index - startIndex);
             }
-            return new Token(TokenType.IDENTIFIER, text, startLine, startColumn);
+            return new Token(TokenType.IDENTIFIER, text, startLine, startColumn, this.index - startIndex);
         }
 
         if (ch === '"') {
-            return this.readString(startLine, startColumn);
+            return this.readString(startIndex, startLine, startColumn);
         }
 
         const maybeTwoChar = ch + this.peek();
         if (MULTI_CHAR_OPERATORS.has(maybeTwoChar)) {
             this.advance();
-            return new Token(TokenType.OPERATOR, maybeTwoChar, startLine, startColumn);
+            return new Token(TokenType.OPERATOR, maybeTwoChar, startLine, startColumn, this.index - startIndex);
         }
 
         if (SINGLE_CHAR_TOKENS.has(ch)) {
-            return new Token(TokenType.SYMBOL, ch, startLine, startColumn);
+            return new Token(TokenType.SYMBOL, ch, startLine, startColumn, this.index - startIndex);
         }
 
         if (SINGLE_CHAR_OPERATORS.has(ch)) {
-            return new Token(TokenType.OPERATOR, ch, startLine, startColumn);
+            return new Token(TokenType.OPERATOR, ch, startLine, startColumn, this.index - startIndex);
         }
 
         throw new HamsterLexerError(`Unexpected character '${ch}'`, startLine, startColumn);
@@ -194,12 +208,18 @@ export class HamsterLexer {
         return value;
     }
 
-    readString(startLine, startColumn) {
+    readString(startIndex, startLine, startColumn) {
         let value = '';
         while (!this.isAtEnd()) {
             const ch = this.advance();
             if (ch === '"') {
-                return new Token(TokenType.STRING, value, startLine, startColumn);
+                return new Token(
+                    TokenType.STRING,
+                    value,
+                    startLine,
+                    startColumn,
+                    this.index - startIndex
+                );
             }
             if (ch === '\\') {
                 const escaped = this.advance();
@@ -215,7 +235,12 @@ export class HamsterLexer {
             }
             value += ch;
         }
-        throw new HamsterLexerError('Unterminated string literal', startLine, startColumn);
+        throw new HamsterLexerError(
+            'Unterminated string literal',
+            startLine,
+            startColumn,
+            this.index - startIndex
+        );
     }
 
     skipTrivia() {
@@ -247,6 +272,9 @@ export class HamsterLexer {
     }
 
     skipBlockComment() {
+        const startIndex = this.index;
+        const startLine = this.line;
+        const startColumn = this.column;
         // consume the initial "/*"
         this.advance();
         this.advance();
@@ -258,7 +286,12 @@ export class HamsterLexer {
             }
             this.advance();
         }
-        throw new HamsterLexerError('Unterminated block comment', this.line, this.column);
+        throw new HamsterLexerError(
+            'Unterminated block comment',
+            startLine,
+            startColumn,
+            this.index - startIndex
+        );
     }
 
     advance() {
