@@ -72,7 +72,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 Terrain/corn/wall model (width/height/walls/corn grids, default hamster id -1) matches `domain-model.md` semantics.
 
 ### 5. Terrain Editor (`terrainEditor.ts`)
-- 🟡 No UI to edit the default hamster's mouth/corn inventory.
+- 🟢 The default hamster's mouth/corn inventory can be edited and is preserved in the terrain file.
 - 🟢 `setWall()` prevents placing a wall under any hamster and clears the cell's corn count when a wall is placed, matching the original terrain-editing invariants.
 - 🟡 Width/height inputs don't refresh to reflect a loaded `.ter` file's actual dimensions (canvas resizes correctly; text inputs stay stale).
 - 🟡 Malformed/short `.ter` files silently fall back to a default 10×8 terrain with no user-visible error.

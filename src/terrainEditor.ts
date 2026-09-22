@@ -131,6 +131,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         <button data-tool="hamster">Move</button>
         <button data-tool="rotate">Rotate</button>
         <label>Corn <input type="number" id="corn-amount" value="1" min="0"></label>
+        <label>Mouth <input type="number" id="hamster-mouth" value="0" min="0"></label>
         <span id="hover-info">Row -, Col -</span>
     </div>
     <div id="canvas-container">
@@ -142,6 +143,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         const vscode = acquireVsCodeApi();
         const canvas = document.getElementById('terrain');
         const ctx = canvas.getContext('2d');
+        const mouthInput = document.getElementById('hamster-mouth');
 
         const CELL = 48;
         const HAMSTER_COLORS = [
@@ -262,6 +264,12 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             rotateDefaultHamster(turns) {
                 const h=getHamster(-1); h.dir=((h.dir+(turns|0))%4+4)%4;
             },
+            setDefaultHamsterMouth(count) {
+                const numericCount=Number(count);
+                getHamster(-1).mouth=Number.isFinite(numericCount)
+                    ? Math.max(0,Math.trunc(numericCount))
+                    : 0;
+            },
             removeAdditionalHamster(col,row) {
                 engineState.terrain.hamsters = engineState.terrain.hamsters.filter(
                     h => h.id===-1 || h.x!==col || h.y!==row
@@ -274,6 +282,8 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             if (!state) return;
             const {terrain} = state;
             const {width,height,walls,corn,hamsters} = terrain;
+            const defaultHamster=hamsters.find(h => h.id===-1);
+            if(mouthInput && defaultHamster) mouthInput.value=String(defaultHamster.mouth);
             canvas.width = width*CELL; canvas.height = height*CELL;
             ctx.fillStyle='#f9f5e7'; ctx.fillRect(0,0,canvas.width,canvas.height);
             ctx.strokeStyle='#ccc'; ctx.lineWidth=1;
@@ -385,6 +395,12 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             const h = parseInt(document.getElementById('ter-h').value, 10);
             if (isNaN(w)||isNaN(h)||w<1||h<1) return;
             initEngine(w, h);
+            notifyChanged();
+        });
+
+        mouthInput?.addEventListener('change', () => {
+            engine.setDefaultHamsterMouth(mouthInput.value);
+            render(engineState);
             notifyChanged();
         });
 
