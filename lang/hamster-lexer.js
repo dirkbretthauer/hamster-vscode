@@ -211,6 +211,14 @@ export class HamsterLexer {
     readString(startIndex, startLine, startColumn) {
         let value = '';
         while (!this.isAtEnd()) {
+            if (this.peek() === '\r' || this.peek() === '\n') {
+                throw new HamsterLexerError(
+                    'Unterminated string literal',
+                    startLine,
+                    startColumn,
+                    this.index - startIndex
+                );
+            }
             const ch = this.advance();
             if (ch === '"') {
                 return new Token(
@@ -222,6 +230,9 @@ export class HamsterLexer {
                 );
             }
             if (ch === '\\') {
+                if (this.isAtEnd() || this.peek() === '\r' || this.peek() === '\n') {
+                    continue;
+                }
                 const escaped = this.advance();
                 switch (escaped) {
                     case 'n': value += '\n'; break;

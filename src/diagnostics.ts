@@ -55,10 +55,19 @@ export class HamsterDiagnostics implements vscode.Disposable {
         await this.load();
         if (!this.collectProgramErrors) return;
 
-        const diagnostics = this.collectProgramErrors(
-            document.getText(),
-            { requireMain: false }
-        ).map(error => {
+        let errors: LanguageError[];
+        try {
+            errors = this.collectProgramErrors(
+                document.getText(),
+                { requireMain: false }
+            );
+        } catch (error) {
+            console.error('Failed to collect hamster diagnostics:', error);
+            this.collection.delete(document.uri);
+            return;
+        }
+
+        const diagnostics = errors.map(error => {
             const range = createDiagnosticRange(document, error);
             return new vscode.Diagnostic(
                 range,
@@ -86,6 +95,28 @@ function createDiagnosticRange(
     const column = Math.min(Math.max(0, requestedColumn), lineLength);
     const start = new vscode.Position(line, column);
     const length = Math.max(0, token?.length ?? error.length ?? 1);
+    if (length === 0) {
+        return createEndOfFileRange(document, start);
+    }
     const endOffset = Math.min(document.getText().length, document.offsetAt(start) + length);
     return new vscode.Range(start, document.positionAt(endOffset));
+}
+
+function createEndOfFileRange(
+    document: vscode.TextDocument,
+    position: vscode.Position
+): vscode.Range {
+    if (document.getText().length === 0) {
+        return new vscode.Range(position, position);
+    }
+    for (let line = position.line; line >= 0; line -= 1) {
+        const lineLength = document.lineAt(line).text.length;
+        if (lineLength > 0) {
+            return new vscode.Range(
+                new vscode.Position(line, lineLength - 1),
+                new vscode.Position(line, lineLength)
+            );
+        }
+    }
+    return new vscode.Range(position, position);
 }

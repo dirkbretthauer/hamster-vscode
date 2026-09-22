@@ -187,7 +187,6 @@ class Parser {
         const globals = [];
         const classes = [];
         while (!this.isAtEnd()) {
-            const declarationStart = this.current;
             try {
                 if (this.checkKeyword('package') || this.checkKeyword('import')) {
                     this.skipUntilSymbol(';');
@@ -210,19 +209,15 @@ class Parser {
                     continue;
                 }
                 if (this.options.strict) {
-                    // Re-run a strict function parse to surface the precise error.
-                    this.parseFunction(false);
-                    throw new HamsterParserError(
-                        `Unexpected token '${this.peek().value ?? this.peek().type}' at top level`,
-                        this.peek()
-                    );
+                    functions.push(this.parseFunction(false));
+                    continue;
                 }
                 this.advance();
             } catch (error) {
                 if (!this.captureError(error)) {
                     throw error;
                 }
-                this.synchronizeTopLevel(declarationStart);
+                this.synchronizeTopLevel();
             }
         }
         if (this.options.requireMain &&
@@ -478,14 +473,13 @@ class Parser {
         const lbrace = this.consumeSymbol('{', 'Expected { to start block');
         const statements = [];
         while (!this.checkSymbol('}') && !this.isAtEnd()) {
-            const statementStart = this.current;
             try {
                 statements.push(this.parseStatement());
             } catch (error) {
                 if (!this.captureError(error)) {
                     throw error;
                 }
-                this.synchronizeStatement(statementStart);
+                this.synchronizeStatement();
             }
         }
         this.consumeSymbol('}', 'Expected } to close block');
@@ -638,7 +632,14 @@ class Parser {
                        !this.checkKeyword('default') &&
                        !this.checkSymbol('}') &&
                        !this.isAtEnd()) {
-                    statements.push(this.parseStatement());
+                    try {
+                        statements.push(this.parseStatement());
+                    } catch (error) {
+                        if (!this.captureError(error)) {
+                            throw error;
+                        }
+                        this.synchronizeStatement(true);
+                    }
                 }
                 cases.push({
                     type: ASTNodeType.SwitchCase,
@@ -1471,59 +1472,61 @@ class Parser {
         return true;
     }
 
-    synchronizeStatement(statementStart) {
+    synchronizeStatement(stopsAtSwitchClause = false) {
+        let nestedBlockDepth = 0;
         while (!this.isAtEnd()) {
-            if (this.current > statementStart && this.isStatementStart()) {
-                return;
+            if (nestedBlockDepth === 0) {
+                if (this.checkSymbol('}')) {
+                    return;
+                }
+                if (stopsAtSwitchClause &&
+                    (this.checkKeyword('case') || this.checkKeyword('default'))) {
+                    return;
+                }
             }
-            if (this.checkSymbol('}')) {
-                return;
-            }
-            this.advance();
-            if (this.previous().value === ';') {
+            const token = this.advance();
+            if (token.value === '{') {
+                nestedBlockDepth += 1;
+            } else if (token.value === '}') {
+                nestedBlockDepth -= 1;
+                if (nestedBlockDepth === 0) {
+                    return;
+                }
+            } else if (token.value === ';' && nestedBlockDepth === 0) {
                 return;
             }
         }
     }
 
-    synchronizeTopLevel(declarationStart) {
+    synchronizeTopLevel() {
+        let nestedBlockDepth = 0;
         while (!this.isAtEnd()) {
-            if (this.current > declarationStart && this.isTopLevelStart()) {
+            const token = this.advance();
+            if (token.value === '{') {
+                nestedBlockDepth += 1;
+                continue;
+            }
+            if (token.value === '}') {
+                if (nestedBlockDepth > 0) {
+                    nestedBlockDepth -= 1;
+                }
+                if (nestedBlockDepth === 0) {
+                    this.skipTopLevelSeparators();
+                    return;
+                }
+                continue;
+            }
+            if (token.value === ';' && nestedBlockDepth === 0) {
+                this.skipTopLevelSeparators();
                 return;
             }
+        }
+    }
+
+    skipTopLevelSeparators() {
+        while (this.checkSymbol(';') || this.checkSymbol('}')) {
             this.advance();
-            if (this.previous().value === ';' || this.previous().value === '}') {
-                return;
-            }
         }
-    }
-
-    isStatementStart() {
-        if (this.checkSymbol('{') || this.checkToken(TokenType.IDENTIFIER)) {
-            return true;
-        }
-        if (this.isTypeKeywordAhead()) {
-            return true;
-        }
-        return [
-            'if',
-            'do',
-            'while',
-            'for',
-            'switch',
-            'try',
-            'throw',
-            'break',
-            'return',
-        ].some(keyword => this.checkKeyword(keyword));
-    }
-
-    isTopLevelStart() {
-        return this.isClassLikeDeclarationAhead() ||
-            this.isTypeKeywordAhead() ||
-            this.isModifierToken(this.peek()) ||
-            this.checkKeyword('package') ||
-            this.checkKeyword('import');
     }
 
     consumeIdentifier(message) {
