@@ -167,6 +167,113 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     });
     assert.equal(incompleteProgram.globals.length, 1);
 
+    const expressionProgram = parser.parseProgram(`
+        int doubled(int value) {
+            return value * 2;
+        }
+        void main() {}
+    `, { strict: true });
+    const expressionState = runner.createRunnerState(expressionProgram, createRuntime());
+    expressionState.scopes.push(new Map([['value', 4], ['items', [2, 3, 5]]]));
+    expressionState.frames.push({
+        name: 'main',
+        scopeIndex: 1,
+        loc: { line: 5, column: 9 },
+    });
+    assert.equal(
+        runner.evaluateExpression(
+            parser.parseExpression('doubled(value) + items[1]'),
+            expressionState,
+            1
+        ),
+        11
+    );
+    assert.equal(
+        runner.evaluateExpression(
+            parser.parseExpression('value > 3 && items.length == 3'),
+            expressionState,
+            1
+        ),
+        true
+    );
+    expressionState.scopes.push(new Map([['value', 9]]));
+    expressionState.frames.push({
+        name: 'doubled',
+        scopeIndex: 2,
+        loc: { line: 2, column: 9 },
+    });
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('value'), expressionState, 1),
+        4
+    );
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('value'), expressionState, 2),
+        9
+    );
+    assert.throws(
+        () => runner.evaluateExpression(parser.parseExpression('value++'), expressionState, 1),
+        /only supports read-only expressions/
+    );
+    assert.equal(expressionState.scopes[1].get('value'), 4);
+    assert.throws(
+        () => parser.parseExpression('value trailing'),
+        /Unexpected token after expression/
+    );
+
+    const isolatedEvaluationProgram = parser.parseProgram(`
+        int counter = 1;
+        int increment() {
+            counter++;
+            return counter;
+        }
+        int moveAndRead() {
+            vor();
+            return counter;
+        }
+        int waitForValue() {
+            return waitValue();
+        }
+        int loopForever() {
+            while (true) {}
+            return 0;
+        }
+        void main() {}
+    `, { strict: true });
+    let runtimeCalls = 0;
+    const isolatedRuntime = createRuntime();
+    isolatedRuntime.callBuiltin = name => {
+        runtimeCalls += 1;
+        if (name === 'waitValue') {
+            throw new runner.RunnerPause('value needed');
+        }
+        return undefined;
+    };
+    const isolatedState = runner.createRunnerState(isolatedEvaluationProgram, isolatedRuntime);
+    isolatedState.frames.push({ name: 'main', scopeIndex: 1, loc: { line: 17, column: 9 } });
+    isolatedState.scopes.push(new Map());
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('increment()'), isolatedState),
+        2
+    );
+    assert.equal(isolatedState.scopes[0].get('counter'), 1);
+    assert.throws(
+        () => runner.evaluateExpression(parser.parseExpression('moveAndRead()'), isolatedState),
+        /cannot execute hamster instructions/
+    );
+    assert.equal(runtimeCalls, 0);
+    const frameCount = isolatedState.frames.length;
+    const scopeCount = isolatedState.scopes.length;
+    assert.throws(
+        () => runner.evaluateExpression(parser.parseExpression('waitForValue()'), isolatedState),
+        /cannot request terminal input/
+    );
+    assert.equal(isolatedState.frames.length, frameCount);
+    assert.equal(isolatedState.scopes.length, scopeCount);
+    assert.throws(
+        () => runner.evaluateExpression(parser.parseExpression('loopForever()'), isolatedState),
+        /exceeded the step limit/
+    );
+
     const syntaxErrors = parser.collectProgramErrors(`
         void main() {
             int first = ;

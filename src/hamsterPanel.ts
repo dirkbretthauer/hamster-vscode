@@ -732,7 +732,7 @@ export class HamsterPanel {
                 case 'dbg:stackTrace':       dbgSendStackTrace(msg.requestId); break;
                 case 'dbg:scopes':           dbgSendScopes(msg.requestId, msg.frameId); break;
                 case 'dbg:variables':        dbgSendVariables(msg.requestId, msg.variablesReference); break;
-                case 'dbg:evaluate':         dbgEvaluate(msg.requestId, msg.expression); break;
+                case 'dbg:evaluate':         dbgEvaluate(msg.requestId, msg.expression, msg.frameId); break;
                 case 'dbg:disconnect':       dbgDisconnect(); break;
             }
         });
@@ -1050,19 +1050,25 @@ export class HamsterPanel {
             vscode.postMessage({type:'dbg:variables', requestId, variables: vars});
         }
 
-        function dbgEvaluate(requestId, expression) {
-            let result = '<unavailable>';
-            const expr = String(expression||'').trim();
-            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(expr) && runnerState && Array.isArray(runnerState.scopes)) {
-                for (let i = runnerState.scopes.length - 1; i >= 0; i--) {
-                    const s = runnerState.scopes[i];
-                    if (s && typeof s.has === 'function' && s.has(expr)) {
-                        result = dbgFormatValue(s.get(expr));
-                        break;
-                    }
+        function dbgEvaluate(requestId, expression, frameId) {
+            try {
+                if (!runnerState) {
+                    throw new Error('No program is currently paused');
                 }
+                const expr = parseExpression(String(expression||'').trim());
+                const value = evaluateExpression(expr, runnerState, frameId);
+                vscode.postMessage({
+                    type: 'dbg:evaluate',
+                    requestId,
+                    result: dbgFormatValue(value),
+                });
+            } catch (error) {
+                vscode.postMessage({
+                    type: 'dbg:evaluate',
+                    requestId,
+                    error: error && error.message ? error.message : String(error),
+                });
             }
-            vscode.postMessage({type:'dbg:evaluate', requestId, result});
         }
 
         document.getElementById('btn-compile').addEventListener('click', () => handleCommand('compile'));
