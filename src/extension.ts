@@ -8,7 +8,7 @@ let currentPanel: HamsterPanel | undefined;
 let diagnostics: HamsterDiagnostics;
 
 export function activate(context: vscode.ExtensionContext) {
-    diagnostics = new HamsterDiagnostics(context);
+    diagnostics = new HamsterDiagnostics();
     context.subscriptions.push(diagnostics);
 
     context.subscriptions.push(
@@ -84,7 +84,6 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.debug.registerDebugAdapterDescriptorFactory('hamster', {
             createDebugAdapterDescriptor: () => {
                 const session = new HamsterDebugSession({
-                    extensionUri: context.extensionUri,
                     ensurePanel: async () => {
                         await ensurePanel(context);
                         return currentPanel!;

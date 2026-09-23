@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
+import {
+    collectExecutableLines,
+    findExecutableLineAtOrAfter,
+    parseProgram,
+} from '../lang/hamster-parser.js';
 import { HamsterPanel } from './hamsterPanel';
-import { loadLanguageModule } from './utils';
 
 interface PendingRequest {
     resolve: (value: any) => void;
@@ -16,7 +20,6 @@ interface DebugBreakpoint {
 
 export interface DebugSessionDeps {
     ensurePanel: () => Promise<HamsterPanel>;
-    extensionUri: vscode.Uri;
 }
 
 /**
@@ -311,7 +314,6 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         const inputBps: any[] = args.breakpoints || [];
         const requestedLines = inputBps.map(b => b.line | 0);
         let executableLines: number[] = [];
-        let language: Awaited<ReturnType<typeof loadLanguageModule>> | undefined;
         let verificationError: string | undefined;
 
         if (!sourcePath) {
@@ -324,9 +326,8 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
                 const source = isRunningProgram && this._programSource !== undefined
                     ? this._programSource
                     : await this.readBreakpointSource(sourcePath, normalizedSourcePath);
-                language = await loadLanguageModule(this.deps.extensionUri);
-                const ast = language.parseProgram(source);
-                executableLines = language.collectExecutableLines(ast);
+                const ast = parseProgram(source);
+                executableLines = collectExecutableLines(ast);
                 if (executableLines.length === 0) {
                     verificationError = 'The program contains no executable statements.';
                 }
@@ -346,7 +347,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
             if (verificationError) {
                 return { verified: false, line: requestedLine, message: verificationError };
             }
-            const line = language!.findExecutableLineAtOrAfter(requestedLine, executableLines);
+            const line = findExecutableLineAtOrAfter(requestedLine, executableLines);
             if (line === null) {
                 return {
                     verified: false,

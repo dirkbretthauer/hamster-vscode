@@ -25,6 +25,11 @@ const webExtensionConfig = {
 		extensions: ['.ts', '.js']
 	},
 	module: {
+		parser: {
+			javascript: {
+				exportsPresence: 'error'
+			}
+		},
 		rules: [
 			{
 				test: /\.ts$/,
