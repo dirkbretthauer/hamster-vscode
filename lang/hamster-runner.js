@@ -65,6 +65,8 @@ const HAMSTER_INSTRUCTIONS = new Set([
     'rechtsUm',
 ]);
 
+const DEBUG_EVALUATION_STEP_LIMIT = 10000;
+
 function isHamsterInstruction(name) {
     return HAMSTER_INSTRUCTIONS.has(name);
 }
@@ -237,34 +239,106 @@ export function executeRunnerStep(state, opts) {
 }
 
 export function evaluateExpression(node, state, frameId) {
+    validateDebuggerExpression(node);
     const evaluationState = stateForEvaluation(state, frameId);
     const generator = evalExpressionGen(node, evaluationState, 0);
-    while (true) {
-        const result = generator.next();
-        if (result.done) {
-            return result.value;
+    let yieldedSteps = 0;
+    try {
+        while (true) {
+            if (++yieldedSteps > DEBUG_EVALUATION_STEP_LIMIT) {
+                throw new Error('Debugger evaluation exceeded the step limit');
+            }
+            const result = generator.next();
+            if (result.done) {
+                return result.value;
+            }
+            if (result.value?.kind === 'needsInput') {
+                throw new Error('Debugger evaluation cannot request terminal input');
+            }
+            if (result.value?.kind === 'instruction') {
+                throw new Error('Debugger evaluation cannot execute hamster instructions');
+            }
         }
-        if (result.value?.kind === 'needsInput') {
-            throw new Error('Debugger evaluation cannot request terminal input');
+    } finally {
+        if (typeof generator.return === 'function') {
+            generator.return();
         }
     }
 }
 
 function stateForEvaluation(state, frameId) {
-    if (frameId == null) {
-        return state;
-    }
-    const frameIndex = Number(frameId) - 1;
-    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= state.frames.length) {
-        throw new Error('Unknown stack frame: ' + frameId);
+    let frameIndex = state.frames.length - 1;
+    if (frameId != null) {
+        frameIndex = Number(frameId) - 1;
+        if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= state.frames.length) {
+            throw new Error('Unknown stack frame: ' + frameId);
+        }
     }
     const nextFrame = state.frames[frameIndex + 1];
     const scopeEnd = nextFrame ? nextFrame.scopeIndex : state.scopes.length;
+    const seen = new Map();
     return {
         ...state,
-        scopes: state.scopes.slice(0, scopeEnd),
-        frames: state.frames.slice(0, frameIndex + 1),
+        scopes: state.scopes.slice(0, scopeEnd).map(scope => cloneEvaluationValue(scope, seen)),
+        frames: state.frames.slice(0, Math.max(0, frameIndex + 1)),
+        staticFields: cloneEvaluationValue(state.staticFields, seen),
+        evaluationStepsRemaining: DEBUG_EVALUATION_STEP_LIMIT,
     };
+}
+
+function cloneEvaluationValue(value, seen) {
+    if (value == null || typeof value !== 'object') {
+        return value;
+    }
+    if (seen.has(value)) {
+        return seen.get(value);
+    }
+    if (value instanceof Map) {
+        const clone = new Map();
+        seen.set(value, clone);
+        for (const [key, entry] of value) {
+            clone.set(key, cloneEvaluationValue(entry, seen));
+        }
+        return clone;
+    }
+    if (Array.isArray(value)) {
+        const clone = [];
+        seen.set(value, clone);
+        for (const entry of value) {
+            clone.push(cloneEvaluationValue(entry, seen));
+        }
+        return clone;
+    }
+    const clone = Object.create(Object.getPrototypeOf(value));
+    seen.set(value, clone);
+    for (const key of Object.keys(value)) {
+        clone[key] = cloneEvaluationValue(value[key], seen);
+    }
+    return clone;
+}
+
+function validateDebuggerExpression(node) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === ASTNodeType.PrefixExpression ||
+        node.type === ASTNodeType.PostfixExpression ||
+        node.type === ASTNodeType.NewExpression) {
+        throw new Error('Debugger evaluation only supports read-only expressions');
+    }
+    for (const value of Object.values(node)) {
+        if (Array.isArray(value)) {
+            value.forEach(validateDebuggerExpression);
+        } else if (value && typeof value === 'object' && value.type) {
+            validateDebuggerExpression(value);
+        }
+    }
+}
+
+function consumeEvaluationStep(state) {
+    if (state.evaluationStepsRemaining == null) return;
+    state.evaluationStepsRemaining -= 1;
+    if (state.evaluationStepsRemaining < 0) {
+        throw new Error('Debugger evaluation exceeded the step limit');
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -333,6 +407,7 @@ function* programGenerator(state, mainFn) {
 // ---------------------------------------------------------------------------
 function* executeStatementGen(node, state, callDepth) {
     if (!node) return undefined;
+    consumeEvaluationStep(state);
 
     // Statement-level yield – swallowed by the runner in 'instruction'
     // granularity mode, but observed by the debugger in 'statement' mode so
@@ -488,6 +563,7 @@ function* executeStatementGen(node, state, callDepth) {
 // Yields only when a hamster instruction is encountered inside a call.
 // ---------------------------------------------------------------------------
 function* evalExpressionGen(node, state, callDepth) {
+    consumeEvaluationStep(state);
     switch (node.type) {
         case ASTNodeType.Literal:
             return node.value;
