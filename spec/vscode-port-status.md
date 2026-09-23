@@ -86,7 +86,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟡 `hamster.compile` command is a **strict parse/validate** (`requireMain: true, strict: true`), not a real compilation step — reasonable given there's no bytecode target, but should be labeled/documented as "Check" rather than "Compile" to avoid confusing users familiar with the original.
 - 🟢 Program-type markers select validation behavior consistently across diagnostics, compile, run, and debug paths; class files do not require `main()` and cannot be run directly.
 - 🟢 Live diagnostics (`diagnostics.ts`) recover after independent lexer/parser errors and underline each offending token using its exact source length.
-- 🟡 `new Function()` is used by `loadLanguageModule()` to eval the bundled lexer+parser JS at runtime in the extension host — a maintainability/code-smell concern (not a real vulnerability since the code is extension-bundled, not user-supplied), better replaced with a static import/bundle step.
+- 🟢 The extension host statically imports and bundles the lexer/parser module; raw source loading is limited to the nonce-protected simulator webview script.
 
 ### 8. Debugger (`hamsterDebugSession.ts` + debug bridge in `hamsterPanel.ts`)
 - 🟢 **Real, persistent, user-settable breakpoints** — a genuine improvement over the original app, which had none (`debugger-ui.md`).

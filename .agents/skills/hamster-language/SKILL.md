@@ -131,7 +131,7 @@ The parser currently only supports `=`. To add compound assignment:
 
 ### 5. Diagnostics (`src/diagnostics.ts`)
 
-Usually no changes needed. The diagnostics system runs the parser in `{ compatibility: true, requireMain: false }` mode and surfaces any `HamsterParserError` or `HamsterLexerError` as VS Code diagnostics. As long as your parser changes throw proper errors with token location info, diagnostics will work automatically.
+Usually no changes needed. The diagnostics system uses the parser's static ES-module import and surfaces any `HamsterParserError` or `HamsterLexerError` as VS Code diagnostics. As long as your parser changes throw proper errors with token location info, diagnostics will work automatically.
 
 ## Current Feature Gaps (from spec)
 
@@ -151,7 +151,8 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ## Conventions
 
-- All three `lang/*.js` files use **ES module syntax** (`export`/`import`). They are loaded in the VS Code webview via a bundler (webpack) and in `diagnostics.ts` via `stripEsModule()` + `new Function()`.
+- All three `lang/*.js` files use **ES module syntax** (`export`/`import`). The extension host bundles the parser through a static import. The simulator webview loads nonce-protected inline copies produced by `stripEsModule()`.
+- Run `npm run watch` while editing `lang/*.js` so extension-host diagnostics and debugger validation stay in sync with the webview's runtime-loaded scripts.
 - AST nodes are **plain objects** with a `type` string field and `loc: { line, column }` for source mapping.
 - The parser uses a **checkpoint/rollback** pattern (`tryParseFunction`) for speculative parsing. Use the same pattern when adding ambiguous constructs.
 - Token helpers: `matchKeyword(v)`, `matchSymbol(s)`, `matchOperator(op)`, `checkKeyword(v)`, `checkSymbol(s)`, `checkOperator(op)`, `consumeKeyword(v, msg)`, `consumeSymbol(s, msg)`, `consumeOperator(op, msg)`.

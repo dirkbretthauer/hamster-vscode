@@ -1,34 +1,20 @@
 import * as vscode from 'vscode';
-import { LanguageError, loadLanguageModule } from './utils';
+import {
+    collectProgramErrors,
+    type HamsterLanguageError,
+} from '../lang/hamster-parser.js';
 
 export class HamsterDiagnostics implements vscode.Disposable {
     private collection: vscode.DiagnosticCollection;
-    private collectProgramErrors:
-        ((source: string, options?: Record<string, unknown>) => LanguageError[]) | null = null;
-    private loaded = false;
 
-    constructor(private readonly context: vscode.ExtensionContext) {
+    constructor() {
         this.collection = vscode.languages.createDiagnosticCollection('hamster');
     }
 
-    private async load(): Promise<void> {
-        if (this.loaded) return;
-        try {
-            const mod = await loadLanguageModule(this.context.extensionUri);
-            this.collectProgramErrors = mod.collectProgramErrors;
-            this.loaded = true;
-        } catch (e) {
-            console.error('Failed to load hamster-parser:', e);
-        }
-    }
-
     async update(document: vscode.TextDocument): Promise<void> {
-        await this.load();
-        if (!this.collectProgramErrors) return;
-
-        let errors: LanguageError[];
+        let errors: HamsterLanguageError[];
         try {
-            errors = this.collectProgramErrors(
+            errors = collectProgramErrors(
                 document.getText(),
                 { requireMain: false }
             );
@@ -56,7 +42,7 @@ export class HamsterDiagnostics implements vscode.Disposable {
 
 function createDiagnosticRange(
     document: vscode.TextDocument,
-    error: LanguageError
+    error: HamsterLanguageError
 ): vscode.Range {
     const token = error.token;
     const requestedLine = (token?.line ?? error.line ?? 1) - 1;
