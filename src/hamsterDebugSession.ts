@@ -435,7 +435,11 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     private async handleEvaluate(request: any): Promise<void> {
         try {
             const expression = String(request.arguments?.expression ?? '');
-            const res: any = await this.requestFromPanel('dbg:evaluate', { expression });
+            const frameId = request.arguments?.frameId;
+            const res: any = await this.requestFromPanel('dbg:evaluate', { expression, frameId });
+            if (res.error) {
+                throw new Error(String(res.error));
+            }
             this.sendResponse(request, { result: String(res.result ?? ''), variablesReference: 0 });
         } catch (e: any) {
             this.sendErrorResponse(request, e?.message ?? String(e));

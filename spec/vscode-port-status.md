@@ -93,7 +93,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 Stack trace / scopes / variables implemented via interpreter-maintained frames — functions even without a JDI equivalent.
 - 🟡 `next`, `stepIn`, and `stepOut` all currently perform the *same* single AST-statement advance — no call-depth-aware step-out/step-over distinction.
 - 🟢 Breakpoints are validated against parsed executable statement locations, moved to the next valid line, and honored during both continue and single-step operations.
-- 🟡 `evaluate` (DAP hover/watch) only resolves bare identifiers — no expression evaluation.
+- 🟢 `evaluate` (DAP hover/watch/debug console) parses and evaluates expressions in the selected stack frame.
 - 🟡 No object/array expansion in the variables view (`variablesReference` always 0).
 
 ### 9. Explicitly Out of Scope (confirmed clean)

@@ -121,6 +121,15 @@ export function parseProgram(source, options = {}) {
     return { ...ast, programType };
 }
 
+export function parseExpression(source) {
+    const parser = new Parser(source);
+    const expression = parser.parseExpression();
+    if (!parser.isAtEnd()) {
+        throw new HamsterParserError('Unexpected token after expression', parser.peek());
+    }
+    return expression;
+}
+
 export function collectProgramErrors(source, options = {}) {
     const errors = [];
     try {

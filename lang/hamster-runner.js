@@ -236,6 +236,37 @@ export function executeRunnerStep(state, opts) {
     }
 }
 
+export function evaluateExpression(node, state, frameId) {
+    const evaluationState = stateForEvaluation(state, frameId);
+    const generator = evalExpressionGen(node, evaluationState, 0);
+    while (true) {
+        const result = generator.next();
+        if (result.done) {
+            return result.value;
+        }
+        if (result.value?.kind === 'needsInput') {
+            throw new Error('Debugger evaluation cannot request terminal input');
+        }
+    }
+}
+
+function stateForEvaluation(state, frameId) {
+    if (frameId == null) {
+        return state;
+    }
+    const frameIndex = Number(frameId) - 1;
+    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= state.frames.length) {
+        throw new Error('Unknown stack frame: ' + frameId);
+    }
+    const nextFrame = state.frames[frameIndex + 1];
+    const scopeEnd = nextFrame ? nextFrame.scopeIndex : state.scopes.length;
+    return {
+        ...state,
+        scopes: state.scopes.slice(0, scopeEnd),
+        frames: state.frames.slice(0, frameIndex + 1),
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Generator-based interpreter (matches original mode A1/B)
 //

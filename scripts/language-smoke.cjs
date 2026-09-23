@@ -167,6 +167,54 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     });
     assert.equal(incompleteProgram.globals.length, 1);
 
+    const expressionProgram = parser.parseProgram(`
+        int doubled(int value) {
+            return value * 2;
+        }
+        void main() {}
+    `, { strict: true });
+    const expressionState = runner.createRunnerState(expressionProgram, createRuntime());
+    expressionState.scopes.push(new Map([['value', 4], ['items', [2, 3, 5]]]));
+    expressionState.frames.push({
+        name: 'main',
+        scopeIndex: 1,
+        loc: { line: 5, column: 9 },
+    });
+    assert.equal(
+        runner.evaluateExpression(
+            parser.parseExpression('doubled(value) + items[1]'),
+            expressionState,
+            1
+        ),
+        11
+    );
+    assert.equal(
+        runner.evaluateExpression(
+            parser.parseExpression('value > 3 && items.length == 3'),
+            expressionState,
+            1
+        ),
+        true
+    );
+    expressionState.scopes.push(new Map([['value', 9]]));
+    expressionState.frames.push({
+        name: 'doubled',
+        scopeIndex: 2,
+        loc: { line: 2, column: 9 },
+    });
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('value'), expressionState, 1),
+        4
+    );
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('value'), expressionState, 2),
+        9
+    );
+    assert.throws(
+        () => parser.parseExpression('value trailing'),
+        /Unexpected token after expression/
+    );
+
     const syntaxErrors = parser.collectProgramErrors(`
         void main() {
             int first = ;
