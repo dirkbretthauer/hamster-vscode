@@ -24,6 +24,36 @@ export interface LangScripts {
 
 let cachedScripts: LangScripts | null = null;
 
+export interface LanguageError {
+    message?: string;
+    token?: {
+        line: number;
+        column: number;
+        length?: number;
+    };
+    line?: number;
+    column?: number;
+    length?: number;
+}
+
+export interface LanguageModule {
+    collectProgramErrors: (
+        source: string,
+        options?: Record<string, unknown>
+    ) => LanguageError[];
+    parseProgram: (
+        source: string,
+        options?: Record<string, unknown>
+    ) => Record<string, unknown>;
+    collectExecutableLines: (ast: Record<string, unknown>) => number[];
+    findExecutableLineAtOrAfter: (
+        requestedLine: number,
+        executableLines: number[]
+    ) => number | null;
+}
+
+let cachedLanguageModule: LanguageModule | null = null;
+
 /** Loads and caches the language scripts. Async read using vscode.workspace.fs. */
 export async function loadLangScripts(extensionUri: vscode.Uri): Promise<LangScripts> {
     if (cachedScripts) return cachedScripts;
@@ -41,4 +71,16 @@ export async function loadLangScripts(extensionUri: vscode.Uri): Promise<LangScr
         runnerCode: stripEsModule(decoder.decode(runnerRaw)),
     };
     return cachedScripts;
+}
+
+export async function loadLanguageModule(extensionUri: vscode.Uri): Promise<LanguageModule> {
+    if (cachedLanguageModule) return cachedLanguageModule;
+
+    const { lexerCode, parserCode } = await loadLangScripts(extensionUri);
+    const combined = lexerCode + '\n' + parserCode +
+        '\nreturn { collectProgramErrors, parseProgram, collectExecutableLines, ' +
+        'findExecutableLineAtOrAfter };';
+    const factory = new Function(combined);
+    cachedLanguageModule = factory() as LanguageModule;
+    return cachedLanguageModule;
 }

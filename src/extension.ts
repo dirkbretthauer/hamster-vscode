@@ -84,6 +84,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.debug.registerDebugAdapterDescriptorFactory('hamster', {
             createDebugAdapterDescriptor: () => {
                 const session = new HamsterDebugSession({
+                    extensionUri: context.extensionUri,
                     ensurePanel: async () => {
                         await ensurePanel(context);
                         return currentPanel!;

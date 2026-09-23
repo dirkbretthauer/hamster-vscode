@@ -1,19 +1,5 @@
 import * as vscode from 'vscode';
-import { stripEsModule } from './utils';
-
-interface LanguageToken {
-    line: number;
-    column: number;
-    length?: number;
-}
-
-interface LanguageError {
-    message?: string;
-    token?: LanguageToken;
-    line?: number;
-    column?: number;
-    length?: number;
-}
+import { LanguageError, loadLanguageModule } from './utils';
 
 export class HamsterDiagnostics implements vscode.Disposable {
     private collection: vscode.DiagnosticCollection;
@@ -28,22 +14,7 @@ export class HamsterDiagnostics implements vscode.Disposable {
     private async load(): Promise<void> {
         if (this.loaded) return;
         try {
-            const langDir = vscode.Uri.joinPath(this.context.extensionUri, 'lang');
-            const decoder = new TextDecoder('utf-8');
-            const [lexerRaw, parserRaw] = await Promise.all([
-                vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-lexer.js')),
-                vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-parser.js')),
-            ]);
-            const lexerCode = stripEsModule(decoder.decode(lexerRaw));
-            const parserCode = stripEsModule(decoder.decode(parserRaw));
-            const combined = lexerCode + '\n' + parserCode + '\nreturn { collectProgramErrors };';
-            const factory = new Function(combined);
-            const mod = factory() as {
-                collectProgramErrors: (
-                    source: string,
-                    options?: Record<string, unknown>
-                ) => LanguageError[];
-            };
+            const mod = await loadLanguageModule(this.context.extensionUri);
             this.collectProgramErrors = mod.collectProgramErrors;
             this.loaded = true;
         } catch (e) {

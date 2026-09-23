@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { HamsterPanel } from './hamsterPanel';
+import { loadLanguageModule } from './utils';
 
 interface PendingRequest {
     resolve: (value: any) => void;
@@ -7,8 +8,15 @@ interface PendingRequest {
     timer: ReturnType<typeof setTimeout>;
 }
 
+interface DebugBreakpoint {
+    verified: boolean;
+    line: number;
+    message?: string;
+}
+
 export interface DebugSessionDeps {
     ensurePanel: () => Promise<HamsterPanel>;
+    extensionUri: vscode.Uri;
 }
 
 /**
@@ -32,7 +40,9 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     private _terminated = false;
     private _stopOnEntry = true;
     private _breakpointsBySource = new Map<string, number[]>();
+    private _breakpointQueue: Promise<void> = Promise.resolve();
     private _programPath: string | undefined;
+    private _programSource: string | undefined;
 
     constructor(private readonly deps: DebugSessionDeps) {}
 
@@ -166,7 +176,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
                 return;
 
             case 'setBreakpoints':
-                this.handleSetBreakpoints(request);
+                await this.enqueueSetBreakpoints(request);
                 return;
 
             case 'threads':
@@ -250,6 +260,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
             this.sendEvent('terminated');
             return;
         }
+        this._programSource = source;
 
         // Try to find a matching terrain file (.ter) next to the .ham file.
         const terrain = await this.findTerrain(fileUri);
@@ -287,22 +298,101 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         });
     }
 
-    private handleSetBreakpoints(request: any): void {
+    private enqueueSetBreakpoints(request: any): Promise<void> {
+        const operation = this._breakpointQueue.then(() => this.handleSetBreakpoints(request));
+        // Keep the queue usable after a failed request; dispatchRequest still observes the failure.
+        this._breakpointQueue = operation.then(() => undefined, () => undefined);
+        return operation;
+    }
+
+    private async handleSetBreakpoints(request: any): Promise<void> {
         const args = request.arguments || {};
         const sourcePath: string | undefined = args.source?.path;
         const inputBps: any[] = args.breakpoints || [];
-        const lines = inputBps.map(b => b.line | 0).filter(n => n > 0);
-        if (sourcePath) {
+        const requestedLines = inputBps.map(b => b.line | 0);
+        let executableLines: number[] = [];
+        let language: Awaited<ReturnType<typeof loadLanguageModule>> | undefined;
+        let verificationError: string | undefined;
+
+        if (!sourcePath) {
+            verificationError = 'Breakpoint source has no file path.';
+        } else {
+            try {
+                const normalizedSourcePath = this.normalizePath(sourcePath);
+                const isRunningProgram = this._programPath &&
+                    normalizedSourcePath === this.normalizePath(this._programPath);
+                const source = isRunningProgram && this._programSource !== undefined
+                    ? this._programSource
+                    : await this.readBreakpointSource(sourcePath, normalizedSourcePath);
+                language = await loadLanguageModule(this.deps.extensionUri);
+                const ast = language.parseProgram(source);
+                executableLines = language.collectExecutableLines(ast);
+                if (executableLines.length === 0) {
+                    verificationError = 'The program contains no executable statements.';
+                }
+            } catch (error: any) {
+                verificationError = `Cannot verify breakpoints: ${error?.message ?? String(error)}`;
+            }
+        }
+
+        const breakpoints: DebugBreakpoint[] = requestedLines.map(requestedLine => {
+            if (requestedLine <= 0) {
+                return {
+                    verified: false,
+                    line: requestedLine,
+                    message: 'Breakpoint line must be positive.',
+                };
+            }
+            if (verificationError) {
+                return { verified: false, line: requestedLine, message: verificationError };
+            }
+            const line = language!.findExecutableLineAtOrAfter(requestedLine, executableLines);
+            if (line === null) {
+                return {
+                    verified: false,
+                    line: requestedLine,
+                    message: `No executable statement at or after line ${requestedLine}.`,
+                };
+            }
+            return {
+                verified: true,
+                line,
+                message: line === requestedLine
+                    ? undefined
+                    : `Breakpoint moved from line ${requestedLine} to executable line ${line}.`,
+            };
+        });
+        const lines = [...new Set(
+            breakpoints
+                .filter(breakpoint => breakpoint.verified)
+                .map(breakpoint => breakpoint.line)
+        )];
+        const shouldUpdateActiveBreakpoints = inputBps.length === 0 || !verificationError;
+        if (sourcePath && shouldUpdateActiveBreakpoints) {
             this._breakpointsBySource.set(this.normalizePath(sourcePath), lines);
         }
         // Forward to the webview if this matches the program we're debugging.
-        if (this._programPath && sourcePath &&
+        if (shouldUpdateActiveBreakpoints && this._programPath && sourcePath &&
             this.normalizePath(sourcePath) === this.normalizePath(this._programPath)) {
             this.toPanel({ type: 'dbg:setBreakpoints', lines });
         }
         this.sendResponse(request, {
-            breakpoints: inputBps.map(b => ({ verified: true, line: b.line })),
+            breakpoints,
         });
+    }
+
+    private async readBreakpointSource(
+        sourcePath: string,
+        normalizedSourcePath: string
+    ): Promise<string> {
+        const openDocument = vscode.workspace.textDocuments.find(document =>
+            this.normalizePath(document.uri.fsPath) === normalizedSourcePath
+        );
+        if (openDocument) {
+            return openDocument.getText();
+        }
+        const data = await vscode.workspace.fs.readFile(vscode.Uri.file(sourcePath));
+        return new TextDecoder('utf-8').decode(data);
     }
 
     private async handleStackTrace(request: any): Promise<void> {

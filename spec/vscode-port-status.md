@@ -86,13 +86,13 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟡 `hamster.compile` command is a **strict parse/validate** (`requireMain: true, strict: true`), not a real compilation step — reasonable given there's no bytecode target, but should be labeled/documented as "Check" rather than "Compile" to avoid confusing users familiar with the original.
 - 🟢 Program-type markers select validation behavior consistently across diagnostics, compile, run, and debug paths; class files do not require `main()` and cannot be run directly.
 - 🟢 Live diagnostics (`diagnostics.ts`) recover after independent lexer/parser errors and underline each offending token using its exact source length.
-- 🟡 `new Function()` is used in `diagnostics.ts` to eval the bundled lexer+parser JS at runtime in the extension host — a maintainability/code-smell concern (not a real vulnerability since the code is extension-bundled, not user-supplied), better replaced with a static import/bundle step.
+- 🟡 `new Function()` is used by `loadLanguageModule()` to eval the bundled lexer+parser JS at runtime in the extension host — a maintainability/code-smell concern (not a real vulnerability since the code is extension-bundled, not user-supplied), better replaced with a static import/bundle step.
 
 ### 8. Debugger (`hamsterDebugSession.ts` + debug bridge in `hamsterPanel.ts`)
 - 🟢 **Real, persistent, user-settable breakpoints** — a genuine improvement over the original app, which had none (`debugger-ui.md`).
 - 🟢 Stack trace / scopes / variables implemented via interpreter-maintained frames — functions even without a JDI equivalent.
 - 🟡 `next`, `stepIn`, and `stepOut` all currently perform the *same* single AST-statement advance — no call-depth-aware step-out/step-over distinction.
-- 🟡 Breakpoints are always reported `verified: true` without checking the line is executable; checked only during `continue`, not during single-stepping.
+- 🟢 Breakpoints are validated against parsed executable statement locations, moved to the next valid line, and honored during both continue and single-step operations.
 - 🟡 `evaluate` (DAP hover/watch) only resolves bare identifiers — no expression evaluation.
 - 🟡 No object/array expansion in the variables view (`variablesReference` always 0).
 
@@ -103,7 +103,7 @@ No confusing partial/stub remnants found for: Scheme/JavaScript/Python/Ruby/Prol
 1. **P0 — correctness bugs likely to confuse users immediately:** postfix `++`/`--` restricted to identifiers, wall-under-hamster placement.
 2. **P1 — core language gaps blocking Band 2 curriculum content:** real classes/inheritance/interfaces/constructors, `try/catch/throw` + exception hierarchy, `switch/case/break`, English API aliases, `+=`/`-=`, prefix `++`/`--`.
 3. **P2 — fidelity/UX gaps:** per-hamster color sprites, multi-hamster `.ter` loading, program-type marker handling, step-in/out distinction, terrain editor mouth-count UI.
-4. **P3 — polish/maintainability:** `new Function()` replacement, multi-error diagnostics, breakpoint verification, expression evaluation in debugger.
+4. **P3 — polish/maintainability:** `new Function()` replacement, multi-error diagnostics, expression evaluation in debugger.
 
 ## Issue Filing
 All 18 items are filed as GitHub issues in [`dirkbretthauer/hamster-vscode`](https://github.com/dirkbretthauer/hamster-vscode/issues),
