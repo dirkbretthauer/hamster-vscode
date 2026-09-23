@@ -140,6 +140,83 @@ export function collectProgramErrors(source, options = {}) {
     return errors;
 }
 
+const EXECUTABLE_STATEMENT_TYPES = new Set([
+    ASTNodeType.VariableDecl,
+    ASTNodeType.Assignment,
+    ASTNodeType.ExpressionStmt,
+    ASTNodeType.IfStatement,
+    ASTNodeType.WhileStatement,
+    ASTNodeType.DoWhileStatement,
+    ASTNodeType.SwitchStatement,
+    ASTNodeType.BreakStatement,
+    ASTNodeType.TryStatement,
+    ASTNodeType.ThrowStatement,
+    ASTNodeType.ReturnStatement,
+]);
+
+export function collectExecutableLines(ast) {
+    const lines = new Set();
+    const collectStatement = node => {
+        if (!node) return;
+        if (node.type === ASTNodeType.Block) {
+            for (const statement of node.statements || []) {
+                collectStatement(statement);
+            }
+            return;
+        }
+        if (EXECUTABLE_STATEMENT_TYPES.has(node.type) && node.loc?.line) {
+            lines.add(node.loc.line);
+        }
+        switch (node.type) {
+            case ASTNodeType.IfStatement:
+                collectStatement(node.consequent);
+                collectStatement(node.alternate);
+                break;
+            case ASTNodeType.WhileStatement:
+            case ASTNodeType.DoWhileStatement:
+                collectStatement(node.body);
+                break;
+            case ASTNodeType.SwitchStatement:
+                for (const switchCase of node.cases || []) {
+                    for (const statement of switchCase.statements || []) {
+                        collectStatement(statement);
+                    }
+                }
+                break;
+            case ASTNodeType.TryStatement:
+                collectStatement(node.block);
+                collectStatement(node.handler?.body);
+                break;
+        }
+    };
+    const collectClass = declaration => {
+        for (const method of declaration.methods || []) {
+            collectStatement(method.body);
+        }
+        for (const constructor of declaration.constructors || []) {
+            collectStatement(constructor.body);
+        }
+        for (const initializer of declaration.initializerBlocks || []) {
+            collectStatement(initializer.body);
+        }
+        for (const nestedClass of declaration.nestedClasses || []) {
+            collectClass(nestedClass);
+        }
+    };
+
+    for (const fn of ast.functions || []) {
+        collectStatement(fn.body);
+    }
+    for (const declaration of ast.classes || []) {
+        collectClass(declaration);
+    }
+    return [...lines].sort((left, right) => left - right);
+}
+
+export function findExecutableLineAtOrAfter(requestedLine, executableLines) {
+    return executableLines.find(line => line >= requestedLine) ?? null;
+}
+
 class Parser {
     constructor(source, options = {}) {
         this.errors = Array.isArray(options.errors) ? options.errors : null;

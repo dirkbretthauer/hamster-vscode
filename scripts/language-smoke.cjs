@@ -244,6 +244,36 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         []
     );
 
+    const breakpointAst = parser.parseProgram([
+        'void main() {',
+        '    // comment',
+        '    int grains = 0;',
+        '    if (grains == 0) {',
+        '        vor();',
+        '    }',
+        '}',
+    ].join('\n'));
+    assert.deepEqual(parser.collectExecutableLines(breakpointAst), [3, 4, 5]);
+    assert.equal(parser.findExecutableLineAtOrAfter(1, [3, 4, 5]), 3);
+    assert.equal(parser.findExecutableLineAtOrAfter(4, [3, 4, 5]), 4);
+    assert.equal(parser.findExecutableLineAtOrAfter(6, [3, 4, 5]), null);
+
+    const classBreakpointAst = parser.parseProgram([
+        '/*class*/',
+        'class Outer {',
+        '    int field = 1;',
+        '    void run() {',
+        '        linksUm();',
+        '    }',
+        '    class Inner {',
+        '        void nested() {',
+        '            vor();',
+        '        }',
+        '    }',
+        '}',
+    ].join('\n'));
+    assert.deepEqual(parser.collectExecutableLines(classBreakpointAst), [5, 9]);
+
     const switchState = runProgram(parser, runner, `
         int result = 0;
         void main() {
