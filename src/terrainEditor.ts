@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getNonce } from './utils';
+import { HostToTerrainEditorMessage, isTerrainEditorToHostMessage } from './webviewProtocol';
 
 export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
     public static readonly viewType = 'hamster.terrainEditor';
@@ -36,10 +37,12 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         let lastWebviewContent = '';
 
         webviewPanel.webview.onDidReceiveMessage(async msg => {
-            if (msg.type === 'terrainChanged') {
-                lastWebviewContent = msg.content;
-                await this.updateDocument(document, msg.content);
+            if (!isTerrainEditorToHostMessage(msg)) {
+                console.error('Hamster: ignoring malformed message from terrain editor webview:', msg);
+                return;
             }
+            lastWebviewContent = msg.content;
+            await this.updateDocument(document, msg.content);
         });
 
         // When the document changes externally (e.g. git, undo), reload in the webview
@@ -47,12 +50,13 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             if (e.document.uri.toString() !== document.uri.toString() || e.contentChanges.length === 0) return;
             const currentText = document.getText();
             if (currentText === lastWebviewContent) return;
-            webviewPanel.webview.postMessage({
-                type: 'loadTerrain',
-                terrain: currentText,
-            });
+            this.postMessage(webviewPanel, { type: 'loadTerrain', terrain: currentText });
         });
         webviewPanel.onDidDispose(() => changeSubscription.dispose());
+    }
+
+    private postMessage(webviewPanel: vscode.WebviewPanel, msg: HostToTerrainEditorMessage) {
+        webviewPanel.webview.postMessage(msg);
     }
 
     private async updateDocument(document: vscode.TextDocument, content: string) {
@@ -62,7 +66,10 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             document.lineAt(document.lineCount - 1).range.end,
         );
         edit.replace(document.uri, fullRange, content);
-        await vscode.workspace.applyEdit(edit);
+        const applied = await vscode.workspace.applyEdit(edit);
+        if (!applied) {
+            vscode.window.showErrorMessage('Hamster: failed to save terrain changes to the document.');
+        }
     }
 
     private getHtml(

@@ -6,12 +6,16 @@ import {
 } from '../lang/hamster-parser.js';
 import { HamsterPanel } from './hamsterPanel';
 import { resolveTerrain } from './terrainResolver';
+import { DebugHostToPanelMessage, DebugPanelToHostMessage } from './webviewProtocol';
 
 interface PendingRequest {
     resolve: (value: any) => void;
     reject: (reason?: any) => void;
     timer: ReturnType<typeof setTimeout>;
 }
+
+/** Distributes `Omit` across a union so each member keeps only its own extra fields. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends any ? Omit<T, K> : never;
 
 interface DebugBreakpoint {
     verified: boolean;
@@ -106,27 +110,29 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     }
 
     // ── Panel bridge ────────────────────────────────────────────────────────
-    private toPanel(msg: any): void {
+    private toPanel(msg: DebugHostToPanelMessage): void {
         if (!this._panel) return;
         this._panel.postDebug(msg);
     }
 
-    private requestFromPanel<T = any>(type: string, extra: Record<string, any> = {}, timeoutMs = 5000): Promise<T> {
+    private requestFromPanel<T = any>(
+        message: DistributiveOmit<Extract<DebugHostToPanelMessage, { requestId: number }>, 'requestId'>,
+        timeoutMs = 5000,
+    ): Promise<T> {
         const requestId = this._nextRequestId++;
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {
                 if (this._pending.has(requestId)) {
                     this._pending.delete(requestId);
-                    reject(new Error(`Timeout waiting for ${type}`));
+                    reject(new Error(`Timeout waiting for ${message.type}`));
                 }
             }, timeoutMs);
             this._pending.set(requestId, { resolve, reject, timer });
-            this.toPanel({ type, requestId, ...extra });
+            this.toPanel({ ...message, requestId } as DebugHostToPanelMessage);
         });
     }
 
-    private handlePanelMessage = (msg: any): void => {
-        if (!msg || typeof msg.type !== 'string') return;
+    private handlePanelMessage = (msg: DebugPanelToHostMessage): void => {
         switch (msg.type) {
             case 'dbg:stopped':
                 this.sendEvent('stopped', {
@@ -415,7 +421,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
 
     private async handleStackTrace(request: any): Promise<void> {
         try {
-            const res: any = await this.requestFromPanel('dbg:stackTrace');
+            const res: any = await this.requestFromPanel({ type: 'dbg:stackTrace' });
             const sourcePath = this._programPath;
             const frames = (res.frames || []).map((f: any) => ({
                 id: f.id,
@@ -433,7 +439,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     private async handleScopes(request: any): Promise<void> {
         try {
             const frameId = request.arguments?.frameId | 0;
-            const res: any = await this.requestFromPanel('dbg:scopes', { frameId });
+            const res: any = await this.requestFromPanel({ type: 'dbg:scopes', frameId });
             this.sendResponse(request, { scopes: res.scopes || [] });
         } catch (e: any) {
             this.sendErrorResponse(request, e?.message ?? String(e));
@@ -443,7 +449,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     private async handleVariables(request: any): Promise<void> {
         try {
             const variablesReference = request.arguments?.variablesReference | 0;
-            const res: any = await this.requestFromPanel('dbg:variables', { variablesReference });
+            const res: any = await this.requestFromPanel({ type: 'dbg:variables', variablesReference });
             this.sendResponse(request, { variables: res.variables || [] });
         } catch (e: any) {
             this.sendErrorResponse(request, e?.message ?? String(e));
@@ -454,7 +460,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         try {
             const expression = String(request.arguments?.expression ?? '');
             const frameId = request.arguments?.frameId;
-            const res: any = await this.requestFromPanel('dbg:evaluate', { expression, frameId });
+            const res: any = await this.requestFromPanel({ type: 'dbg:evaluate', expression, frameId });
             if (res.error) {
                 throw new Error(String(res.error));
             }
