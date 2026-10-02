@@ -21,7 +21,7 @@ Additional touchpoints when changing language features:
 |------|------|
 | `syntaxes/hamster.tmLanguage.json` | TextMate grammar for VS Code syntax highlighting |
 | `src/diagnostics.ts` | Runs the parser on-save for red-squiggle errors |
-| `src/hamsterPanel.ts` | Webview runtime that bridges runner ↔ simulator UI |
+| `src/hamsterPanel.ts` | Panel lifecycle/host integration; the webview runtime that actually bridges runner ↔ simulator UI lives in `src/webview/simulator/*.js` |
 
 ## Reference Specification
 
