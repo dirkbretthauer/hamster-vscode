@@ -20,6 +20,7 @@ export interface LangScripts {
     lexerCode: string;
     parserCode: string;
     runnerCode: string;
+    terrainCode: string;
 }
 
 let cachedScripts: LangScripts | null = null;
@@ -30,15 +31,17 @@ export async function loadLangScripts(extensionUri: vscode.Uri): Promise<LangScr
 
     const langDir = vscode.Uri.joinPath(extensionUri, 'lang');
     const decoder = new TextDecoder('utf-8');
-    const [lexerRaw, parserRaw, runnerRaw] = await Promise.all([
+    const [lexerRaw, parserRaw, runnerRaw, terrainRaw] = await Promise.all([
         vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-lexer.js')),
         vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-parser.js')),
         vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-runner.js')),
+        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-terrain.js')),
     ]);
     cachedScripts = {
         lexerCode: stripEsModule(decoder.decode(lexerRaw)),
         parserCode: stripEsModule(decoder.decode(parserRaw)),
         runnerCode: stripEsModule(decoder.decode(runnerRaw)),
+        terrainCode: stripEsModule(decoder.decode(terrainRaw)),
     };
     return cachedScripts;
 }

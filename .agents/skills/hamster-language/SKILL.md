@@ -160,9 +160,13 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ## Testing
 
-There is no automated test suite yet. After making changes:
+`npm test` runs `scripts/language-smoke.cjs` (lexer/parser/runner smoke coverage) and
+`node --test` (unit suites under `test/`, covering terrain parse/serialize round trips,
+terrain-file resolution, host/webview message guards, and executable-line collection).
+There is no automated webview/DAP integration suite yet. After making a language change:
 1. Build: `npm run compile`
-2. Launch the extension in VS Code (F5) and open a `.ham` file.
-3. Verify syntax highlighting for new tokens.
-4. Verify that the parser accepts valid programs using the new feature (check the Problems panel for errors).
-5. Run a `.ham` program that exercises the new feature and verify correct behavior in the simulator webview.
+2. Run `npm test` for fast regression coverage of the lexer/parser/runner and the above helpers.
+3. Launch the extension in VS Code (F5) and open a `.ham` file.
+4. Verify syntax highlighting for new tokens.
+5. Verify that the parser accepts valid programs using the new feature (check the Problems panel for errors).
+6. Run a `.ham` program that exercises the new feature and verify correct behavior in the simulator webview.

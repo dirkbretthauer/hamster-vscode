@@ -13,6 +13,8 @@ programs (`.ham` files) with an integrated simulator webview, terrain editor, an
     "flattened" OO programs)
   - `hamster-runner.js` – generator-based (`function*`) interpreter that walks the AST and yields
     `{ kind: 'instruction', ... }` / `{ kind: 'needsInput', ... }` steps for the UI
+  - `hamster-terrain.js` – pure `.ter` terrain file parser/serializer, shared by the simulator
+    webview (`hamsterPanel.ts`) and the terrain editor webview (`terrainEditor.ts`)
 - **`src/`** – TypeScript, the VS Code extension host:
   - `extension.ts` – activation, commands (`hamster.openSimulator/compile/run/step/stop/reset`)
   - `hamsterPanel.ts` – webview panel bridging the runner to the simulator UI
@@ -55,10 +57,14 @@ npm run watch          # webpack --watch
 npm run package         # production build + vsce package (.vsix)
 ```
 
-There is no automated test suite. After a change:
-1. `npm run compile`
-2. Press F5 in VS Code to launch the Extension Development Host
-3. Open a `.ham` file and verify syntax highlighting, parser diagnostics (Problems panel), and
+There is no automated Extension Development Host / webview test suite. `npm test` does run fast,
+VS-Code-independent regression coverage: `scripts/language-smoke.cjs` (lexer/parser/runner) and
+`node --test` (unit suites under `test/` for terrain parse/serialize round trips, terrain-file
+resolution, host/webview message guards, and executable-line collection). After a change:
+1. `npm test`
+2. `npm run compile`
+3. Press F5 in VS Code to launch the Extension Development Host
+4. Open a `.ham` file and verify syntax highlighting, parser diagnostics (Problems panel), and
    correct simulator behavior for the changed feature
 
 ## Conventions
