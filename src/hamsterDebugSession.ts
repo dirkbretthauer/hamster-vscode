@@ -62,9 +62,16 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     dispose(): void {
         this._panelListener?.dispose();
         this._panelDisposeListener?.dispose();
-        this._pending.forEach(p => clearTimeout(p.timer));
-        this._pending.clear();
+        this.rejectAllPending(new Error('Debug session disposed.'));
         this._emitter.dispose();
+    }
+
+    private rejectAllPending(reason: Error): void {
+        this._pending.forEach(p => {
+            clearTimeout(p.timer);
+            p.reject(reason);
+        });
+        this._pending.clear();
     }
 
     // ── DAP helpers ─────────────────────────────────────────────────────────
@@ -257,8 +264,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         let source: string;
         const fileUri = vscode.Uri.file(programPath);
         try {
-            const data = await vscode.workspace.fs.readFile(fileUri);
-            source = new TextDecoder('utf-8').decode(data);
+            source = await this.loadSource(programPath);
         } catch (e: any) {
             this.sendErrorResponse(request, `Cannot read program "${programPath}": ${e?.message ?? e}`);
             this.sendEvent('terminated');
@@ -279,6 +285,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         }
         this._panelListener = this._panel.onDidReceiveDebugMessage(this.handlePanelMessage);
         this._panelDisposeListener = this._panel.onDidDispose(() => {
+            this.rejectAllPending(new Error('Hamster simulator panel closed.'));
             if (!this._terminated) {
                 this._terminated = true;
                 this.sendEvent('terminated');
@@ -328,7 +335,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
                     normalizedSourcePath === this.normalizePath(this._programPath);
                 const source = isRunningProgram && this._programSource !== undefined
                     ? this._programSource
-                    : await this.readBreakpointSource(sourcePath, normalizedSourcePath);
+                    : await this.loadSource(sourcePath, normalizedSourcePath);
                 const ast = parseProgram(source);
                 executableLines = collectExecutableLines(ast);
                 if (executableLines.length === 0) {
@@ -385,9 +392,15 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         });
     }
 
-    private async readBreakpointSource(
+    /**
+     * Loads source text for a `.ham` file, preferring the matching open
+     * `TextDocument` (so unsaved edits are honored) and falling back to disk.
+     * Used by both launch and breakpoint verification so they always agree
+     * on the executed/verified source.
+     */
+    private async loadSource(
         sourcePath: string,
-        normalizedSourcePath: string
+        normalizedSourcePath: string = this.normalizePath(sourcePath)
     ): Promise<string> {
         const openDocument = vscode.workspace.textDocuments.find(document =>
             this.normalizePath(document.uri.fsPath) === normalizedSourcePath
