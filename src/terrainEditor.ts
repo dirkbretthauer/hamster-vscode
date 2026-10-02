@@ -417,7 +417,15 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
                         engine.rotateDefaultHamster(1); changed=true; break;
                 }
             } catch(err) { return; }
-            if(changed) { render(engineState); lastPaintCell=cell||null; notifyChanged(); }
+            if(changed) { render(engineState); lastPaintCell=cell||null; strokeDirty=true; }
+        }
+
+        // Coalesce every cell painted during a single pointer-down drag into one
+        // persisted change, sent when the stroke ends (pointer up/leave).
+        let strokeDirty = false;
+        function endStroke() {
+            isDragging=false; lastPaintCell=null;
+            if(strokeDirty) { strokeDirty=false; notifyChanged(); }
         }
 
         canvas.addEventListener('mousedown', evt => {
@@ -433,8 +441,8 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             if(currentTool!=='rotate'&&cell&&lastPaintCell&&lastPaintCell.x===cell.x&&lastPaintCell.y===cell.y) return;
             applyTool(cell);
         });
-        canvas.addEventListener('mouseleave', () => { updateHover(null); isDragging=false; lastPaintCell=null; });
-        window.addEventListener('mouseup', () => { isDragging=false; lastPaintCell=null; });
+        canvas.addEventListener('mouseleave', () => { updateHover(null); if(isDragging) endStroke(); });
+        window.addEventListener('mouseup', () => { if(isDragging) endStroke(); });
     })();
     </script>
 </body>
