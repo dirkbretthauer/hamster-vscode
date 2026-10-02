@@ -9,39 +9,15 @@ export function getNonce(): string {
     return text;
 }
 
-export function stripEsModule(code: string): string {
-    return code
-        .replace(/^export\s+(const|class|function)\s+/gm, '$1 ')
-        .replace(/^export\s+\{[^}]*\};?\s*$/gm, '')
-        .replace(/^import\s+.*$/gm, '');
-}
-
-export interface LangScripts {
-    lexerCode: string;
-    parserCode: string;
-    runnerCode: string;
-    terrainCode: string;
-}
-
-let cachedScripts: LangScripts | null = null;
-
-/** Loads and caches the language scripts. Async read using vscode.workspace.fs. */
-export async function loadLangScripts(extensionUri: vscode.Uri): Promise<LangScripts> {
-    if (cachedScripts) return cachedScripts;
-
-    const langDir = vscode.Uri.joinPath(extensionUri, 'lang');
-    const decoder = new TextDecoder('utf-8');
-    const [lexerRaw, parserRaw, runnerRaw, terrainRaw] = await Promise.all([
-        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-lexer.js')),
-        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-parser.js')),
-        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-runner.js')),
-        vscode.workspace.fs.readFile(vscode.Uri.joinPath(langDir, 'hamster-terrain.js')),
-    ]);
-    cachedScripts = {
-        lexerCode: stripEsModule(decoder.decode(lexerRaw)),
-        parserCode: stripEsModule(decoder.decode(parserRaw)),
-        runnerCode: stripEsModule(decoder.decode(runnerRaw)),
-        terrainCode: stripEsModule(decoder.decode(terrainRaw)),
-    };
-    return cachedScripts;
+/**
+ * URI of the bundled language-tools script (lexer, parser, runner, terrain
+ * codec) built from `src/webview/langBundleEntry.js` into
+ * `dist/webview/hamster-lang.js`. Loaded by the simulator and terrain editor
+ * webviews via a `<script src>` tag so they share one real module bundle
+ * instead of each inlining a separately re-read, stripped copy of the source.
+ */
+export function getWebviewLangScriptUri(webview: vscode.Webview, extensionUri: vscode.Uri): vscode.Uri {
+    return webview.asWebviewUri(
+        vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'hamster-lang.js')
+    );
 }

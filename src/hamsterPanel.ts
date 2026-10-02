@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { HamsterDiagnostics } from './diagnostics';
-import { getNonce, loadLangScripts } from './utils';
+import { getNonce, getWebviewLangScriptUri } from './utils';
 import { resolveTerrain } from './terrainResolver';
 import {
     DebugHostToPanelMessage,
@@ -59,17 +59,14 @@ export class HamsterPanel {
                 enableScripts: true,
                 retainContextWhenHidden: true,
                 localResourceRoots: [
-                    vscode.Uri.joinPath(context.extensionUri, 'lang'),
+                    vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview'),
                     vscode.Uri.joinPath(context.extensionUri, 'assets'),
                 ],
             }
         );
 
-        const scripts = await loadLangScripts(context.extensionUri);
         const instance = new HamsterPanel(context, diagnostics, panel, options);
-        instance.panel.webview.html = instance.getHtmlContent(
-            scripts.lexerCode, scripts.parserCode, scripts.runnerCode, scripts.terrainCode,
-        );
+        instance.panel.webview.html = instance.getHtmlContent();
         return instance;
     }
 
@@ -178,11 +175,12 @@ export class HamsterPanel {
         this._decoratedEditors.clear();
     }
 
-    private getHtmlContent(lexerCode: string, parserCode: string, runnerCode: string, terrainCode: string): string {
+    private getHtmlContent(): string {
         const webview = this.panel.webview;
         const assetsUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'assets')
         );
+        const langScriptUri = getWebviewLangScriptUri(webview, this.context.extensionUri);
         const nonce = getNonce();
         const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
         const escapedTerrain = escapeAttr(this.options.initialTerrain || '');
@@ -1567,21 +1565,9 @@ export class HamsterPanel {
     })();
     </script>
 
-    <!-- Inlined language tools (lexer → parser → runner, single block so declarations are shared) -->
+    <!-- Shared language tools bundle (lexer, parser, runner, terrain codec) -->
+    <script nonce="${nonce}" src="${langScriptUri}"></script>
     <script nonce="${nonce}">
-    // --- hamster-terrain.js ---
-    ${terrainCode}
-    // --- hamster-lexer.js ---
-    ${lexerCode}
-    // --- hamster-parser.js ---
-    ${parserCode}
-    // --- hamster-runner.js ---
-    ${runnerCode}
-    // Expose to the main script
-    window.parseProgram = parseProgram;
-    window.RunnerPause = RunnerPause;
-    window.createRunnerState = createRunnerState;
-    window.executeRunnerStep = executeRunnerStep;
     document.getElementById('status').textContent = 'Ready \u2013 open a .ham file and click Run';
     </script>
 </body>
