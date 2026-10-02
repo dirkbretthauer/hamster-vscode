@@ -2,6 +2,14 @@ import * as vscode from 'vscode';
 import { HamsterDiagnostics } from './diagnostics';
 import { getNonce, loadLangScripts } from './utils';
 import { resolveTerrain } from './terrainResolver';
+import {
+    DebugHostToPanelMessage,
+    DebugPanelToHostMessage,
+    HostToPanelMessage,
+    SimulatorCommand,
+    isDebugMessage,
+    isPanelToHostMessage,
+} from './webviewProtocol';
 
 export interface HamsterPanelOptions {
     initialTerrain?: string;
@@ -13,7 +21,7 @@ export class HamsterPanel {
     private disposables: vscode.Disposable[] = [];
     private _onDidDispose = new vscode.EventEmitter<void>();
     public readonly onDidDispose = this._onDidDispose.event;
-    private _onDidReceiveDebugMessage = new vscode.EventEmitter<any>();
+    private _onDidReceiveDebugMessage = new vscode.EventEmitter<DebugPanelToHostMessage>();
     public readonly onDidReceiveDebugMessage = this._onDidReceiveDebugMessage.event;
     /** URI of the program currently loaded or being debugged, used to resolve the right editor to highlight. */
     private _programUri: vscode.Uri | undefined;
@@ -69,7 +77,7 @@ export class HamsterPanel {
 
     sendProgram(source: string, uri?: vscode.Uri) {
         this.setProgramUri(uri);
-        this.panel.webview.postMessage({ type: 'loadProgram', source });
+        this.post({ type: 'loadProgram', source });
     }
 
     /**
@@ -93,25 +101,38 @@ export class HamsterPanel {
     }
 
     sendTerrainContent(content: string) {
-        this.panel.webview.postMessage({ type: 'loadTerrain', terrain: content });
+        this.post({ type: 'loadTerrain', terrain: content });
     }
 
     /** Resets the simulator to its default empty terrain, e.g. when no `.ter` file resolves. */
     resetTerrain() {
-        this.panel.webview.postMessage({ type: 'resetTerrain' });
+        this.post({ type: 'resetTerrain' });
     }
 
-    postCommand(command: string) {
-        this.panel.webview.postMessage({ type: 'command', command });
+    postCommand(command: SimulatorCommand) {
+        this.post({ type: 'command', command });
     }
 
-    postDebug(msg: any) {
+    postDebug(msg: DebugHostToPanelMessage) {
+        this.post(msg);
+    }
+
+    /** Sends a typed message to the simulator webview. */
+    private post(msg: HostToPanelMessage) {
         this.panel.webview.postMessage(msg);
     }
 
-    private handleMessage(msg: any) {
-        if (msg && typeof msg.type === 'string' && msg.type.startsWith('dbg:')) {
-            this._onDidReceiveDebugMessage.fire(msg);
+    private handleMessage(msg: unknown) {
+        if (isDebugMessage(msg)) {
+            if (isPanelToHostMessage(msg)) {
+                this._onDidReceiveDebugMessage.fire(msg as DebugPanelToHostMessage);
+            } else {
+                console.error('Hamster: ignoring malformed debug message from simulator webview:', msg);
+            }
+            return;
+        }
+        if (!isPanelToHostMessage(msg)) {
+            console.error('Hamster: ignoring malformed message from simulator webview:', msg);
             return;
         }
         switch (msg.type) {
