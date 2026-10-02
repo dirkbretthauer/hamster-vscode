@@ -151,7 +151,7 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ## Conventions
 
-- All three `lang/*.js` files use **ES module syntax** (`export`/`import`). The extension host bundles the parser through a static import. The simulator webview loads nonce-protected inline copies produced by `stripEsModule()`.
+- All four `lang/*.js` files use **ES module syntax** (`export`/`import`). The extension host bundles the parser through a static import. The simulator and terrain editor webviews load the same modules via a webpack-bundled `dist/webview/hamster-lang.js` script (built from `src/webview/langBundleEntry.js`), loaded with a nonce-protected `<script src>` tag rather than inlined/stripped copies.
 - Run `npm run watch` while editing `lang/*.js` so extension-host diagnostics and debugger validation stay in sync with the webview's runtime-loaded scripts.
 - AST nodes are **plain objects** with a `type` string field and `loc: { line, column }` for source mapping.
 - The parser uses a **checkpoint/rollback** pattern (`tryParseFunction`) for speculative parsing. Use the same pattern when adding ambiguous constructs.

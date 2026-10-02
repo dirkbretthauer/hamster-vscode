@@ -5,8 +5,10 @@ programs (`.ham` files) with an integrated simulator webview, terrain editor, an
 
 ## Architecture
 
-- **`lang/`** – Plain JavaScript (ES modules), no build step, loaded by both webpack (webview) and
-  `src/diagnostics.ts` (via `stripEsModule()` + `new Function()`):
+- **`lang/`** – Plain JavaScript (ES modules), no build step, loaded by webpack both for the
+  extension host (`src/diagnostics.ts` statically imports `hamster-parser.js`) and for the
+  webviews, which load a bundled `dist/webview/hamster-lang.js` (built from
+  `src/webview/langBundleEntry.js`) via `<script src>` instead of inlined copies:
   - `hamster-lexer.js` – tokenizes `.ham` source
   - `hamster-parser.js` – recursive-descent parser producing a plain-object AST (two entry points:
     normal `parseProgram` for imperative Band-1 programs, and `parseCompatibilityProgram` for

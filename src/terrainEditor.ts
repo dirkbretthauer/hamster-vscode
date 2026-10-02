@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getNonce, loadLangScripts } from './utils';
+import { getNonce, getWebviewLangScriptUri } from './utils';
 import { HostToTerrainEditorMessage, isTerrainEditorToHostMessage } from './webviewProtocol';
 
 export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
@@ -15,6 +15,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         webviewPanel.webview.options = {
             enableScripts: true,
             localResourceRoots: [
+                vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview'),
                 vscode.Uri.joinPath(this.context.extensionUri, 'assets'),
             ],
         };
@@ -27,11 +28,11 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
         const nonce = getNonce();
-        const { terrainCode } = await loadLangScripts(this.context.extensionUri);
+        const langScriptUri = getWebviewLangScriptUri(webviewPanel.webview, this.context.extensionUri);
 
         webviewPanel.webview.html = this.getHtml(
             webviewPanel.webview, nonce, assetsUri.toString(),
-            escapedTerrain, terrainCode,
+            escapedTerrain, langScriptUri.toString(),
         );
 
         // Track the last content we sent to the document to prevent circular updates
@@ -75,7 +76,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
 
     private getHtml(
         webview: vscode.Webview, nonce: string, assetsUri: string,
-        escapedTerrain: string, terrainCode: string,
+        escapedTerrain: string, langScriptUri: string,
     ): string {
         return /*html*/`<!DOCTYPE html>
 <html lang="en">
@@ -147,9 +148,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
     </div>
 
     <!-- Shared terrain parse/serialize helpers (also used by the simulator webview) -->
-    <script nonce="${nonce}">
-    ${terrainCode}
-    </script>
+    <script nonce="${nonce}" src="${langScriptUri}"></script>
 
     <script nonce="${nonce}">
     (function() {
