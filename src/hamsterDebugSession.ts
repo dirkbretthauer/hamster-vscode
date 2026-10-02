@@ -292,6 +292,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
             }
         });
         this._panel.reveal();
+        this._panel.setProgramUri(fileUri);
 
         if (terrain) {
             this._panel.sendTerrainContent(terrain);
