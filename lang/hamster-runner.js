@@ -118,7 +118,7 @@ function isKnownBuiltinName(name) {
 // Public API – createRunnerState / executeRunnerStep
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function createRunnerState(ast, runtime) {
+export function createRunnerState(ast, runtime, classModules = []) {
     const functions = new Map();
     for (const fn of ast.functions || []) {
         if (!functions.has(fn.name)) {
@@ -129,11 +129,18 @@ export function createRunnerState(ast, runtime) {
     const classes = new Map();
     const staticFields = new Map();
     const staticInitializers = [];
-    for (const declaration of flattenClassDeclarations(ast.classes || [])) {
+    const staticInitializersByClass = new Map();
+    const classInitialization = new Map();
+    const declarations = [
+        ...(ast.classes || []),
+        ...classModules.flatMap(moduleAst => moduleAst.classes || []),
+    ];
+    for (const declaration of flattenClassDeclarations(declarations)) {
         if (classes.has(declaration.name)) {
             throw new Error('Duplicate class or interface name: ' + declaration.name);
         }
         classes.set(declaration.name, declaration);
+        classInitialization.set(declaration.name, { status: 'uninitialized', error: null });
         const classFields = new Map();
         const classStaticInitializers = [];
         for (const field of declaration.fields || []) {
@@ -161,6 +168,7 @@ export function createRunnerState(ast, runtime) {
             }
         }
         classStaticInitializers.sort((left, right) => left.order - right.order);
+        staticInitializersByClass.set(declaration.name, classStaticInitializers);
         staticInitializers.push(...classStaticInitializers);
     }
     const main = selectMainFunction(functions.get('main') || []);
@@ -174,6 +182,8 @@ export function createRunnerState(ast, runtime) {
         classes,
         staticFields,
         staticInitializers,
+        staticInitializersByClass,
+        classInitialization,
         runtime,
         finished: false,
         scopes: [new Map()],
@@ -350,31 +360,6 @@ function consumeEvaluationStep(state) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function* programGenerator(state, mainFn) {
-    for (const initializer of state.staticInitializers) {
-        const { className } = initializer;
-        state.frames.push({
-            name: '<static>',
-            loc: initializer.field?.loc || initializer.body?.loc || null,
-            scopeIndex: state.scopes.length,
-            callerLoc: null,
-            className,
-        });
-        try {
-            if (initializer.kind === 'field') {
-                state.staticFields.get(className).set(
-                    initializer.field.name,
-                    yield* evalExpressionGen(initializer.field.initializer, state, 0)
-                );
-            } else {
-                const result = yield* executeStatementGen(initializer.body, state, 0);
-                if (result instanceof ReturnSignal) {
-                    throw new Error('Static initializer blocks cannot return');
-                }
-            }
-        } finally {
-            state.frames.pop();
-        }
-    }
     const isInstanceMain = mainFn.owner && !(mainFn.modifiers || []).includes('static');
     if (isInstanceMain) {
         try {
@@ -399,6 +384,51 @@ function* programGenerator(state, mainFn) {
     } finally {
         state.frames.pop();
         state.finished = true;
+    }
+}
+
+function* initializeClassGen(state, className, callDepth, loc) {
+    const declaration = state.classes.get(className);
+    if (!declaration) return;
+    const initialization = state.classInitialization.get(className);
+    if (initialization.status === 'initialized' || initialization.status === 'initializing') return;
+    if (initialization.status === 'failed') throw initialization.error;
+
+    initialization.status = 'initializing';
+    try {
+        if (declaration.superClass && state.classes.has(declaration.superClass)) {
+            yield* initializeClassGen(state, declaration.superClass, callDepth + 1, loc);
+        }
+        for (const initializer of state.staticInitializersByClass.get(className) || []) {
+            const initializerLoc = initializer.field?.loc || initializer.body?.loc || loc || null;
+            state.frames.push({
+                name: '<static>',
+                loc: initializerLoc,
+                scopeIndex: state.scopes.length,
+                callerLoc: loc || null,
+                className,
+            });
+            try {
+                if (initializer.kind === 'field') {
+                    state.staticFields.get(className).set(
+                        initializer.field.name,
+                        yield* evalExpressionGen(initializer.field.initializer, state, callDepth + 1)
+                    );
+                } else {
+                    const result = yield* executeStatementGen(initializer.body, state, callDepth + 1);
+                    if (result instanceof ReturnSignal) {
+                        throw new Error('Static initializer blocks cannot return');
+                    }
+                }
+            } finally {
+                state.frames.pop();
+            }
+        }
+        initialization.status = 'initialized';
+    } catch (error) {
+        initialization.status = 'failed';
+        initialization.error = error;
+        throw error;
     }
 }
 
@@ -671,6 +701,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
         if (receiver && receiver.__kind === 'class') {
             const fn = findMethod(state, receiver.name, methodName, args.length, true);
             if (fn) {
+                yield* initializeClassGen(state, fn.owner, callDepth, node.loc);
                 yield { kind: 'call', name: fn.name, loc: node.loc || null };
                 return yield* invokeUserFunctionGen(fn, args, state, callDepth + 1, null, fn.owner);
             }
@@ -898,6 +929,10 @@ function* evalMemberExpressionGen(node, state, callDepth) {
     const lexicalClass = node.object?.type === ASTNodeType.ThisExpression
         ? currentClassName(state)
         : null;
+    if (receiver?.__kind === 'class') {
+        const owner = findStaticFieldOwner(state, receiver.name, node.property);
+        if (owner) yield* initializeClassGen(state, owner, callDepth, node.loc);
+    }
     return readMemberValue(state, receiver, node.property, lexicalClass);
 }
 
@@ -967,6 +1002,7 @@ function* evalNewExpressionGen(node, state, callDepth) {
     }
     const className = resolveCalleeName(node.callee) || 'Object';
     if (state.classes.has(className)) {
+        yield* initializeClassGen(state, className, callDepth, node.loc);
         return yield* instantiateClassGen(className, args, state, callDepth, node.loc);
     }
     if (BUILTIN_EXCEPTION_SUPERTYPES.has(className)) {
@@ -1226,6 +1262,12 @@ function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
         }
         if (receiver == null) {
             throw new Error('Cannot assign member on null receiver');
+        }
+        if (receiver.__kind === 'class') {
+            const staticOwner = findStaticFieldOwner(state, receiver.name, targetNode.property);
+            if (staticOwner) {
+                yield* initializeClassGen(state, staticOwner, callDepth, targetNode.loc);
+            }
         }
         return {
             get: () => readMemberValue(

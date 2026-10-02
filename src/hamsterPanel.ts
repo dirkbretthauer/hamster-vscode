@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { HamsterDiagnostics } from './diagnostics';
 import { getNonce, getWebviewLangScriptUri, getWebviewSimulatorScriptUri } from './utils';
 import { resolveTerrain } from './terrainResolver';
+import { resolveHamsterClassSources } from './hamsterClassResolver';
 import {
     DebugHostToPanelMessage,
     DebugPanelToHostMessage,
@@ -14,6 +15,7 @@ import {
 export interface HamsterPanelOptions {
     initialTerrain?: string;
     initialProgram?: string;
+    initialClassSources?: string[];
     initialProgramUri?: vscode.Uri;
 }
 
@@ -25,6 +27,7 @@ export class HamsterPanel {
     public readonly onDidReceiveDebugMessage = this._onDidReceiveDebugMessage.event;
     /** URI of the program currently loaded or being debugged, used to resolve the right editor to highlight. */
     private _programUri: vscode.Uri | undefined;
+    private _programLoadVersion = 0;
     /** Editors that currently carry the step highlight decoration, so it can be cleared from all of them. */
     private _decoratedEditors = new Set<vscode.TextEditor>();
     private constructor(
@@ -74,9 +77,12 @@ export class HamsterPanel {
         this.panel.reveal(vscode.ViewColumn.Beside);
     }
 
-    sendProgram(source: string, uri?: vscode.Uri) {
+    async sendProgram(source: string, uri?: vscode.Uri) {
+        const loadVersion = ++this._programLoadVersion;
+        const classSources = uri ? await resolveHamsterClassSources(uri) : [];
+        if (loadVersion !== this._programLoadVersion) return;
         this.setProgramUri(uri);
-        this.post({ type: 'loadProgram', source });
+        this.post({ type: 'loadProgram', source, classSources });
     }
 
     /**
@@ -112,6 +118,20 @@ export class HamsterPanel {
         this.post({ type: 'command', command });
     }
 
+    async saveAllAndRunCommand(command: Extract<SimulatorCommand, 'compile' | 'run' | 'step'>) {
+        const saved = await vscode.workspace.saveAll();
+        if (!saved) {
+            vscode.window.showInformationMessage('Hamster: Operation cancelled because workspace files were not saved.');
+            return;
+        }
+
+        if (this._programUri) {
+            const document = await vscode.workspace.openTextDocument(this._programUri);
+            await this.sendProgram(document.getText(), this._programUri);
+        }
+        this.postCommand(command);
+    }
+
     postDebug(msg: DebugHostToPanelMessage) {
         this.post(msg);
     }
@@ -135,6 +155,11 @@ export class HamsterPanel {
             return;
         }
         switch (msg.type) {
+            case 'commandRequest':
+                this.saveAllAndRunCommand(msg.command).catch(error => {
+                    vscode.window.showErrorMessage(`Hamster: Could not save files before running: ${error}`);
+                });
+                break;
             case 'error':
                 vscode.window.showErrorMessage(`Hamster: ${msg.message}`);
                 break;
@@ -186,6 +211,7 @@ export class HamsterPanel {
         const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
         const escapedTerrain = escapeAttr(this.options.initialTerrain || '');
         const escapedProgram = escapeAttr(this.options.initialProgram || '');
+        const escapedClassSources = escapeAttr(JSON.stringify(this.options.initialClassSources || []));
         const escapedAssetsUri = escapeAttr(assetsUri.toString());
 
         return /*html*/`<!DOCTYPE html>
@@ -347,7 +373,7 @@ export class HamsterPanel {
     </style>
 </head>
 <body>
-    <div id="initial-data" style="display:none" data-terrain="${escapedTerrain}" data-program="${escapedProgram}" data-assets-uri="${escapedAssetsUri}"></div>
+    <div id="initial-data" style="display:none" data-terrain="${escapedTerrain}" data-program="${escapedProgram}" data-class-sources="${escapedClassSources}" data-assets-uri="${escapedAssetsUri}"></div>
     <div class="toolbar">
         <button id="btn-compile" title="Compile">&#10003; Compile</button>
         <button id="btn-run" title="Run">&#9654; Run</button>

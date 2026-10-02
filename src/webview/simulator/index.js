@@ -30,9 +30,14 @@ export function bootstrap() {
     const assetsUri = initialDataEl ? initialDataEl.getAttribute('data-assets-uri') : '';
     const initialTerrain = initialDataEl ? initialDataEl.getAttribute('data-terrain') : null;
     const initialProgram = initialDataEl ? initialDataEl.getAttribute('data-program') : null;
+    let initialClassSources = [];
+    try {
+        initialClassSources = JSON.parse(initialDataEl?.getAttribute('data-class-sources') || '[]');
+    } catch {}
 
     let runnerState = null;
     let currentSource = '';
+    let currentClassSources = Array.isArray(initialClassSources) ? initialClassSources : [];
     let resumeAfterInput = null;
     let runTimerId = null;
 
@@ -87,6 +92,16 @@ export function bootstrap() {
         if (runTimerId !== null) { clearTimeout(runTimerId); runTimerId = null; }
     }
 
+    function parseClassModules() {
+        return currentClassSources.map(source => {
+            const moduleAst = window.parseProgram(source, { requireMain: false, strict: true });
+            if (!moduleAst.classes?.length) {
+                throw new Error('A discovered class program did not declare a class.');
+            }
+            return moduleAst;
+        });
+    }
+
     function compileProgram() {
         if (!currentSource) {
             vscodeApi.postMessage({ type: 'error', message: 'No program loaded. Open a .ham file first.' });
@@ -103,7 +118,7 @@ export function bootstrap() {
             if (ast.programType === 'class') {
                 throw new Error('Class programs cannot be run directly.');
             }
-            runnerState = window.createRunnerState(ast, runtime);
+            runnerState = window.createRunnerState(ast, runtime, parseClassModules());
             return true;
         } catch (e) {
             appendLog('Compile error: ' + (e.message || e), true);
@@ -179,7 +194,8 @@ export function bootstrap() {
         }
         clearLog();
         try {
-            window.parseProgram(currentSource, { strict: true });
+            const ast = window.parseProgram(currentSource, { strict: true });
+            window.createRunnerState(ast, runtime, parseClassModules());
             appendLog('Compilation successful \u2013 no errors found.');
             statusEl.textContent = 'Compiled successfully';
             vscodeApi.postMessage({ type: 'info', message: 'Compilation successful \u2013 no errors found.' });
@@ -266,9 +282,15 @@ export function bootstrap() {
         resume();
     });
 
-    document.getElementById('btn-compile').addEventListener('click', () => handleCommand('compile'));
-    document.getElementById('btn-run').addEventListener('click', () => handleCommand('run'));
-    document.getElementById('btn-step').addEventListener('click', () => handleCommand('step'));
+    document.getElementById('btn-compile').addEventListener('click', () =>
+        vscodeApi.postMessage({ type: 'commandRequest', command: 'compile' })
+    );
+    document.getElementById('btn-run').addEventListener('click', () =>
+        vscodeApi.postMessage({ type: 'commandRequest', command: 'run' })
+    );
+    document.getElementById('btn-step').addEventListener('click', () =>
+        vscodeApi.postMessage({ type: 'commandRequest', command: 'step' })
+    );
     document.getElementById('btn-stop').addEventListener('click', () => handleCommand('stop'));
     document.getElementById('btn-reset').addEventListener('click', () => handleCommand('reset'));
     zoomOutButton.addEventListener('click', () => renderer.setZoom(renderer.getCellSize() - ZOOM_STEP));
@@ -350,7 +372,11 @@ export function bootstrap() {
         const msg = event.data;
         switch (msg.type) {
             case 'loadProgram':
+                stopRunLoop();
+                cancelTerminalInput();
+                runnerState = null;
                 currentSource = msg.source;
+                currentClassSources = Array.isArray(msg.classSources) ? msg.classSources : [];
                 statusEl.textContent = 'Program loaded';
                 break;
             case 'loadTerrain':
@@ -371,7 +397,10 @@ export function bootstrap() {
             case 'command':
                 handleCommand(msg.command);
                 break;
-            case 'dbg:launch': dbg.launch(msg); break;
+            case 'dbg:launch':
+                currentClassSources = Array.isArray(msg.classSources) ? msg.classSources : [];
+                dbg.launch(msg);
+                break;
             case 'dbg:setBreakpoints': dbg.setBreakpoints(msg.lines || []); break;
             case 'dbg:continue': dbg.continueRun(); break;
             case 'dbg:next': dbg.next(); break;

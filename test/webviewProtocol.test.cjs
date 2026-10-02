@@ -23,6 +23,9 @@ test('isDebugMessage accepts any dbg:* prefixed message, valid or not', () => {
 test('isPanelToHostMessage accepts well-formed simulator-webview messages', () => {
     assert.equal(isPanelToHostMessage({ type: 'error', message: 'oops' }), true);
     assert.equal(isPanelToHostMessage({ type: 'info', message: 'ok' }), true);
+    assert.equal(isPanelToHostMessage({ type: 'commandRequest', command: 'compile' }), true);
+    assert.equal(isPanelToHostMessage({ type: 'commandRequest', command: 'run' }), true);
+    assert.equal(isPanelToHostMessage({ type: 'commandRequest', command: 'step' }), true);
     assert.equal(isPanelToHostMessage({ type: 'highlightLine', line: 3 }), true);
     assert.equal(isPanelToHostMessage({ type: 'clearHighlight' }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:stopped', reason: 'breakpoint', line: 2 }), true);
@@ -41,6 +44,8 @@ test('isPanelToHostMessage rejects malformed or unknown simulator-webview messag
     assert.equal(isPanelToHostMessage('error'), false);
     assert.equal(isPanelToHostMessage({}), false);
     assert.equal(isPanelToHostMessage({ type: 'error' }), false, 'missing message field');
+    assert.equal(isPanelToHostMessage({ type: 'commandRequest', command: 'stop' }), false);
+    assert.equal(isPanelToHostMessage({ type: 'commandRequest' }), false);
     assert.equal(isPanelToHostMessage({ type: 'error', message: 42 }), false, 'wrong message type');
     assert.equal(isPanelToHostMessage({ type: 'highlightLine', line: '3' }), false, 'line must be a number');
     assert.equal(isPanelToHostMessage({ type: 'dbg:stackTrace', requestId: 1, frames: 'nope' }), false);

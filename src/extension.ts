@@ -4,6 +4,7 @@ import { HamsterDiagnostics } from './diagnostics';
 import { TerrainEditorProvider } from './terrainEditor';
 import { HamsterDebugSession, HamsterDebugConfigurationProvider } from './hamsterDebugSession';
 import { resolveTerrain } from './terrainResolver';
+import { resolveHamsterClassSources } from './hamsterClassResolver';
 
 let currentPanel: HamsterPanel | undefined;
 let panelCreationPromise: Promise<HamsterPanel> | undefined;
@@ -30,7 +31,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('hamster.compile', async () => {
             try {
                 const panel = await ensurePanel(context);
-                panel.postCommand('compile');
+                await panel.saveAllAndRunCommand('compile');
             } catch (err) {
                 vscode.window.showErrorMessage(`Failed to open Hamster simulator: ${err}`);
             }
@@ -39,7 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('hamster.run', async () => {
             try {
                 const panel = await ensurePanel(context);
-                panel.postCommand('run');
+                await panel.saveAllAndRunCommand('run');
             } catch (err) {
                 vscode.window.showErrorMessage(`Failed to open Hamster simulator: ${err}`);
             }
@@ -48,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('hamster.step', async () => {
             try {
                 const panel = await ensurePanel(context);
-                panel.postCommand('step');
+                await panel.saveAllAndRunCommand('step');
             } catch (err) {
                 vscode.window.showErrorMessage(`Failed to open Hamster simulator: ${err}`);
             }
@@ -66,7 +67,8 @@ export function activate(context: vscode.ExtensionContext) {
             if (e.document.languageId === 'hamster') {
                 diagnostics.update(e.document).catch(err => console.error('diagnostics update failed:', err));
                 if (currentPanel) {
-                    currentPanel.sendProgram(e.document.getText(), e.document.uri);
+                    currentPanel.sendProgram(e.document.getText(), e.document.uri)
+                        .catch(err => console.error('sendProgram failed:', err));
                 }
             }
         }),
@@ -82,7 +84,8 @@ export function activate(context: vscode.ExtensionContext) {
             if (editor.document.languageId === 'hamster') {
                 diagnostics.update(editor.document).catch(err => console.error('diagnostics update failed:', err));
                 if (currentPanel) {
-                    currentPanel.sendProgram(editor.document.getText(), editor.document.uri);
+                    currentPanel.sendProgram(editor.document.getText(), editor.document.uri)
+                        .catch(err => console.error('sendProgram failed:', err));
                     currentPanel.sendTerrain(editor.document.uri).catch(err => console.error('sendTerrain failed:', err));
                 }
             }
@@ -124,6 +127,7 @@ async function createPanel(context: vscode.ExtensionContext): Promise<HamsterPan
     if (editor && editor.document.languageId === 'hamster') {
         options.initialProgram = editor.document.getText();
         options.initialProgramUri = editor.document.uri;
+        options.initialClassSources = await resolveHamsterClassSources(editor.document.uri);
         options.initialTerrain = await resolveTerrain(editor.document.uri);
     }
     return HamsterPanel.create(context, diagnostics, options);
@@ -135,7 +139,8 @@ function ensurePanel(context: vscode.ExtensionContext): Promise<HamsterPanel> {
     if (currentPanel) {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'hamster') {
-            currentPanel.sendProgram(editor.document.getText(), editor.document.uri);
+            currentPanel.sendProgram(editor.document.getText(), editor.document.uri)
+                .catch(err => console.error('sendProgram failed:', err));
             currentPanel.sendTerrain(editor.document.uri).catch(err => console.error('sendTerrain failed:', err));
         }
         return Promise.resolve(currentPanel);

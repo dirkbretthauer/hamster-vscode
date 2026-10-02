@@ -162,6 +162,74 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(helperBeforeMain.functions[0].name, 'helper');
     assert.deepEqual(helperBeforeMain.classes, []);
 
+    const separateClassProgram = parser.parseProgram(`
+        int result = 0;
+        void main() {
+            result = Helper.result();
+        }
+    `, { strict: true });
+    const helperClassModule = parser.parseProgram(`
+        /*class*/
+        class Helper {
+            static int result() {
+                return 42;
+            }
+        }
+    `, { strict: true });
+    const separateClassState = runner.createRunnerState(
+        separateClassProgram,
+        createRuntime(),
+        [helperClassModule]
+    );
+    assert.deepEqual(separateClassProgram.classes, []);
+    assert.equal(separateClassState.ast, separateClassProgram);
+    while (runner.executeRunnerStep(separateClassState)) {}
+    assert.equal(separateClassState.scopes[0].get('result'), 42);
+
+    const lazyInitializationProgram = parser.parseProgram(`
+        int result = 0;
+        void main() {
+            result = Child.readChild();
+            result = result + Child.readChild();
+            Constructed instance = new Constructed();
+        }
+    `, { strict: true });
+    const lazyClassSources = [
+        `/*class*/ class Base {
+            static int value = markBase();
+        }`,
+        `/*class*/ class Child extends Base {
+            static int childValue = markChild();
+            static int readChild() { return childValue; }
+        }`,
+        `/*class*/ class Constructed {
+            static int value = markConstructed();
+            Constructed() {}
+        }`,
+        `/*class*/ class Unused {
+            static int value = markUnused();
+        }`,
+    ].map(source => parser.parseProgram(source, { requireMain: false, strict: true }));
+    const initializationOrder = [];
+    const lazyRuntime = createRuntime();
+    const lazyCallBuiltin = lazyRuntime.callBuiltin;
+    lazyRuntime.callBuiltin = name => {
+        if (name.startsWith('mark')) {
+            initializationOrder.push(name);
+            return 10;
+        }
+        return lazyCallBuiltin(name);
+    };
+    const lazyInitializationState = runner.createRunnerState(
+        lazyInitializationProgram,
+        lazyRuntime,
+        lazyClassSources
+    );
+    while (runner.executeRunnerStep(lazyInitializationState)) {}
+    assert.deepEqual(initializationOrder, ['markBase', 'markChild', 'markConstructed']);
+    assert.equal(lazyInitializationState.scopes[0].get('result'), 20);
+    assert.equal(lazyInitializationState.classInitialization.get('Unused').status, 'uninitialized');
+
     const incompleteProgram = parser.parseProgram('int result = 1;', {
         requireMain: false,
     });

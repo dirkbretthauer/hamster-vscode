@@ -15,7 +15,7 @@ const SIMULATOR_COMMANDS: readonly SimulatorCommand[] = ['compile', 'run', 'step
 // ── Extension host → simulator webview ──────────────────────────────────────
 
 export type DebugHostToPanelMessage =
-    | { type: 'dbg:launch'; source: string; stopOnEntry: boolean; breakpoints: number[] }
+    | { type: 'dbg:launch'; source: string; classSources: string[]; stopOnEntry: boolean; breakpoints: number[] }
     | { type: 'dbg:setBreakpoints'; lines: number[] }
     | { type: 'dbg:continue' }
     | { type: 'dbg:next' }
@@ -29,7 +29,7 @@ export type DebugHostToPanelMessage =
     | { type: 'dbg:disconnect' };
 
 export type HostToPanelMessage =
-    | { type: 'loadProgram'; source: string }
+    | { type: 'loadProgram'; source: string; classSources: string[] }
     | { type: 'loadTerrain'; terrain: string }
     | { type: 'resetTerrain' }
     | { type: 'command'; command: SimulatorCommand }
@@ -49,6 +49,7 @@ export type DebugPanelToHostMessage =
 export type PanelToHostMessage =
     | { type: 'error'; message: string }
     | { type: 'info'; message: string }
+    | { type: 'commandRequest'; command: Extract<SimulatorCommand, 'compile' | 'run' | 'step'> }
     | { type: 'highlightLine'; line: number }
     | { type: 'clearHighlight' }
     | DebugPanelToHostMessage;
@@ -71,6 +72,8 @@ export function isPanelToHostMessage(value: unknown): value is PanelToHostMessag
         case 'error':
         case 'info':
             return typeof value.message === 'string';
+        case 'commandRequest':
+            return value.command === 'compile' || value.command === 'run' || value.command === 'step';
         case 'highlightLine':
             return typeof value.line === 'number';
         case 'clearHighlight':

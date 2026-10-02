@@ -9,6 +9,10 @@ export interface HamsterLanguageError extends Error {
     length?: number;
 }
 
+export const ProgramType: Readonly<Record<string, string>>;
+
+export function detectProgramType(source: string): string;
+
 export function collectProgramErrors(
     source: string,
     options?: Record<string, unknown>

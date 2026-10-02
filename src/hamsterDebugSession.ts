@@ -6,6 +6,7 @@ import {
 } from '../lang/hamster-parser.js';
 import { HamsterPanel } from './hamsterPanel';
 import { resolveTerrain } from './terrainResolver';
+import { resolveHamsterClassSources } from './hamsterClassResolver';
 import { DebugHostToPanelMessage, DebugPanelToHostMessage } from './webviewProtocol';
 
 interface PendingRequest {
@@ -267,6 +268,18 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         this._programPath = programPath;
         this._stopOnEntry = args.stopOnEntry !== false;
 
+        try {
+            if (!await vscode.workspace.saveAll()) {
+                this.sendErrorResponse(request, 'Debug launch cancelled because files were not saved.');
+                this.sendEvent('terminated');
+                return;
+            }
+        } catch (e: any) {
+            this.sendErrorResponse(request, `Cannot save workspace files: ${e?.message ?? e}`);
+            this.sendEvent('terminated');
+            return;
+        }
+
         let source: string;
         const fileUri = vscode.Uri.file(programPath);
         try {
@@ -277,6 +290,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
             return;
         }
         this._programSource = source;
+        const classSources = await resolveHamsterClassSources(fileUri);
 
         // Resolve the matching terrain file (.ter) next to the .ham file, if any.
         const terrain = await resolveTerrain(fileUri);
@@ -313,6 +327,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         this.toPanel({
             type: 'dbg:launch',
             source,
+            classSources,
             stopOnEntry: this._stopOnEntry,
             breakpoints: bps,
         });
