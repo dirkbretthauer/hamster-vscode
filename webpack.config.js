@@ -65,8 +65,52 @@ const webviewLangConfig = {
 	devtool: 'nosources-source-map'
 };
 
+/**
+ * Bundles the simulator webview's engine/runtime/debugger/renderer/bootstrap
+ * modules (`src/webview/simulator/`) into one script loaded by
+ * `hamsterPanel.ts`'s webview, replacing the previous giant inline
+ * `<script>` block.
+ * @type {import('webpack').Configuration}
+ */
+const webviewSimulatorConfig = {
+	mode: 'none',
+	target: 'web',
+	entry: './src/webview/simulator/index.js',
+	output: {
+		path: path.resolve(__dirname, 'dist', 'webview'),
+		filename: 'hamster-simulator.js'
+	},
+	resolve: {
+		extensions: ['.js']
+	},
+	devtool: 'nosources-source-map'
+};
+
+/**
+ * Bundles the terrain editor webview's engine/renderer/bootstrap modules
+ * (`src/webview/terrainEditor/`) into one script loaded by
+ * `terrainEditor.ts`'s webview, replacing its previous inline `<script>`
+ * block.
+ * @type {import('webpack').Configuration}
+ */
+const webviewTerrainEditorConfig = {
+	mode: 'none',
+	target: 'web',
+	entry: './src/webview/terrainEditor/index.js',
+	output: {
+		path: path.resolve(__dirname, 'dist', 'webview'),
+		filename: 'hamster-terrain-editor.js'
+	},
+	resolve: {
+		extensions: ['.js']
+	},
+	devtool: 'nosources-source-map'
+};
+
 module.exports = function (env, argv) {
 	webExtensionConfig.mode = argv.mode || 'none';
 	webviewLangConfig.mode = argv.mode || 'none';
-	return [webExtensionConfig, webviewLangConfig];
+	webviewSimulatorConfig.mode = argv.mode || 'none';
+	webviewTerrainEditorConfig.mode = argv.mode || 'none';
+	return [webExtensionConfig, webviewLangConfig, webviewSimulatorConfig, webviewTerrainEditorConfig];
 };

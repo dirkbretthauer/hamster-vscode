@@ -16,13 +16,38 @@ programs (`.ham` files) with an integrated simulator webview, terrain editor, an
   - `hamster-runner.js` – generator-based (`function*`) interpreter that walks the AST and yields
     `{ kind: 'instruction', ... }` / `{ kind: 'needsInput', ... }` steps for the UI
   - `hamster-terrain.js` – pure `.ter` terrain file parser/serializer, shared by the simulator
-    webview (`hamsterPanel.ts`) and the terrain editor webview (`terrainEditor.ts`)
+    webview (`src/webview/simulator/`) and the terrain editor webview (`src/webview/terrainEditor/`)
 - **`src/`** – TypeScript, the VS Code extension host:
   - `extension.ts` – activation, commands (`hamster.openSimulator/compile/run/step/stop/reset`)
-  - `hamsterPanel.ts` – webview panel bridging the runner to the simulator UI
+  - `hamsterPanel.ts` – webview *panel* lifecycle/host integration only (creates the panel, builds
+    its HTML shell, wires `postMessage`) — the simulator's engine/runtime/debugger/renderer/UI
+    code itself lives in `src/webview/simulator/*.js` (see below), not in this file
   - `diagnostics.ts` – runs the parser on save/change for red-squiggle errors
-  - `terrainEditor.ts` – custom editor for `.ter` terrain files
+  - `terrainEditor.ts` – custom editor *lifecycle/host integration* for `.ter` terrain files — its
+    paint/drag/undo editor and canvas rendering live in `src/webview/terrainEditor/*.js`
   - `hamsterDebugSession.ts` – Debug Adapter Protocol implementation for step debugging
+  - `utils.ts` – shared webview helpers (nonce generation, `getWebviewLangScriptUri`/
+    `getWebviewSimulatorScriptUri`/`getWebviewTerrainEditorScriptUri` for resolving the bundled
+    `dist/webview/*.js` script URIs)
+  - `webviewProtocol.ts` – typed/validated host ⇄ webview `postMessage` message shapes and type
+    guards; the single boundary contract both webviews and both host classes depend on
+- **`src/webview/`** – Plain JavaScript (ES modules, no build step of their own — same convention
+  as `lang/`), the actual webview runtime implementations, bundled by webpack into
+  `dist/webview/*.js` and loaded via `<script src>` from the HTML each host class emits:
+  - `shared/` – terrain rendering/model/hit-test helpers used by *both* webviews (grid+corn+wall
+    drawing, hamster sprite fallback drawing, cell hit-testing) — on top of `lang/hamster-terrain.js`'s
+    `.ter` codec (stage 1), which both bundles also depend on
+  - `simulator/` – the simulator webview: `engine.js` (terrain + hamster state machine, built-in
+    API), `runtime.js` (bridges `window.parseProgram`/`createRunnerState`/`executeRunnerStep` from
+    the `hamster-lang.js` bundle to the engine), `renderer.js` (canvas rendering incl. sprite
+    tinting), `debugger.js` (breakpoints/step/continue/stack/scopes/variables/evaluate), `index.js`
+    (DOM bootstrap, toolbar wiring, `window.addEventListener('message', ...)` dispatch, terminal
+    input, zoom/speed controls) — bundled as `dist/webview/hamster-simulator.js`
+  - `terrainEditor/` – the terrain editor webview: `engine.js` (terrain edit state), `renderer.js`
+    (untinted canvas rendering), `index.js` (paint/drag/undo bootstrap, stroke coalescing) —
+    bundled as `dist/webview/hamster-terrain-editor.js`
+  - `langBundleEntry.js` – re-exports `lang/*.js` as globals (stage 2); bundled as
+    `dist/webview/hamster-lang.js` and shared by both webviews
 - **`syntaxes/hamster.tmLanguage.json`** – TextMate grammar for syntax highlighting
 - **`spec/`** – Local copies of the reference language spec
 
@@ -114,7 +139,7 @@ touched code over large unrelated reformatting.
 
 ## VS Code extension best practices
 
-General guidance for `src/` (extension host) and `hamsterPanel.ts`'s webview code:
+General guidance for `src/` (extension host) and `src/webview/**/*.js` (webview runtime code):
 
 - **Dispose everything** – Every listener/subscription/panel must be pushed to
   `context.subscriptions` or the panel's own `disposables` array (already done for `HamsterPanel`)

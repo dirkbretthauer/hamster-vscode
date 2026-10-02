@@ -21,3 +21,27 @@ export function getWebviewLangScriptUri(webview: vscode.Webview, extensionUri: v
         vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'hamster-lang.js')
     );
 }
+
+/**
+ * URI of the bundled simulator webview script (engine, runtime adapter,
+ * debugger controller, renderer, and UI bootstrap) built from
+ * `src/webview/simulator/index.js` into `dist/webview/hamster-simulator.js`.
+ * Loaded by `hamsterPanel.ts`'s webview via a `<script src>` tag.
+ */
+export function getWebviewSimulatorScriptUri(webview: vscode.Webview, extensionUri: vscode.Uri): vscode.Uri {
+    return webview.asWebviewUri(
+        vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'hamster-simulator.js')
+    );
+}
+
+/**
+ * URI of the bundled terrain editor webview script (engine, renderer, and
+ * UI bootstrap) built from `src/webview/terrainEditor/index.js` into
+ * `dist/webview/hamster-terrain-editor.js`. Loaded by `terrainEditor.ts`'s
+ * webview via a `<script src>` tag.
+ */
+export function getWebviewTerrainEditorScriptUri(webview: vscode.Webview, extensionUri: vscode.Uri): vscode.Uri {
+    return webview.asWebviewUri(
+        vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'hamster-terrain-editor.js')
+    );
+}
