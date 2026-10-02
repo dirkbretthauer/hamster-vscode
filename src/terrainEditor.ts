@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getNonce } from './utils';
+import { getNonce, loadLangScripts } from './utils';
 import { HostToTerrainEditorMessage, isTerrainEditorToHostMessage } from './webviewProtocol';
 
 export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
@@ -27,10 +27,11 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
         const nonce = getNonce();
+        const { terrainCode } = await loadLangScripts(this.context.extensionUri);
 
         webviewPanel.webview.html = this.getHtml(
             webviewPanel.webview, nonce, assetsUri.toString(),
-            escapedTerrain,
+            escapedTerrain, terrainCode,
         );
 
         // Track the last content we sent to the document to prevent circular updates
@@ -74,7 +75,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
 
     private getHtml(
         webview: vscode.Webview, nonce: string, assetsUri: string,
-        escapedTerrain: string,
+        escapedTerrain: string, terrainCode: string,
     ): string {
         return /*html*/`<!DOCTYPE html>
 <html lang="en">
@@ -145,6 +146,11 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         <canvas id="terrain" width="480" height="384"></canvas>
     </div>
 
+    <!-- Shared terrain parse/serialize helpers (also used by the simulator webview) -->
+    <script nonce="${nonce}">
+    ${terrainCode}
+    </script>
+
     <script nonce="${nonce}">
     (function() {
         const vscode = acquireVsCodeApi();
@@ -158,7 +164,6 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
             '#ff00ff','#ffc800','#ffafaf','#808080','#ffffff',
         ];
         const DIRS = ['\\u2191','\\u2192','\\u2193','\\u2190'];
-        const DIR_TO_TER = ['^','>','v','<'];
         const DX = [0, 1, 0, -1];
         const DY = [-1, 0, 1, 0];
 
@@ -205,51 +210,26 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
 
         const engine = {
             loadTerrain(terString) {
-                const lines = String(terString).split(/\\r?\\n/);
-                const w = parseInt(lines[0],10), h = parseInt(lines[1],10);
-                if (isNaN(w)||isNaN(h)||w<1||h<1) { initEngine(10,8); return; }
-                initEngine(w, h);
-                const cornCells = [];
-                const terrainHamsters = [];
-                for (let row=0; row<h; row++) {
-                    const line = lines[row+2]||'';
-                    for (let col=0; col<w; col++) {
-                        const c = line[col]||' ';
-                        if (c==='#') engineState.terrain.walls[row][col]=1;
-                        if (c==='*'||c==='^'||c==='>'||c==='v'||c==='<') cornCells.push([row,col]);
-                        if (c==='^'||c==='>'||c==='v'||c==='<') {
-                            const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
-                            terrainHamsters.push({x:col,y:row,dir});
-                        }
+                const parsed = parseTerrainFile(terString);
+                if (!parsed) { initEngine(10, 8); return; }
+                initEngine(parsed.width, parsed.height);
+                for (let row=0; row<parsed.height; row++) {
+                    for (let col=0; col<parsed.width; col++) {
+                        engineState.terrain.walls[row][col] = parsed.walls[row][col];
+                        engineState.terrain.corn[row][col] = parsed.corn[row][col];
                     }
                 }
-                const base = 2+h;
-                for (let i=0; i<cornCells.length; i++) {
-                    const [row,col]=cornCells[i];
-                    const val=parseInt(lines[base+i]||'0',10);
-                    engineState.terrain.corn[row][col]=isNaN(val)?0:val;
+                const def = getHamster(-1);
+                def.x = parsed.defaultHamster.x;
+                def.y = parsed.defaultHamster.y;
+                def.dir = parsed.defaultHamster.dir;
+                def.mouth = parsed.defaultHamster.mouth;
+                for (const hamster of parsed.additionalHamsters) {
+                    const id = nextId++;
+                    engineState.terrain.hamsters.push({
+                        id, x:hamster.x, y:hamster.y, dir:hamster.dir, mouth:hamster.mouth, color:hamster.color,
+                    });
                 }
-                const mouthLine = base+cornCells.length;
-                const mouth = parseInt(lines[mouthLine]||'0',10);
-                const defaultMetadata = /^@default\\s+(\\d+)\\s+(\\d+)\\s*$/.exec(lines[mouthLine+1]||'');
-                const metadataX = defaultMetadata ? parseInt(defaultMetadata[1],10) : -1;
-                const metadataY = defaultMetadata ? parseInt(defaultMetadata[2],10) : -1;
-                let defaultIndex = terrainHamsters.findIndex(h => h.x===metadataX && h.y===metadataY);
-                if (defaultIndex<0) defaultIndex=terrainHamsters.length-1;
-                if (defaultIndex>=0) {
-                    const def = getHamster(-1);
-                    const defaultState = terrainHamsters[defaultIndex];
-                    def.x=defaultState.x; def.y=defaultState.y; def.dir=defaultState.dir;
-                    for (let i=0; i<terrainHamsters.length; i++) {
-                        if (i===defaultIndex) continue;
-                        const hamster = terrainHamsters[i];
-                        const id=nextId++;
-                        engineState.terrain.hamsters.push({
-                            id,x:hamster.x,y:hamster.y,dir:hamster.dir,mouth:0,color:0,
-                        });
-                    }
-                }
-                getHamster(-1).mouth = isNaN(mouth)?0:mouth;
                 render(engineState);
             },
             setWall(col,row,value) {
@@ -339,27 +319,7 @@ export class TerrainEditorProvider implements vscode.CustomTextEditorProvider {
         // ── Serialize ──
         function terrainToTer() {
             if (!engineState) return '';
-            const t = engineState.terrain;
-            const def = t.hamsters.find(h => h.id===-1) || {x:0,y:0,dir:1,mouth:0};
-            const lines = [];
-            const cornPos = [];
-            for (let row=0; row<t.height; row++) {
-                let line='';
-                for (let col=0; col<t.width; col++) {
-                    if (t.walls[row][col]) { line+='#'; continue; }
-                    const hamster = t.hamsters.find(h => h.x===col && h.y===row);
-                    const c = t.corn[row][col]||0;
-                    if (hamster) { line+=DIR_TO_TER[((hamster.dir%4)+4)%4]||'>'; cornPos.push({x:col,y:row}); }
-                    else if (c>0) { line+='*'; cornPos.push({x:col,y:row}); }
-                    else { line+=' '; }
-                }
-                lines.push(line);
-            }
-            const result = [String(t.width), String(t.height), ...lines,
-                ...cornPos.map(p => String(t.corn[p.y][p.x]||0)),
-                String(def.mouth||0)];
-            if (t.hamsters.length>1) result.push('@default '+def.x+' '+def.y);
-            return result.join('\\n');
+            return serializeTerrainFile(engineState.terrain);
         }
 
         function notifyChanged() {

@@ -67,7 +67,9 @@ export class HamsterPanel {
 
         const scripts = await loadLangScripts(context.extensionUri);
         const instance = new HamsterPanel(context, diagnostics, panel, options);
-        instance.panel.webview.html = instance.getHtmlContent(scripts.lexerCode, scripts.parserCode, scripts.runnerCode);
+        instance.panel.webview.html = instance.getHtmlContent(
+            scripts.lexerCode, scripts.parserCode, scripts.runnerCode, scripts.terrainCode,
+        );
         return instance;
     }
 
@@ -176,7 +178,7 @@ export class HamsterPanel {
         this._decoratedEditors.clear();
     }
 
-    private getHtmlContent(lexerCode: string, parserCode: string, runnerCode: string): string {
+    private getHtmlContent(lexerCode: string, parserCode: string, runnerCode: string, terrainCode: string): string {
         const webview = this.panel.webview;
         const assetsUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'assets')
@@ -493,50 +495,26 @@ export class HamsterPanel {
         const engine = {
             init: (w,h) => initEngine(w,h),
             loadTerrain(terString) {
-                const lines = String(terString).split(/\\r?\\n/);
-                const w = parseInt(lines[0],10), h = parseInt(lines[1],10);
-                initEngine(w, h);
-                const cornCells = [];
-                const terrainHamsters = [];
-                for (let row=0; row<h; row++) {
-                    const line = lines[row+2]||'';
-                    for (let col=0; col<w; col++) {
-                        const c = line[col]||' ';
-                        if (c==='#') engineState.terrain.walls[row][col]=1;
-                        if (c==='*'||c==='^'||c==='>'||c==='v'||c==='<') cornCells.push([row,col]);
-                        if (c==='^'||c==='>'||c==='v'||c==='<') {
-                            const dir = c==='^'?0:c==='>'?1:c==='v'?2:3;
-                            terrainHamsters.push({x:col,y:row,dir});
-                        }
+                const parsed = parseTerrainFile(terString);
+                if (!parsed) { initEngine(1, 1); return clone(engineState); }
+                initEngine(parsed.width, parsed.height);
+                for (let row=0; row<parsed.height; row++) {
+                    for (let col=0; col<parsed.width; col++) {
+                        engineState.terrain.walls[row][col] = parsed.walls[row][col];
+                        engineState.terrain.corn[row][col] = parsed.corn[row][col];
                     }
                 }
-                const base = 2+h;
-                for (let i=0; i<cornCells.length; i++) {
-                    const [row,col]=cornCells[i];
-                    const val=parseInt(lines[base+i]||'0',10);
-                    engineState.terrain.corn[row][col]=isNaN(val)?0:val;
+                const def = getHamster(-1);
+                def.x = parsed.defaultHamster.x;
+                def.y = parsed.defaultHamster.y;
+                def.dir = parsed.defaultHamster.dir;
+                def.mouth = parsed.defaultHamster.mouth;
+                for (const hamster of parsed.additionalHamsters) {
+                    const id = nextId++;
+                    engineState.terrain.hamsters.push({
+                        id, x:hamster.x, y:hamster.y, dir:hamster.dir, mouth:hamster.mouth, color:hamster.color,
+                    });
                 }
-                const mouthLine = base+cornCells.length;
-                const mouth = parseInt(lines[mouthLine]||'0',10);
-                const defaultMetadata = /^@default\\s+(\\d+)\\s+(\\d+)\\s*$/.exec(lines[mouthLine+1]||'');
-                const metadataX = defaultMetadata ? parseInt(defaultMetadata[1],10) : -1;
-                const metadataY = defaultMetadata ? parseInt(defaultMetadata[2],10) : -1;
-                let defaultIndex = terrainHamsters.findIndex(h => h.x===metadataX && h.y===metadataY);
-                if (defaultIndex<0) defaultIndex=terrainHamsters.length-1;
-                if (defaultIndex>=0) {
-                    const def = getHamster(-1);
-                    const defaultState = terrainHamsters[defaultIndex];
-                    def.x=defaultState.x; def.y=defaultState.y; def.dir=defaultState.dir;
-                    for (let i=0; i<terrainHamsters.length; i++) {
-                        if (i===defaultIndex) continue;
-                        const hamster = terrainHamsters[i];
-                        const id=nextId++;
-                        engineState.terrain.hamsters.push({
-                            id,x:hamster.x,y:hamster.y,dir:hamster.dir,mouth:0,color:0,
-                        });
-                    }
-                }
-                getHamster(-1).mouth = isNaN(mouth)?0:mouth;
                 render(engineState);
                 return clone(engineState);
             },
@@ -1591,6 +1569,8 @@ export class HamsterPanel {
 
     <!-- Inlined language tools (lexer → parser → runner, single block so declarations are shared) -->
     <script nonce="${nonce}">
+    // --- hamster-terrain.js ---
+    ${terrainCode}
     // --- hamster-lexer.js ---
     ${lexerCode}
     // --- hamster-parser.js ---
