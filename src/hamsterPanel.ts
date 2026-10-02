@@ -6,6 +6,7 @@ import { resolveTerrain } from './terrainResolver';
 export interface HamsterPanelOptions {
     initialTerrain?: string;
     initialProgram?: string;
+    initialProgramUri?: vscode.Uri;
 }
 
 export class HamsterPanel {
@@ -14,12 +15,17 @@ export class HamsterPanel {
     public readonly onDidDispose = this._onDidDispose.event;
     private _onDidReceiveDebugMessage = new vscode.EventEmitter<any>();
     public readonly onDidReceiveDebugMessage = this._onDidReceiveDebugMessage.event;
+    /** URI of the program currently loaded or being debugged, used to resolve the right editor to highlight. */
+    private _programUri: vscode.Uri | undefined;
+    /** Editors that currently carry the step highlight decoration, so it can be cleared from all of them. */
+    private _decoratedEditors = new Set<vscode.TextEditor>();
     private constructor(
         private context: vscode.ExtensionContext,
         private diagnostics: HamsterDiagnostics,
         private panel: vscode.WebviewPanel,
         private options: HamsterPanelOptions = {},
     ) {
+        this._programUri = options.initialProgramUri;
         this.panel.webview.onDidReceiveMessage(
             msg => this.handleMessage(msg),
             null,
@@ -61,8 +67,20 @@ export class HamsterPanel {
         this.panel.reveal(vscode.ViewColumn.Beside);
     }
 
-    sendProgram(source: string) {
+    sendProgram(source: string, uri?: vscode.Uri) {
+        this.setProgramUri(uri);
         this.panel.webview.postMessage({ type: 'loadProgram', source });
+    }
+
+    /**
+     * Records the URI of the program currently loaded or debugged, so step
+     * highlighting always targets the matching editor. Switching to a
+     * different program clears any highlight left on the previous one.
+     */
+    setProgramUri(uri: vscode.Uri | undefined) {
+        if (this._programUri?.toString() === uri?.toString()) return;
+        this._programUri = uri;
+        this.clearHighlight();
     }
 
     async sendTerrain(hamUri: vscode.Uri) {
@@ -113,6 +131,12 @@ export class HamsterPanel {
     }
 
     private findHamsterEditor(): vscode.TextEditor | undefined {
+        if (this._programUri) {
+            const programUriString = this._programUri.toString();
+            return vscode.window.visibleTextEditors.find(e =>
+                e.document.languageId === 'hamster' && e.document.uri.toString() === programUriString
+            );
+        }
         return vscode.window.visibleTextEditors.find(e => e.document.languageId === 'hamster');
     }
 
@@ -122,13 +146,13 @@ export class HamsterPanel {
         const range = new vscode.Range(line - 1, 0, line - 1, 1000);
         editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
         editor.setDecorations(stepHighlight, [{ range }]);
+        this._decoratedEditors.add(editor);
     }
 
+    /** Clears the step decoration from every editor it may have been applied to. */
     private clearHighlight() {
-        const editor = this.findHamsterEditor();
-        if (editor) {
-            editor.setDecorations(stepHighlight, []);
-        }
+        this._decoratedEditors.forEach(editor => editor.setDecorations(stepHighlight, []));
+        this._decoratedEditors.clear();
     }
 
     private getHtmlContent(lexerCode: string, parserCode: string, runnerCode: string): string {
@@ -967,6 +991,7 @@ export class HamsterPanel {
         function dbgTerminate() {
             dbgCancelOperation();
             vscode.postMessage({type:'dbg:terminated'});
+            vscode.postMessage({type:'clearHighlight'});
             statusEl.textContent = 'Debug session ended';
         }
 
@@ -1150,6 +1175,7 @@ export class HamsterPanel {
         function doStop() {
             if (runTimerId !== null) { clearTimeout(runTimerId); runTimerId = null; }
             cancelTerminalInput();
+            vscode.postMessage({type:'clearHighlight'});
             statusEl.textContent = 'Stopped';
         }
 
@@ -1566,13 +1592,20 @@ export class HamsterPanel {
     }
 
     private cleanUp() {
+        this.clearHighlight();
         while (this.disposables.length) {
             this.disposables.pop()?.dispose();
         }
     }
 }
 
-const stepHighlight = vscode.window.createTextEditorDecorationType({
+/**
+ * Decoration used to highlight the line currently being executed. Owned at
+ * module scope (one decoration type shared by all panels); the extension
+ * disposes it on deactivation via `stepHighlightDecorationType`.
+ */
+export const stepHighlightDecorationType = vscode.window.createTextEditorDecorationType({
     backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
     isWholeLine: true,
 });
+const stepHighlight = stepHighlightDecorationType;

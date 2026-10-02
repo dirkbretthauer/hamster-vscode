@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { HamsterPanel, HamsterPanelOptions } from './hamsterPanel';
+import { HamsterPanel, HamsterPanelOptions, stepHighlightDecorationType } from './hamsterPanel';
 import { HamsterDiagnostics } from './diagnostics';
 import { TerrainEditorProvider } from './terrainEditor';
 import { HamsterDebugSession, HamsterDebugConfigurationProvider } from './hamsterDebugSession';
@@ -12,6 +12,7 @@ let diagnostics: HamsterDiagnostics;
 export function activate(context: vscode.ExtensionContext) {
     diagnostics = new HamsterDiagnostics();
     context.subscriptions.push(diagnostics);
+    context.subscriptions.push(stepHighlightDecorationType);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('hamster.openSimulator', async () => {
@@ -65,7 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (e.document.languageId === 'hamster') {
                 diagnostics.update(e.document).catch(err => console.error('diagnostics update failed:', err));
                 if (currentPanel) {
-                    currentPanel.sendProgram(e.document.getText());
+                    currentPanel.sendProgram(e.document.getText(), e.document.uri);
                 }
             }
         }),
@@ -81,7 +82,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (editor.document.languageId === 'hamster') {
                 diagnostics.update(editor.document).catch(err => console.error('diagnostics update failed:', err));
                 if (currentPanel) {
-                    currentPanel.sendProgram(editor.document.getText());
+                    currentPanel.sendProgram(editor.document.getText(), editor.document.uri);
                     currentPanel.sendTerrain(editor.document.uri).catch(err => console.error('sendTerrain failed:', err));
                 }
             }
@@ -122,6 +123,7 @@ async function createPanel(context: vscode.ExtensionContext): Promise<HamsterPan
     const editor = vscode.window.activeTextEditor;
     if (editor && editor.document.languageId === 'hamster') {
         options.initialProgram = editor.document.getText();
+        options.initialProgramUri = editor.document.uri;
         options.initialTerrain = await resolveTerrain(editor.document.uri);
     }
     return HamsterPanel.create(context, diagnostics, options);
@@ -133,7 +135,7 @@ function ensurePanel(context: vscode.ExtensionContext): Promise<HamsterPanel> {
     if (currentPanel) {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'hamster') {
-            currentPanel.sendProgram(editor.document.getText());
+            currentPanel.sendProgram(editor.document.getText(), editor.document.uri);
             currentPanel.sendTerrain(editor.document.uri).catch(err => console.error('sendTerrain failed:', err));
         }
         return Promise.resolve(currentPanel);
