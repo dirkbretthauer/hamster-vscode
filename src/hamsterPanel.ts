@@ -388,10 +388,10 @@ export class HamsterPanel {
     </form>
     <div id="log"></div>
 
+    <!-- Shared language tools bundle (lexer, parser, runner, terrain codec); must load before the simulator bundle, which uses its globals during bootstrap. -->
+    <script nonce="${nonce}" src="${langScriptUri}"></script>
     <!-- Simulator engine, runtime adapter, debugger controller, renderer, and UI bootstrap -->
     <script nonce="${nonce}" src="${simulatorScriptUri}"></script>
-    <!-- Shared language tools bundle (lexer, parser, runner, terrain codec) -->
-    <script nonce="${nonce}" src="${langScriptUri}"></script>
     <script nonce="${nonce}">
     document.getElementById('status').textContent = 'Ready \u2013 open a .ham file and click Run';
     </script>
