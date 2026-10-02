@@ -16,6 +16,7 @@
     "Programming Languages",
     "Education"
   ],
+  "main": "./dist/extension.js",
   "browser": "./dist/web/extension.js",
   "contributes": {
     "languages": [

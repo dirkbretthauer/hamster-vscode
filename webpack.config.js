@@ -45,6 +45,16 @@ const webExtensionConfig = {
 	devtool: 'nosources-source-map'
 };
 
+const nodeExtensionConfig = {
+	...webExtensionConfig,
+	target: 'node',
+	output: {
+		...webExtensionConfig.output,
+		path: path.resolve(__dirname, 'dist'),
+		libraryTarget: 'commonjs2'
+	}
+};
+
 /**
  * Bundles the shared `lang/*.js` language tools for the webviews (simulator
  * and terrain editor) as real ES modules, instead of inlining raw
@@ -109,8 +119,9 @@ const webviewTerrainEditorConfig = {
 
 module.exports = function (env, argv) {
 	webExtensionConfig.mode = argv.mode || 'none';
+	nodeExtensionConfig.mode = argv.mode || 'none';
 	webviewLangConfig.mode = argv.mode || 'none';
 	webviewSimulatorConfig.mode = argv.mode || 'none';
 	webviewTerrainEditorConfig.mode = argv.mode || 'none';
-	return [webExtensionConfig, webviewLangConfig, webviewSimulatorConfig, webviewTerrainEditorConfig];
+	return [nodeExtensionConfig, webExtensionConfig, webviewLangConfig, webviewSimulatorConfig, webviewTerrainEditorConfig];
 };
