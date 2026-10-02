@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { HamsterDiagnostics } from './diagnostics';
 import { getNonce, loadLangScripts } from './utils';
+import { resolveTerrain } from './terrainResolver';
 
 export interface HamsterPanelOptions {
     initialTerrain?: string;
@@ -65,36 +66,21 @@ export class HamsterPanel {
     }
 
     async sendTerrain(hamUri: vscode.Uri) {
-        const dirUri = vscode.Uri.joinPath(hamUri, '..');
-        const uriPath = hamUri.path;
-        const lastSlash = uriPath.lastIndexOf('/');
-        const fileName = uriPath.substring(lastSlash + 1);
-        const baseName = fileName.endsWith('.ham') ? fileName.slice(0, -4) : fileName;
-        const exactTerUri = vscode.Uri.joinPath(dirUri, baseName + '.ter');
-        const decoder = new TextDecoder('utf-8');
-        let terContent: string | undefined;
-
-        try {
-            const data = await vscode.workspace.fs.readFile(exactTerUri);
-            terContent = decoder.decode(data);
-        } catch {
-            try {
-                const entries = await vscode.workspace.fs.readDirectory(dirUri);
-                const terEntry = entries.find(([name]) => name.endsWith('.ter'));
-                if (terEntry) {
-                    const data = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dirUri, terEntry[0]));
-                    terContent = decoder.decode(data);
-                }
-            } catch { /* ignore */ }
-        }
-
-        if (terContent) {
-            this.panel.webview.postMessage({ type: 'loadTerrain', terrain: terContent });
+        const terrain = await resolveTerrain(hamUri);
+        if (terrain) {
+            this.sendTerrainContent(terrain);
+        } else {
+            this.resetTerrain();
         }
     }
 
     sendTerrainContent(content: string) {
         this.panel.webview.postMessage({ type: 'loadTerrain', terrain: content });
+    }
+
+    /** Resets the simulator to its default empty terrain, e.g. when no `.ter` file resolves. */
+    resetTerrain() {
+        this.panel.webview.postMessage({ type: 'resetTerrain' });
     }
 
     postCommand(command: string) {
@@ -718,6 +704,11 @@ export class HamsterPanel {
                         statusEl.textContent = 'Terrain error: ' + (e.message||e);
                         console.error('loadTerrain failed:', e, 'input:', JSON.stringify(msg.terrain).substring(0,200));
                     }
+                    break;
+                case 'resetTerrain':
+                    doStop();
+                    initEngine(10, 8);
+                    statusEl.textContent = 'Terrain reset to default';
                     break;
                 case 'command':
                     handleCommand(msg.command);

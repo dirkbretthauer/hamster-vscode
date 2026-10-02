@@ -5,6 +5,7 @@ import {
     parseProgram,
 } from '../lang/hamster-parser.js';
 import { HamsterPanel } from './hamsterPanel';
+import { resolveTerrain } from './terrainResolver';
 
 interface PendingRequest {
     resolve: (value: any) => void;
@@ -265,8 +266,8 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         }
         this._programSource = source;
 
-        // Try to find a matching terrain file (.ter) next to the .ham file.
-        const terrain = await this.findTerrain(fileUri);
+        // Resolve the matching terrain file (.ter) next to the .ham file, if any.
+        const terrain = await resolveTerrain(fileUri);
 
         // Ensure the simulator panel exists and wire up the message bridge.
         try {
@@ -287,6 +288,8 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
 
         if (terrain) {
             this._panel.sendTerrainContent(terrain);
+        } else {
+            this._panel.resetTerrain();
         }
 
         // Collect breakpoints already registered for this source (if any).
@@ -450,29 +453,6 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
     // ── Misc helpers ────────────────────────────────────────────────────────
     private normalizePath(p: string): string {
         return p.replace(/\\/g, '/').toLowerCase();
-    }
-
-    private async findTerrain(hamUri: vscode.Uri): Promise<string | undefined> {
-        const dirUri = vscode.Uri.joinPath(hamUri, '..');
-        const uriPath = hamUri.path;
-        const lastSlash = uriPath.lastIndexOf('/');
-        const fileName = uriPath.substring(lastSlash + 1);
-        const baseName = fileName.endsWith('.ham') ? fileName.slice(0, -4) : fileName;
-        const exactTerUri = vscode.Uri.joinPath(dirUri, baseName + '.ter');
-        const decoder = new TextDecoder('utf-8');
-        try {
-            const data = await vscode.workspace.fs.readFile(exactTerUri);
-            return decoder.decode(data);
-        } catch { /* fall through */ }
-        try {
-            const entries = await vscode.workspace.fs.readDirectory(dirUri);
-            const terEntry = entries.find(([name]) => name.endsWith('.ter'));
-            if (terEntry) {
-                const data = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dirUri, terEntry[0]));
-                return decoder.decode(data);
-            }
-        } catch { /* ignore */ }
-        return undefined;
     }
 }
 
