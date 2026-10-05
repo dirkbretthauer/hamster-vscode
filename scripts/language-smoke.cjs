@@ -1024,8 +1024,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 
     // ── Known gaps: out-of-scope constructs report a targeted, tagged error (US4, T036) ──
     const knownGapCases = [
-        ['void main() { reversi.ReversiHamster paul = null; }', 'qualified-type-name', /Qualified type names are not supported/],
-        ['/*class*/ class C { java.util.Calendar c; }', 'qualified-type-name', /Qualified type names are not supported/],
         ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
         ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
         ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
@@ -1240,6 +1238,49 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         '        b = 2;',
         '}',
     ].join('\n'))), [2, 3]);
+
+    // ── Qualified type names resolve by simple name (002, T008) ──
+    const qualifiedLocal = findNode(parses('void main() { reversi.ReversiHamster paul = null; }'),
+        node => node.type === parser.ASTNodeType.VariableDecl);
+    assert.equal(qualifiedLocal.varType, 'ReversiHamster');
+    const qualifiedClass = parses(`
+        /*class*/
+        class C extends pkg.Base implements pkg.Marker, other.Named<T> {
+            java.util.Calendar calendar;
+            a.b.Box make(a.b.Box box) { return box; }
+        }
+    `).classes[0];
+    assert.equal(qualifiedClass.fields[0].varType, 'Calendar');
+    assert.equal(qualifiedClass.methods[0].returnType, 'Box');
+    assert.equal(qualifiedClass.methods[0].parameters[0].paramType, 'Box');
+    assert.equal(qualifiedClass.superClass, 'Base');
+    assert.deepEqual(qualifiedClass.interfaces, ['Marker', 'Named']);
+    assert.equal(findNode(parses('void main() { Territorium.getAnzahlReihen(); }'),
+        node => node.type === parser.ASTNodeType.ExpressionStmt).expression.type, parser.ASTNodeType.CallExpression);
+    assert.equal(findNode(parses('void main() { a.b = 1; }'),
+        node => node.type === parser.ASTNodeType.Assignment).target.type, parser.ASTNodeType.MemberExpression);
+    const qualifiedState = runProgram(parser, runner, `
+        class Box {
+            int value;
+            Box(int v) { value = v; }
+            int get() { return value; }
+        }
+        class Outer {
+            class Inner {
+                int answer() { return 42; }
+            }
+        }
+        int result = 0;
+        int nested = 0;
+        void main() {
+            pkg.Box b = new pkg.Box(4);
+            result = b.get();
+            Outer.Inner inner = new Outer.Inner();
+            nested = inner.answer();
+        }
+    `);
+    assert.equal(qualifiedState.scopes[0].get('result'), 4);
+    assert.equal(qualifiedState.scopes[0].get('nested'), 42);
 
     console.log('Language smoke checks passed');
 })().catch(error => {

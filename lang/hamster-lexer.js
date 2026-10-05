@@ -110,7 +110,6 @@ export class Token {
  * Errors carrying one of these codes are known gaps rather than parse bugs.
  */
 export const UnsupportedConstruct = Object.freeze({
-    QualifiedTypeName: 'qualified-type-name',
     Enum: 'enum',
     ClassLiteral: 'class-literal',
     EnhancedFor: 'enhanced-for',

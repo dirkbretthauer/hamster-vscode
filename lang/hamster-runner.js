@@ -1064,7 +1064,8 @@ function* evalNewExpressionGen(node, state, callDepth) {
     for (const arg of (node.arguments || [])) {
         args.push(yield* evalExpressionGen(arg, state, callDepth));
     }
-    const className = resolveCalleeName(node.callee) || 'Object';
+    // Packages aren't modelled: `new pkg.Type()` and `new Outer.Inner()` resolve by simple name.
+    const className = simpleTypeName(resolveCalleeName(node.callee) || 'Object');
     if (state.classes.has(className)) {
         yield* initializeClassGen(state, className, callDepth, node.loc);
         return yield* instantiateClassGen(className, args, state, callDepth, node.loc);

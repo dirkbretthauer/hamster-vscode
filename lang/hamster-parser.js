@@ -60,7 +60,6 @@ export class HamsterParserError extends Error {
 }
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
-    [UnsupportedConstruct.QualifiedTypeName]: 'Qualified type names are not supported',
     [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
     [UnsupportedConstruct.ClassLiteral]: 'Class literals (Foo.class) are not supported',
     [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
@@ -370,15 +369,15 @@ class Parser {
         if (this.matchKeyword('extends')) {
             if (isInterface) {
                 do {
-                    interfaces.push(this.consumeQualifiedName('Expected interface name after extends'));
+                    interfaces.push(simpleTypeName(this.consumeQualifiedName('Expected interface name after extends')));
                 } while (this.matchSymbol(','));
             } else {
-                superClass = this.consumeQualifiedName('Expected superclass name after extends');
+                superClass = simpleTypeName(this.consumeQualifiedName('Expected superclass name after extends'));
             }
         }
         if (!isInterface && this.matchKeyword('implements')) {
             do {
-                interfaces.push(this.consumeQualifiedName('Expected interface name after implements'));
+                interfaces.push(simpleTypeName(this.consumeQualifiedName('Expected interface name after implements')));
             } while (this.matchSymbol(','));
         }
 
@@ -582,9 +581,6 @@ class Parser {
 
     parseParameter() {
         this.skipModifiers();
-        if (this.isQualifiedTypeDeclarationAt(this.current)) {
-            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
-        }
         const typeToken = this.consumeTypeName(false);
 
         // Accept both `Type[] name` and `Type name[]` parameter forms.
@@ -668,9 +664,6 @@ class Parser {
         }
         if (this.checkKeyword('synchronized') && this.checkNextSymbol('(')) {
             return this.parseSynchronizedStatement();
-        }
-        if (this.isQualifiedTypeDeclarationAt(this.current)) {
-            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
         }
         if (this.isTypeKeywordAhead()) {
             return this.parseVariableDeclaration();
@@ -1606,7 +1599,7 @@ class Parser {
             return true;
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            let idx = this.indexAfterTypeArguments(this.current + 1);
+            let idx = this.indexAfterTypeArguments(this.indexAfterQualifiedName(this.current));
             while (idx < this.tokens.length && this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '[') {
                 if (this.tokens[idx + 1]?.type !== TokenType.SYMBOL || this.tokens[idx + 1]?.value !== ']') {
                     return false;
@@ -1628,11 +1621,33 @@ class Parser {
             return this.advance();
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            const typeToken = this.advance();
+            const typeToken = this.consumeQualifiedTypeName();
             this.skipTypeArguments();
             return typeToken;
         }
         throw new HamsterParserError('Expected type keyword', this.peek());
+    }
+
+    /**
+     * `a.b.Type` in a type position: returns the last segment's token, so types
+     * resolve by simple name (the class model has no packages).
+     */
+    consumeQualifiedTypeName() {
+        let typeToken = this.consumeIdentifier('Expected type name');
+        while (this.checkSymbol('.') && this.peekNext()?.type === TokenType.IDENTIFIER) {
+            this.advance();
+            typeToken = this.advance();
+        }
+        return typeToken;
+    }
+
+    /** Index after `Name(.Name)*` starting at the identifier at `index`. */
+    indexAfterQualifiedName(index) {
+        let idx = index + 1;
+        while (isSymbolToken(this.tokens[idx], '.') && this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
+            idx += 2;
+        }
+        return idx;
     }
 
     parseAssignableExpression() {
@@ -1746,23 +1761,6 @@ class Parser {
         }
     }
 
-    /** `a.b.Type name` at `index`: a declaration whose type is a qualified name (a known gap). */
-    isQualifiedTypeDeclarationAt(index) {
-        if (this.tokens[index]?.type !== TokenType.IDENTIFIER) return false;
-        let idx = index + 1;
-        let segments = 1;
-        while (isSymbolToken(this.tokens[idx], '.') && this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
-            idx += 2;
-            segments += 1;
-        }
-        if (segments < 2) return false;
-        idx = this.indexAfterTypeArguments(idx);
-        while (isSymbolToken(this.tokens[idx], '[') && isSymbolToken(this.tokens[idx + 1], ']')) {
-            idx += 2;
-        }
-        return this.tokens[idx]?.type === TokenType.IDENTIFIER;
-    }
-
     /** `[modifiers] enum Name {` at `index` (a known gap); `enum` is not a keyword in this lexer. */
     isEnumDeclarationAt(index) {
         let idx = index;
@@ -1780,13 +1778,6 @@ class Parser {
         if (this.isEnumDeclarationAt(index)) {
             throw unsupportedConstructError(UnsupportedConstruct.Enum, this.tokens[index]);
         }
-        let idx = index;
-        while (this.isModifierToken(this.tokens[idx])) {
-            idx += 1;
-        }
-        if (this.isQualifiedTypeDeclarationAt(idx)) {
-            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.tokens[idx]);
-        }
     }
 
     isFunctionAhead() {
@@ -1802,7 +1793,7 @@ class Parser {
         if (typeToken.type === TokenType.KEYWORD && (typeToken.value === 'void' || typeToken.value === 'int' || typeToken.value === 'boolean')) {
             idx++;
         } else if (typeToken.type === TokenType.IDENTIFIER) {
-            idx = this.indexAfterTypeArguments(idx + 1);
+            idx = this.indexAfterTypeArguments(this.indexAfterQualifiedName(idx));
         } else {
             return false;
         }
@@ -2106,6 +2097,10 @@ function canStartReferenceCastOperand(token) {
         default:
             return false;
     }
+}
+
+function simpleTypeName(typeName) {
+    return typeName.slice(typeName.lastIndexOf('.') + 1);
 }
 
 function declarationsOf(node) {
