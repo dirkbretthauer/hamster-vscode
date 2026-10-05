@@ -202,12 +202,10 @@ export function createRunnerState(ast, runtime, classModules = []) {
     };
 
     // Initialize global variables into the root scope before main runs.
+    // Only constant initializers are evaluated here; others keep the type's default.
     for (const g of ast.globals || []) {
-        let value = defaultValueForType(g.varType);
-        if (g.initializer && g.initializer.type === ASTNodeType.Literal) {
-            value = g.initializer.value;
-        }
-        state.scopes[0].set(g.name, value);
+        const constant = constantInitializerValue(g.initializer);
+        state.scopes[0].set(g.name, constant.isConstant ? constant.value : defaultValueForType(g.varType));
     }
 
     state.generator = programGenerator(state, main);
@@ -696,6 +694,14 @@ function* evalExpressionGen(node, state, callDepth) {
         case ASTNodeType.InstanceofExpression:
             return isInstanceOf(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
 
+        case ASTNodeType.ArrayInitializer: {
+            const elements = [];
+            for (const element of node.elements) {
+                elements.push(yield* evalExpressionGen(element, state, callDepth));
+            }
+            return elements;
+        }
+
         case ASTNodeType.CastExpression:
             return castValue(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
 
@@ -1082,6 +1088,9 @@ function* evalNewExpressionGen(node, state, callDepth) {
  * left unsized: then the innermost sized level holds null sub-array slots.
  */
 function* evalArrayCreationGen(node, state, callDepth) {
+    if (node.initializer) {
+        return yield* evalExpressionGen(node.initializer, state, callDepth);
+    }
     const lengths = [];
     for (const dimension of node.dimensions) {
         if (dimension == null) break;
@@ -1104,6 +1113,26 @@ function createNestedArray(lengths, leafValue) {
         return new Array(length).fill(leafValue);
     }
     return Array.from({ length }, () => createNestedArray(innerLengths, leafValue));
+}
+
+/**
+ * Literal globals and array initializers built only from literals, which can be
+ * evaluated before `main` runs without executing any program code.
+ */
+function constantInitializerValue(initializer) {
+    if (initializer?.type === ASTNodeType.Literal) {
+        return { isConstant: true, value: initializer.value };
+    }
+    if (initializer?.type !== ASTNodeType.ArrayInitializer) {
+        return { isConstant: false };
+    }
+    const values = [];
+    for (const element of initializer.elements) {
+        const constant = constantInitializerValue(element);
+        if (!constant.isConstant) return { isConstant: false };
+        values.push(constant.value);
+    }
+    return { isConstant: true, value: values };
 }
 
 function isInstanceOf(value, node, state) {

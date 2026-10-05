@@ -887,6 +887,33 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.throws(() => parser.parseExpression('x instanceof int'), /instanceof requires a reference type/);
     parses('void main() { if (hamster[i] instanceof BeuteHamster) { vor(); } }');
 
+    // ── Array initializers (US1, T011) ──
+    const isInitializer = node => node.type === parser.ASTNodeType.ArrayInitializer;
+    const initializerOf = (source, name) =>
+        findNode(parses(source), node => node.name === name && node.initializer).initializer;
+    assert.equal(initializerOf('void main() { int[] a = { 1, 2, 3 }; }', 'a').elements.length, 3);
+    assert.equal(initializerOf('void main() { int[] e = {}; }', 'e').elements.length, 0);
+    assert.equal(initializerOf('void main() { int[] t = { 1, 2, }; }', 't').elements.length, 2);
+    const nestedInitializer = initializerOf('void main() { int[][] m = { { 1, 2 }, { 3 } }; }', 'm');
+    assert.ok(nestedInitializer.elements.every(isInitializer));
+    assert.ok(isInitializer(initializerOf(
+        '/*class*/ class Semaphor { private boolean[] kritisch = { false, false }; }',
+        'kritisch'
+    )));
+    assert.ok(isInitializer(parses('boolean[] g = { true }; void main() {}').globals[0].initializer));
+    assert.ok(isInitializer(initializerOf('void main() { for (int[] r = { 1 }; false;) {} }', 'r')));
+    const newWithInitializer = findNode(parses('void main() { int[] n = new int[] { 1, 2 }; }'),
+        node => node.type === parser.ASTNodeType.NewExpression);
+    assert.deepEqual(newWithInitializer.dimensions, [null]);
+    assert.equal(newWithInitializer.initializer.elements.length, 2);
+    const newNestedInitializer = findNode(parses('void main() { int[][] n = new int[][] { { 1 }, { 2 } }; }'),
+        node => node.type === parser.ASTNodeType.NewExpression);
+    assert.deepEqual(newNestedInitializer.dimensions, [null, null]);
+    assert.ok(newNestedInitializer.initializer.elements.every(isInitializer));
+    assert.equal(findNode(parses('void main() { int[] s = new int[2]; }'),
+        node => node.type === parser.ASTNodeType.NewExpression).initializer, null);
+    parseFails('void main() { int[] a = new int[3] { 1 }; }', /Array initializer not allowed with explicit dimensions/);
+
     // ── Diagnostics stay precise around the new constructs (US1, T012) ──
     const errorsAt = lines => parser.collectProgramErrors(lines.join('\n'), { requireMain: false });
     assert.ok(errorsAt([
@@ -1035,6 +1062,49 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.deepEqual(instanceofState.scopes[0].get('results'), [
         true, true, true, false, false, false, true, true, true, true, true, false,
     ]);
+
+    // ── Runtime: array initializers (US2, T024) ──
+    const initializerState = runProgram(parser, runner, `
+        class Semaphor {
+            boolean[] kritisch = { false, false };
+            boolean[] get() { return kritisch; }
+        }
+        int[] flat = null;
+        int[][] nested = null;
+        int[] empty = null;
+        int[] ordered = null;
+        int[] fromNew = null;
+        int[][] fromNewNested = null;
+        boolean[] fieldValue = null;
+        boolean[] folded = { true, false };
+        int counter = 0;
+        int next() {
+            counter = counter + 1;
+            return counter;
+        }
+        void main() {
+            int[] localFlat = { 1, 2, 3 };
+            int[][] localNested = { { 1, 2 }, { 3 } };
+            int[] localEmpty = {};
+            int[] localOrdered = { next(), next() };
+            flat = localFlat;
+            nested = localNested;
+            empty = localEmpty;
+            ordered = localOrdered;
+            fromNew = new int[] { 4, 5 };
+            fromNewNested = new int[][] { { 1 }, { 2 } };
+            fieldValue = new Semaphor().get();
+        }
+    `);
+    const initializerGlobals = initializerState.scopes[0];
+    assert.deepEqual(initializerGlobals.get('flat'), [1, 2, 3]);
+    assert.deepEqual(initializerGlobals.get('nested'), [[1, 2], [3]]);
+    assert.deepEqual(initializerGlobals.get('empty'), []);
+    assert.deepEqual(initializerGlobals.get('ordered'), [1, 2]);
+    assert.deepEqual(initializerGlobals.get('fromNew'), [4, 5]);
+    assert.deepEqual(initializerGlobals.get('fromNewNested'), [[1], [2]]);
+    assert.deepEqual(initializerGlobals.get('fieldValue'), [false, false]);
+    assert.deepEqual(initializerGlobals.get('folded'), [true, false]);
 
     // ── Runtime: generics are erased (US3, T030) ──
     const genericRuntimeSource = `

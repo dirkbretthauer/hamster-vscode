@@ -31,6 +31,7 @@ export const ASTNodeType = Object.freeze({
     PostfixExpression: 'PostfixExpression',
     CastExpression: 'CastExpression',
     InstanceofExpression: 'InstanceofExpression',
+    ArrayInitializer: 'ArrayInitializer',
     Literal: 'Literal',
     Identifier: 'Identifier',
     CallExpression: 'CallExpression',
@@ -483,7 +484,7 @@ class Parser {
             }
             let initializer = null;
             if (this.matchOperator('=')) {
-                initializer = this.parseExpression();
+                initializer = this.parseVariableInitializer();
             }
             fields.push({
                 type: ASTNodeType.FieldDecl,
@@ -944,7 +945,7 @@ class Parser {
 
         let initializer = null;
         if (this.matchOperator('=')) {
-            initializer = this.parseExpression();
+            initializer = this.parseVariableInitializer();
         }
 
         return {
@@ -983,7 +984,7 @@ class Parser {
         }
         let initializer = null;
         if (this.matchOperator('=')) {
-            initializer = this.parseExpression();
+            initializer = this.parseVariableInitializer();
         }
         this.consumeSymbol(';', 'Expected ; after variable declaration');
         return {
@@ -1245,12 +1246,40 @@ class Parser {
             dimensions.push(this.checkSymbol(']') ? null : this.parseExpression());
             this.consumeSymbol(']', 'Expected ] after array dimension');
         }
+        let initializer = null;
+        if (this.checkSymbol('{')) {
+            if (dimensions.some(dimension => dimension !== null)) {
+                throw new HamsterParserError('Array initializer not allowed with explicit dimensions', this.peek());
+            }
+            initializer = this.parseArrayInitializer();
+        }
         return {
             type: ASTNodeType.NewExpression,
             callee,
             arguments: [],
             dimensions,
+            initializer,
             loc: locationFrom(newToken),
+        };
+    }
+
+    parseVariableInitializer() {
+        return this.checkSymbol('{') ? this.parseArrayInitializer() : this.parseExpression();
+    }
+
+    /** `{ a, { b, c }, }`: Java allows a trailing comma and an empty initializer. */
+    parseArrayInitializer() {
+        const lbrace = this.consumeSymbol('{', 'Expected { to start array initializer');
+        const elements = [];
+        while (!this.checkSymbol('}') && !this.isAtEnd()) {
+            elements.push(this.parseVariableInitializer());
+            if (!this.matchSymbol(',')) break;
+        }
+        this.consumeSymbol('}', 'Expected } to close array initializer');
+        return {
+            type: ASTNodeType.ArrayInitializer,
+            elements,
+            loc: locationFrom(lbrace),
         };
     }
 
@@ -1468,6 +1497,7 @@ class Parser {
                     callee,
                     arguments: args,
                     dimensions: [],
+                    initializer: null,
                     loc: locationFrom(newToken),
                 };
             }
@@ -1663,7 +1693,7 @@ class Parser {
             }
             let initializer = null;
             if (this.matchOperator('=')) {
-                initializer = this.parseExpression();
+                initializer = this.parseVariableInitializer();
             }
             this.consumeSymbol(';', 'Expected ; after variable declaration');
             return {
