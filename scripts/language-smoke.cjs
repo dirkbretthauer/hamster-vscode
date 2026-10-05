@@ -89,6 +89,36 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 (async () => {
     const { parser, runner } = await loadLanguageModules();
 
+    function parses(source, options = {}) {
+        return parser.parseProgram(source, { strict: true, ...options });
+    }
+
+    function parseFails(source, pattern) {
+        let caught = null;
+        try {
+            parser.parseProgram(source, { strict: true });
+        } catch (error) {
+            caught = error;
+        }
+        assert.ok(caught, 'expected a parse error for: ' + source);
+        assert.match(caught.message, pattern);
+        return caught;
+    }
+
+    /** Walks an AST and returns the first node satisfying `predicate`, for asserting on nested shapes. */
+    function findNode(node, predicate) {
+        if (!node || typeof node !== 'object') return null;
+        if (predicate(node)) return node;
+        for (const value of Object.values(node)) {
+            const children = Array.isArray(value) ? value : [value];
+            for (const child of children) {
+                const found = findNode(child, predicate);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
     assert.equal(
         parser.detectProgramType('void main() {}'),
         parser.ProgramType.Imperative
@@ -759,6 +789,83 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(castState.scopes[0].get('interfaceCast'), true);
     assert.equal(castState.scopes[0].get('nullCast'), true);
     assert.equal(castState.scopes[0].get('castCaught'), 1);
+
+    // ── Generics (US1, T007) ──
+    const genericLocalProgram = parses(`
+        void main() {
+            Speicher<Integer> k = new Speicher<Integer>();
+        }
+    `);
+    const genericLocal = findNode(genericLocalProgram, node => node.type === 'VariableDeclaration' && node.name === 'k');
+    assert.equal(genericLocal.varType, 'Speicher');
+    assert.equal(genericLocal.initializer.callee.name, 'Speicher');
+    const genericClassProgram = parses(`
+        /*class*/
+        class Pair<K, V> {
+            private Array<Pair<K, V>> entries;
+            Pair<K, V> get(Array<? super T> a, Box<?> b, Box<? extends Hamster> c) { return null; }
+            public static <T> void replace(Array<? super T> array, T obj) {}
+            Object convert(Object obj) { return (Speicher<Integer>) obj; }
+            Object make() { return new Box<>(); }
+        }
+        class Box<T extends Hamster> {}
+        class Summe implements Callable<Integer> {}
+    `);
+    const [pairClass, boxClass, summeClass] = genericClassProgram.classes;
+    assert.deepEqual(pairClass.typeParameters, ['K', 'V']);
+    assert.equal(pairClass.fields[0].varType, 'Array');
+    const pairGet = pairClass.methods.find(method => method.name === 'get');
+    assert.equal(pairGet.returnType, 'Pair');
+    assert.deepEqual(pairGet.parameters.map(parameter => parameter.paramType), ['Array', 'Box', 'Box']);
+    assert.deepEqual(pairGet.typeParameters, []);
+    assert.deepEqual(pairClass.methods.find(method => method.name === 'replace').typeParameters, ['T']);
+    assert.equal(findNode(pairClass, node => node.type === 'CastExpression').targetType, 'Speicher');
+    assert.equal(findNode(pairClass, node => node.type === 'NewExpression').callee.name, 'Box');
+    assert.deepEqual(boxClass.typeParameters, ['T']);
+    assert.deepEqual(summeClass.interfaces, ['Callable']);
+    assert.deepEqual(summeClass.typeParameters, []);
+    const genericInterface = parses('/*class*/public interface Callable<V> {}').classes[0];
+    assert.equal(genericInterface.type, parser.ASTNodeType.InterfaceDecl);
+    assert.deepEqual(genericInterface.typeParameters, ['V']);
+    assert.equal(parses('Speicher<Integer> s = null; void main() {}').globals[0].varType, 'Speicher');
+    parseFails('void main() { Speicher<> k = null; }', /Unexpected token in expression/);
+    assert.equal(parser.parseExpression('a < b').type, parser.ASTNodeType.BinaryExpression);
+    assert.equal(parser.parseExpression('i < n && j > m').operator, '&&');
+    assert.equal(parser.parseExpression('x < y == z').operator, '==');
+
+    // ── Runtime: generics are erased (US3, T030) ──
+    const genericRuntimeSource = `
+        class Box<T> {
+            T value;
+            T empty;
+            Box(T v) { value = v; }
+            T get() { return value; }
+            T getEmpty() { return empty; }
+        }
+        class Util {
+            static <T> T first(Box<T> box) { return box.get(); }
+        }
+        int fromInt = 0;
+        int fromStatic = 0;
+        boolean emptyIsNull = false;
+        void main() {
+            Box<Integer> ints = new Box<Integer>(5);
+            fromInt = ints.get();
+            fromStatic = Util.first(ints);
+            Box<Box<Integer>> boxes = new Box<Box<Integer>>(ints);
+            emptyIsNull = boxes.getEmpty() == null;
+        }
+    `;
+    let erasedRuntimeSource = genericRuntimeSource;
+    while (/<[^<>]*>/.test(erasedRuntimeSource)) {
+        erasedRuntimeSource = erasedRuntimeSource.replace(/<[^<>]*>/g, '');
+    }
+    const genericResults = ['fromInt', 'fromStatic', 'emptyIsNull']
+        .map(name => runProgram(parser, runner, genericRuntimeSource).scopes[0].get(name));
+    const erasedResults = ['fromInt', 'fromStatic', 'emptyIsNull']
+        .map(name => runProgram(parser, runner, erasedRuntimeSource).scopes[0].get(name));
+    assert.deepEqual(genericResults, [5, 5, true]);
+    assert.deepEqual(genericResults, erasedResults);
 
     console.log('Language smoke checks passed');
 })().catch(error => {

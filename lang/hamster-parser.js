@@ -328,6 +328,7 @@ class Parser {
         const modifiers = leadingModifiers || this.parseModifiers();
         const kindToken = this.advance();
         const nameToken = this.consumeIdentifier(`Expected ${kindToken.value} name`);
+        const typeParameters = this.parseTypeParameters();
         const isInterface = kindToken.value === 'interface';
         let superClass = null;
         const interfaces = [];
@@ -379,6 +380,7 @@ class Parser {
                 constructors.push(this.parseConstructor(nameToken.value, memberModifiers));
                 continue;
             }
+            const methodTypeParameters = this.parseTypeParameters();
             const typeToken = this.consumeTypeName(true);
             while (this.matchSymbol('[')) {
                 this.consumeSymbol(']', 'Expected ] after [ in member type');
@@ -390,9 +392,13 @@ class Parser {
                     typeToken.value,
                     memberModifiers,
                     nameToken.value,
-                    isInterface
+                    isInterface,
+                    methodTypeParameters
                 ));
                 continue;
+            }
+            if (methodTypeParameters.length > 0) {
+                throw new HamsterParserError('Type parameters are only allowed on methods', memberName);
             }
             if (typeToken.value === 'void') {
                 throw new HamsterParserError('Fields cannot have type void', typeToken);
@@ -408,6 +414,7 @@ class Parser {
         return {
             type: isInterface ? ASTNodeType.InterfaceDecl : ASTNodeType.ClassDecl,
             name: nameToken.value,
+            typeParameters,
             superClass,
             interfaces,
             modifiers,
@@ -435,7 +442,7 @@ class Parser {
         };
     }
 
-    parseMethodRest(nameToken, returnType, modifiers, owner, allowAbstract) {
+    parseMethodRest(nameToken, returnType, modifiers, owner, allowAbstract, typeParameters = []) {
         const parameters = this.parseParameterList();
         this.parseThrowsClause();
         let body = null;
@@ -450,6 +457,7 @@ class Parser {
             type: ASTNodeType.FunctionDecl,
             name: nameToken.value,
             returnType,
+            typeParameters,
             parameters,
             body,
             modifiers,
@@ -509,6 +517,7 @@ class Parser {
 
     parseFunction(requireMain) {
         this.skipModifiers();
+        const typeParameters = this.parseTypeParameters();
         const returnToken = this.consumeTypeName(true);
         const nameToken = this.consumeIdentifier('Expected function name');
         if (requireMain) {
@@ -529,6 +538,7 @@ class Parser {
             type: ASTNodeType.FunctionDecl,
             name: nameToken.value,
             returnType: returnToken.value,
+            typeParameters,
             parameters,
             body,
             loc: locationFrom(nameToken),
@@ -1202,6 +1212,7 @@ class Parser {
                    this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
                 idx += 2;
             }
+            idx = this.indexAfterTypeArguments(idx);
         } else {
             return false;
         }
@@ -1218,6 +1229,7 @@ class Parser {
         while (this.matchSymbol('.')) {
             targetType += '.' + this.consumeIdentifier('Expected type name after .').value;
         }
+        this.skipTypeArguments();
         let arrayDimensions = 0;
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in cast type');
@@ -1235,6 +1247,66 @@ class Parser {
 
     isPrimitiveTypeKeywordAhead() {
         return isPrimitiveTypeToken(this.peek());
+    }
+
+    /**
+     * Returns the index just past a balanced `<…>` type-argument list starting
+     * at `index`, or -1 if the tokens there are not one. Only type tokens may
+     * appear inside, so a comparison such as `a < b)` is never mistaken for
+     * type arguments. The lexer has no shift operators, so `>>` closing two
+     * levels arrives as two `>` tokens. The empty diamond `<>` is only valid
+     * after `new`.
+     */
+    scanTypeArgumentsEnd(index, allowsDiamond = false) {
+        if (!isOperatorToken(this.tokens[index], '<')) return -1;
+        if (isOperatorToken(this.tokens[index + 1], '>')) {
+            return allowsDiamond ? index + 2 : -1;
+        }
+        let depth = 0;
+        for (let idx = index; idx < this.tokens.length; idx++) {
+            const token = this.tokens[idx];
+            if (isOperatorToken(token, '<')) {
+                if (isOperatorToken(this.tokens[idx + 1], '>')) return -1;
+                depth += 1;
+            } else if (isOperatorToken(token, '>')) {
+                depth -= 1;
+                if (depth === 0) return idx + 1;
+            } else if (!isTypeArgumentToken(token)) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    /** Index after optional type arguments at `index`; `index` itself when there are none. */
+    indexAfterTypeArguments(index) {
+        const end = this.scanTypeArgumentsEnd(index);
+        return end >= 0 ? end : index;
+    }
+
+    /** Consumes type arguments if present; they are erased (research D2). */
+    skipTypeArguments(allowsDiamond = false) {
+        const end = this.scanTypeArgumentsEnd(this.current, allowsDiamond);
+        if (end < 0) return false;
+        this.current = end;
+        return true;
+    }
+
+    /** Parses `<T, U extends Bound>` if present and returns the declared names (empty when not generic). */
+    parseTypeParameters() {
+        if (!this.matchOperator('<')) return [];
+        const names = [];
+        do {
+            names.push(this.consumeIdentifier('Expected type parameter name').value);
+            if (this.matchKeyword('extends')) {
+                this.consumeTypeName(false);
+                while (this.matchSymbol('[')) {
+                    this.consumeSymbol(']', 'Expected ] after [ in type parameter bound');
+                }
+            }
+        } while (this.matchSymbol(','));
+        this.consumeOperator('>', 'Expected > to close type parameters');
+        return names;
     }
 
     ensureAssignableUpdateTarget(argument, operator) {
@@ -1320,6 +1392,7 @@ class Parser {
                     loc: callee.loc,
                 };
             }
+            this.skipTypeArguments(true);
 
             if (this.matchSymbol('(')) {
                 const args = [];
@@ -1395,7 +1468,7 @@ class Parser {
             return true;
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            let idx = this.current + 1;
+            let idx = this.indexAfterTypeArguments(this.current + 1);
             while (idx < this.tokens.length && this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '[') {
                 if (this.tokens[idx + 1]?.type !== TokenType.SYMBOL || this.tokens[idx + 1]?.value !== ']') {
                     return false;
@@ -1417,7 +1490,9 @@ class Parser {
             return this.advance();
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            return this.advance();
+            const typeToken = this.advance();
+            this.skipTypeArguments();
+            return typeToken;
         }
         throw new HamsterParserError('Expected type keyword', this.peek());
     }
@@ -1498,6 +1573,7 @@ class Parser {
         while (this.matchSymbol('.')) {
             name += '.' + this.consumeIdentifier(message).value;
         }
+        this.skipTypeArguments();
         return name;
     }
 
@@ -1550,13 +1626,15 @@ class Parser {
         while (this.isModifierToken(this.tokens[idx])) {
             idx++;
         }
+        // skip method type parameters (`<T> void f()`)
+        idx = this.indexAfterTypeArguments(idx);
         // skip return type
         const typeToken = this.tokens[idx];
         if (!typeToken) return false;
         if (typeToken.type === TokenType.KEYWORD && (typeToken.value === 'void' || typeToken.value === 'int' || typeToken.value === 'boolean')) {
             idx++;
         } else if (typeToken.type === TokenType.IDENTIFIER) {
-            idx++;
+            idx = this.indexAfterTypeArguments(idx + 1);
         } else {
             return false;
         }
@@ -1578,6 +1656,7 @@ class Parser {
             if (allowModifiers) {
                 this.skipModifiers();
             }
+            const typeParameters = this.parseTypeParameters();
             const returnType = this.consumeTypeName(true);
             const nameToken = this.consumeIdentifier('Expected function name');
             if (!this.checkSymbol('(')) {
@@ -1597,6 +1676,7 @@ class Parser {
                 type: ASTNodeType.FunctionDecl,
                 name: nameToken.value,
                 returnType: returnType.value,
+                typeParameters,
                 parameters,
                 body,
                 loc: locationFrom(nameToken),
@@ -1810,6 +1890,28 @@ function isPrimitiveTypeToken(token) {
 
 function isSymbolToken(token, symbol) {
     return token?.type === TokenType.SYMBOL && token.value === symbol;
+}
+
+function isOperatorToken(token, operator) {
+    return token?.type === TokenType.OPERATOR && token.value === operator;
+}
+
+const TYPE_ARGUMENT_SYMBOLS = new Set(['.', ',', '?', '[', ']']);
+
+const TYPE_ARGUMENT_KEYWORDS = new Set(['extends', 'super', 'int', 'boolean']);
+
+/** Tokens that may appear between the angle brackets of a type-argument list (besides nested `<`/`>`). */
+function isTypeArgumentToken(token) {
+    switch (token?.type) {
+        case TokenType.IDENTIFIER:
+            return true;
+        case TokenType.SYMBOL:
+            return TYPE_ARGUMENT_SYMBOLS.has(token.value);
+        case TokenType.KEYWORD:
+            return TYPE_ARGUMENT_KEYWORDS.has(token.value);
+        default:
+            return false;
+    }
 }
 
 function canStartReferenceCastOperand(token) {
