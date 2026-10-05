@@ -1026,7 +1026,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     const knownGapCases = [
         ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
         ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
-        ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
         ['void main() { for (Hamster h : alle) {} }', 'enhanced-for', /for-each loops are not supported/],
         ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
     ];
@@ -1281,6 +1280,34 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     `);
     assert.equal(qualifiedState.scopes[0].get('result'), 4);
     assert.equal(qualifiedState.scopes[0].get('nested'), 42);
+
+    // ── Class literals and getClass() (002, T011) ──
+    const isClassLiteral = node => node.type === parser.ASTNodeType.ClassLiteral;
+    assert.equal(findNode(parses('void main() { Object o = Hamster.class; }'), isClassLiteral).typeName, 'Hamster');
+    assert.equal(parser.parseExpression('pkg.Foo.class').typeName, 'Foo');
+    const classLiteralState = runProgram(parser, runner, `
+        class Foo {}
+        class Bar {}
+        boolean same = false;
+        boolean fooMatches = false;
+        boolean barMatches = true;
+        boolean missingSame = false;
+        int locked = 0;
+        void main() {
+            same = Foo.class == Foo.class;
+            fooMatches = new Foo().getClass() == Foo.class;
+            barMatches = new Bar().getClass() == Foo.class;
+            missingSame = Missing.class == Missing.class;
+            synchronized (Foo.class) { locked = locked + 1; }
+        }
+    `);
+    const classLiteralGlobals = classLiteralState.scopes[0];
+    assert.equal(classLiteralGlobals.get('same'), true);
+    assert.equal(classLiteralGlobals.get('fooMatches'), true);
+    assert.equal(classLiteralGlobals.get('barMatches'), false);
+    assert.equal(classLiteralGlobals.get('missingSame'), true);
+    assert.equal(classLiteralGlobals.get('locked'), 1);
+    parseFails('void main() { Object o = (a + b).class; }', /Expected type name before \.class/);
 
     console.log('Language smoke checks passed');
 })().catch(error => {

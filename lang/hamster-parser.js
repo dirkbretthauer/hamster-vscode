@@ -35,6 +35,7 @@ export const ASTNodeType = Object.freeze({
     CastExpression: 'CastExpression',
     InstanceofExpression: 'InstanceofExpression',
     ArrayInitializer: 'ArrayInitializer',
+    ClassLiteral: 'ClassLiteral',
     Literal: 'Literal',
     Identifier: 'Identifier',
     CallExpression: 'CallExpression',
@@ -61,7 +62,6 @@ export class HamsterParserError extends Error {
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
     [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
-    [UnsupportedConstruct.ClassLiteral]: 'Class literals (Foo.class) are not supported',
     [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
     [UnsupportedConstruct.Varargs]: 'Variable-length parameter lists (varargs) are not supported',
 });
@@ -1227,8 +1227,9 @@ class Parser {
                 continue;
             }
             if (this.matchSymbol('.')) {
-                if (this.checkKeyword('class')) {
-                    throw unsupportedConstructError(UnsupportedConstruct.ClassLiteral, this.peek());
+                if (this.matchKeyword('class')) {
+                    expr = this.makeClassLiteral(expr, this.previous());
+                    continue;
                 }
                 const property = this.consumeIdentifier('Expected member name after .');
                 expr = {
@@ -1437,6 +1438,19 @@ class Parser {
         } while (this.matchSymbol(','));
         this.consumeOperator('>', 'Expected > to close type parameters');
         return names;
+    }
+
+    /** `Name.class` / `pkg.Name.class`, resolved by simple name like other type references. */
+    makeClassLiteral(typeExpression, classToken) {
+        const qualifiedName = qualifiedNameOf(typeExpression);
+        if (!qualifiedName) {
+            throw new HamsterParserError('Expected type name before .class', classToken);
+        }
+        return {
+            type: ASTNodeType.ClassLiteral,
+            typeName: simpleTypeName(qualifiedName),
+            loc: typeExpression.loc,
+        };
     }
 
     ensureAssignableUpdateTarget(argument, operator) {
@@ -2097,6 +2111,16 @@ function canStartReferenceCastOperand(token) {
         default:
             return false;
     }
+}
+
+/** `a.b.C` for an Identifier/MemberExpression chain, otherwise null. */
+function qualifiedNameOf(node) {
+    if (node?.type === ASTNodeType.Identifier) return node.name;
+    if (node?.type === ASTNodeType.MemberExpression) {
+        const objectName = qualifiedNameOf(node.object);
+        return objectName ? objectName + '.' + node.property : null;
+    }
+    return null;
 }
 
 function simpleTypeName(typeName) {

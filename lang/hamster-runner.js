@@ -198,6 +198,8 @@ export function createRunnerState(ast, runtime, classModules = []) {
         //   { name, loc, scopeIndex, callerLoc }
         // The root frame (main) is pushed by programGenerator.
         frames: [],
+        // One canonical value per class name, so `Foo.class == Foo.class` holds.
+        classLiterals: new Map(),
         generator: null,
     };
 
@@ -709,6 +711,9 @@ function* evalExpressionGen(node, state, callDepth) {
             return elements;
         }
 
+        case ASTNodeType.ClassLiteral:
+            return classLiteralFor(state, node.typeName);
+
         case ASTNodeType.CastExpression:
             return castValue(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
 
@@ -788,6 +793,10 @@ function* evalCallExpressionGen(node, state, callDepth) {
                     fn.owner
                 );
             }
+        }
+
+        if (methodName === 'getClass' && args.length === 0 && runtimeTypeName(receiver)) {
+            return classLiteralFor(state, runtimeTypeName(receiver));
         }
 
         if (receiver?.__kind === 'exception' ||
@@ -1141,6 +1150,15 @@ function constantInitializerValue(initializer) {
         values.push(constant.value);
     }
     return { isConstant: true, value: values };
+}
+
+function classLiteralFor(state, name) {
+    let literal = state.classLiterals.get(name);
+    if (!literal) {
+        literal = Object.freeze({ __kind: 'classLiteral', name, toString: () => 'class ' + name });
+        state.classLiterals.set(name, literal);
+    }
+    return literal;
 }
 
 function isInstanceOf(value, node, state) {
