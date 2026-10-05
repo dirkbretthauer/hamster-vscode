@@ -990,10 +990,7 @@ function readIndexValue(target, index) {
 
 function* evalNewExpressionGen(node, state, callDepth) {
     if (node.dimensions && node.dimensions.length > 0) {
-        const firstDim = node.dimensions[0];
-        const length = firstDim == null ? 0 : Number(yield* evalExpressionGen(firstDim, state, callDepth));
-        const safeLength = Number.isFinite(length) && length > 0 ? Math.trunc(length) : 0;
-        return new Array(safeLength).fill(null);
+        return yield* evalArrayCreationGen(node, state, callDepth);
     }
 
     const args = [];
@@ -1023,6 +1020,36 @@ function* evalNewExpressionGen(node, state, callDepth) {
         __args: args,
         fields: Object.create(null),
     };
+}
+
+/**
+ * `new T[a][b][]` allocates nested arrays for every sized dimension. Leaves
+ * get T's Java default (0/false/null), except when trailing dimensions are
+ * left unsized: then the innermost sized level holds null sub-array slots.
+ */
+function* evalArrayCreationGen(node, state, callDepth) {
+    const lengths = [];
+    for (const dimension of node.dimensions) {
+        if (dimension == null) break;
+        lengths.push(toArrayLength(yield* evalExpressionGen(dimension, state, callDepth)));
+    }
+    if (lengths.length === 0) return [];
+    const hasUnsizedDimensions = lengths.length < node.dimensions.length;
+    const leafValue = hasUnsizedDimensions ? null : defaultValueForType(resolveCalleeName(node.callee));
+    return createNestedArray(lengths, leafValue);
+}
+
+function toArrayLength(value) {
+    const length = Number(value);
+    return Number.isFinite(length) && length > 0 ? Math.trunc(length) : 0;
+}
+
+function createNestedArray(lengths, leafValue) {
+    const [length, ...innerLengths] = lengths;
+    if (innerLengths.length === 0) {
+        return new Array(length).fill(leafValue);
+    }
+    return Array.from({ length }, () => createNestedArray(innerLengths, leafValue));
 }
 
 function* instantiateClassGen(className, args, state, callDepth, loc) {

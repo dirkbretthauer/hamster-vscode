@@ -681,6 +681,33 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         /finally clauses are not supported/
     );
 
+    const arrayState = runProgram(parser, runner, `
+        int[] counts = null;
+        boolean[][] visited = null;
+        int[][] jagged = null;
+        String[] names = null;
+        int total = 0;
+        void main() {
+            counts = new int[3];
+            visited = new boolean[2][3];
+            jagged = new int[2][];
+            names = new String[2];
+            counts[1] = counts[1] + 5;
+            visited[1][2] = true;
+            jagged[0] = new int[1];
+            total = counts[0] + counts[1] + jagged[0][0];
+        }
+    `);
+    assert.deepEqual(arrayState.scopes[0].get('counts'), [0, 5, 0]);
+    assert.deepEqual(arrayState.scopes[0].get('visited'), [[false, false, false], [false, false, true]]);
+    assert.deepEqual(arrayState.scopes[0].get('jagged'), [[0], null]);
+    assert.deepEqual(arrayState.scopes[0].get('names'), [null, null]);
+    assert.equal(arrayState.scopes[0].get('total'), 5);
+    assert.throws(
+        () => parser.parseProgram('void main() { int x = new int; }'),
+        /Expected array dimension after new int/
+    );
+
     console.log('Language smoke checks passed');
 })().catch(error => {
     console.error(error);

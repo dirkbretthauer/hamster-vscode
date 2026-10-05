@@ -50,7 +50,7 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 `switch/case/default/break` and `try/catch/throw` parse to dedicated AST nodes.
 - 🔴 No `instanceof` or casts.
 - 🟢 Prefix and postfix `++`/`--` are parsed.
-- 🟡 Array creation (`new Type[n]`) parses multi-dimensional syntax but the parser/runner combination only really supports one dimension.
+- 🟢 Array creation (`new int[n]`, `new boolean[r][c]`, `new Type[n][]`) supports primitive element types and multiple dimensions, with Java default element values.
 - 🟡 Unsupported top-level syntax can be silently skipped in non-strict compatibility mode rather than reported as an error.
 
 ### 3. Language: Runner/Interpreter (`lang/hamster-runner.js`)

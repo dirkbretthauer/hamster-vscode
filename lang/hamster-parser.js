@@ -1149,6 +1149,40 @@ class Parser {
         return expr;
     }
 
+    parseArrayCreationRest(newToken, elementTypeToken) {
+        if (!this.checkSymbol('[')) {
+            throw new HamsterParserError(
+                `Expected array dimension after new ${elementTypeToken.value}`,
+                this.peek()
+            );
+        }
+        const callee = {
+            type: ASTNodeType.Identifier,
+            name: elementTypeToken.value,
+            loc: locationFrom(elementTypeToken),
+        };
+        return this.parseArrayDimensionsRest(newToken, callee);
+    }
+
+    parseArrayDimensionsRest(newToken, callee) {
+        const dimensions = [];
+        while (this.matchSymbol('[')) {
+            dimensions.push(this.checkSymbol(']') ? null : this.parseExpression());
+            this.consumeSymbol(']', 'Expected ] after array dimension');
+        }
+        return {
+            type: ASTNodeType.NewExpression,
+            callee,
+            arguments: [],
+            dimensions,
+            loc: locationFrom(newToken),
+        };
+    }
+
+    isPrimitiveTypeKeywordAhead() {
+        return isPrimitiveTypeToken(this.peek());
+    }
+
     ensureAssignableUpdateTarget(argument, operator) {
         if (argument.type === ASTNodeType.Identifier ||
             argument.type === ASTNodeType.MemberExpression ||
@@ -1214,6 +1248,9 @@ class Parser {
         }
         if (this.matchKeyword('new')) {
             const newToken = this.previous();
+            if (this.isPrimitiveTypeKeywordAhead()) {
+                return this.parseArrayCreationRest(newToken, this.advance());
+            }
             const ctorName = this.consumeIdentifier('Expected constructor/type name after new');
             let callee = {
                 type: ASTNodeType.Identifier,
@@ -1247,23 +1284,8 @@ class Parser {
                 };
             }
 
-            const dimensions = [];
-            while (this.matchSymbol('[')) {
-                if (!this.checkSymbol(']')) {
-                    dimensions.push(this.parseExpression());
-                } else {
-                    dimensions.push(null);
-                }
-                this.consumeSymbol(']', 'Expected ] after array dimension');
-            }
-            if (dimensions.length > 0) {
-                return {
-                    type: ASTNodeType.NewExpression,
-                    callee,
-                    arguments: [],
-                    dimensions,
-                    loc: locationFrom(newToken),
-                };
+            if (this.checkSymbol('[')) {
+                return this.parseArrayDimensionsRest(newToken, callee);
             }
 
             throw new HamsterParserError('Expected constructor call or array dimension after new', this.peek());
@@ -1730,6 +1752,12 @@ function makeBinary(operatorToken, left, right) {
         right,
         loc: locationFrom(operatorToken),
     };
+}
+
+const PRIMITIVE_TYPE_KEYWORDS = new Set(['int', 'boolean']);
+
+function isPrimitiveTypeToken(token) {
+    return token?.type === TokenType.KEYWORD && PRIMITIVE_TYPE_KEYWORDS.has(token.value);
 }
 
 function collectClassMethods(declaration) {
