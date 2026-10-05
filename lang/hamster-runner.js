@@ -560,6 +560,13 @@ function* executeStatementGen(node, state, callDepth) {
             return undefined;
         }
 
+        case ASTNodeType.VariableDeclarationGroup:
+            // No new scope: `int a = 1, b = a;` declares both in the enclosing block.
+            for (const declaration of node.declarations) {
+                yield* executeStatementGen(declaration, state, callDepth);
+            }
+            return undefined;
+
         case ASTNodeType.Assignment: {
             const reference = yield* resolveAssignmentTargetGen(
                 state, node.target ?? null, node.name, callDepth

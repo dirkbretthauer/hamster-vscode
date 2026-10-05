@@ -12,6 +12,7 @@ export const ASTNodeType = Object.freeze({
     Parameter: 'Parameter',
     Block: 'BlockStatement',
     VariableDecl: 'VariableDeclaration',
+    VariableDeclarationGroup: 'VariableDeclarationGroup',
     Assignment: 'AssignmentStatement',
     ExpressionStmt: 'ExpressionStatement',
     IfStatement: 'IfStatement',
@@ -60,7 +61,6 @@ export class HamsterParserError extends Error {
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
     [UnsupportedConstruct.QualifiedTypeName]: 'Qualified type names are not supported',
-    [UnsupportedConstruct.MultipleDeclarators]: 'Declaring several variables in one statement is not supported',
     [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
     [UnsupportedConstruct.ClassLiteral]: 'Class literals (Foo.class) are not supported',
     [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
@@ -199,6 +199,10 @@ export function collectExecutableLines(ast) {
             }
             return;
         }
+        if (node.type === ASTNodeType.VariableDeclarationGroup) {
+            node.declarations.forEach(collectStatement);
+            return;
+        }
         if (EXECUTABLE_STATEMENT_TYPES.has(node.type) && node.loc?.line) {
             lines.add(node.loc.line);
         }
@@ -283,7 +287,7 @@ class Parser {
         const globals = [];
         // Parse global variable declarations before main()
         while (!this.isAtEnd() && this.isTypeKeywordAhead() && !this.isFunctionAhead()) {
-            globals.push(this.parseVariableDeclaration());
+            globals.push(...declarationsOf(this.parseVariableDeclaration()));
         }
         if (this.isAtEnd()) {
             if (this.options.requireMain) {
@@ -322,7 +326,7 @@ class Parser {
                 }
                 const varDecl = this.tryParseGlobalVariable();
                 if (varDecl) {
-                    globals.push(varDecl);
+                    globals.push(...declarationsOf(varDecl));
                     continue;
                 }
                 if (this.options.strict) {
@@ -976,19 +980,37 @@ class Parser {
         if (this.checkSymbol(':')) {
             throw unsupportedConstructError(UnsupportedConstruct.EnhancedFor, this.peek());
         }
+        return this.parseVariableDeclarators(typeToken, nameToken);
+    }
 
-        let initializer = null;
-        if (this.matchOperator('=')) {
-            initializer = this.parseVariableInitializer();
+    /**
+     * Declarators after the type, starting at the first name: `a = 1, b[] = { 2 }`.
+     * One declarator yields a VariableDeclaration; several yield a
+     * VariableDeclarationGroup, whose declarations run in order in the current scope.
+     */
+    parseVariableDeclarators(typeToken, firstNameToken) {
+        const declarations = [];
+        let nameToken = firstNameToken;
+        while (true) {
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
+            }
+            const initializer = this.matchOperator('=') ? this.parseVariableInitializer() : null;
+            declarations.push({
+                type: ASTNodeType.VariableDecl,
+                varType: typeToken.value,
+                name: nameToken.value,
+                initializer,
+                loc: locationFrom(nameToken),
+            });
+            if (!this.matchSymbol(',')) break;
+            nameToken = this.consumeIdentifier('Expected variable name after comma');
         }
-        this.rejectMultipleDeclarators();
-
+        if (declarations.length === 1) return declarations[0];
         return {
-            type: ASTNodeType.VariableDecl,
-            varType: typeToken.value,
-            name: nameToken.value,
-            initializer,
-            loc: locationFrom(nameToken),
+            type: ASTNodeType.VariableDeclarationGroup,
+            declarations,
+            loc: declarations[0].loc,
         };
     }
 
@@ -1013,23 +1035,9 @@ class Parser {
             this.consumeSymbol(']', 'Expected ] after [ in variable type');
         }
         const nameToken = this.consumeIdentifier('Expected variable name');
-        while (this.matchSymbol('[')) {
-            // Skip array declarator after variable name (e.g., int a[])
-            this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
-        }
-        let initializer = null;
-        if (this.matchOperator('=')) {
-            initializer = this.parseVariableInitializer();
-        }
-        this.rejectMultipleDeclarators();
+        const declaration = this.parseVariableDeclarators(typeToken, nameToken);
         this.consumeSymbol(';', 'Expected ; after variable declaration');
-        return {
-            type: ASTNodeType.VariableDecl,
-            varType: typeToken.value,
-            name: nameToken.value,
-            initializer,
-            loc: locationFrom(nameToken),
-        };
+        return declaration;
     }
 
     parseAssignmentStatement() {
@@ -1722,27 +1730,14 @@ class Parser {
                 this.consumeSymbol(']', 'Expected ] after [ in variable type');
             }
             const nameToken = this.consumeIdentifier('Expected variable name');
-            while (this.matchSymbol('[')) {
-                this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
-            }
-            // Must be followed by '=' or ';' — not '(' (that would be a function)
+            // Must be followed by '=', ',', '[' or ';' — not '(' (that would be a function)
             if (this.checkSymbol('(')) {
                 this.current = checkpoint;
                 return null;
             }
-            let initializer = null;
-            if (this.matchOperator('=')) {
-                initializer = this.parseVariableInitializer();
-            }
-            this.rejectMultipleDeclarators();
+            const declaration = this.parseVariableDeclarators(typeToken, nameToken);
             this.consumeSymbol(';', 'Expected ; after variable declaration');
-            return {
-                type: ASTNodeType.VariableDecl,
-                varType: typeToken.value,
-                name: nameToken.value,
-                initializer,
-                loc: locationFrom(nameToken),
-            };
+            return declaration;
         } catch (error) {
             // Known gaps are definitive answers, not reasons to try another parse.
             if (error?.unsupportedConstruct) throw error;
@@ -1791,12 +1786,6 @@ class Parser {
         }
         if (this.isQualifiedTypeDeclarationAt(idx)) {
             throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.tokens[idx]);
-        }
-    }
-
-    rejectMultipleDeclarators() {
-        if (this.checkSymbol(',')) {
-            throw unsupportedConstructError(UnsupportedConstruct.MultipleDeclarators, this.peek());
         }
     }
 
@@ -2117,6 +2106,10 @@ function canStartReferenceCastOperand(token) {
         default:
             return false;
     }
+}
+
+function declarationsOf(node) {
+    return node.type === ASTNodeType.VariableDeclarationGroup ? node.declarations : [node];
 }
 
 function collectClassMethods(declaration) {

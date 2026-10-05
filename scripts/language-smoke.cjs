@@ -1026,8 +1026,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     const knownGapCases = [
         ['void main() { reversi.ReversiHamster paul = null; }', 'qualified-type-name', /Qualified type names are not supported/],
         ['/*class*/ class C { java.util.Calendar c; }', 'qualified-type-name', /Qualified type names are not supported/],
-        ['void main() { Hamster a = null, b = null; }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
-        ['void main() { for (int i = 0, j = 0; i < 1; i++) {} }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
         ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
         ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
         ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
@@ -1216,6 +1214,32 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         int x = 0;
         void main() { x = 5L + 1; }
     `).scopes[0].get('x'), 6);
+
+    // ── Several declarators in one declaration (002, T005) ──
+    const declarationGroup = findNode(parses('void main() { MeinHamster paul = null, willi = null; }'),
+        node => node.type === parser.ASTNodeType.VariableDeclarationGroup);
+    assert.deepEqual(declarationGroup.declarations.map(declaration => declaration.name), ['paul', 'willi']);
+    assert.ok(declarationGroup.declarations.every(declaration => declaration.varType === 'MeinHamster'));
+    assert.deepEqual(parses('int a = 1, b = 2; void main() {}').globals.map(global => global.name), ['a', 'b']);
+    const declaratorState = runProgram(parser, runner, `
+        int second = 0;
+        int loops = 0;
+        void main() {
+            int a = 1, b = a + 1;
+            second = b;
+            for (int i = 0, j = 3; i < j; i++) {
+                loops = loops + 1;
+            }
+        }
+    `);
+    assert.equal(declaratorState.scopes[0].get('second'), 2);
+    assert.equal(declaratorState.scopes[0].get('loops'), 3);
+    assert.deepEqual(parser.collectExecutableLines(parses([
+        'void main() {',
+        '    int a = 1,',
+        '        b = 2;',
+        '}',
+    ].join('\n'))), [2, 3]);
 
     console.log('Language smoke checks passed');
 })().catch(error => {
