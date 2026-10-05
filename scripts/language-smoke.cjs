@@ -1026,7 +1026,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     const knownGapCases = [
         ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
         ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
-        ['void main() { for (Hamster h : alle) {} }', 'enhanced-for', /for-each loops are not supported/],
         ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
     ];
     for (const [source, code, pattern] of knownGapCases) {
@@ -1308,6 +1307,58 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(classLiteralGlobals.get('missingSame'), true);
     assert.equal(classLiteralGlobals.get('locked'), 1);
     parseFails('void main() { Object o = (a + b).class; }', /Expected type name before \.class/);
+
+    // ── for-each loops over arrays (002, T014) ──
+    const forEachNode = findNode(parses('/*class*/ class C { Belegung[] belegungen; void f() { for (Belegung b : this.belegungen) {} } }'),
+        node => node.type === parser.ASTNodeType.ForEachStatement);
+    assert.equal(forEachNode.varType, 'Belegung');
+    assert.equal(forEachNode.name, 'b');
+    assert.equal(forEachNode.iterable.type, parser.ASTNodeType.MemberExpression);
+    const forEachState = runProgram(parser, runner, `
+        int sum = 0;
+        int firstOnly = 0;
+        int found = 0;
+        int nestedSum = 0;
+        int findFirstAbove(int[] values, int limit) {
+            for (int value : values) {
+                if (value > limit) return value;
+            }
+            return -1;
+        }
+        void main() {
+            int[] xs = { 1, 2, 3 };
+            for (int x : xs) { sum = sum + x; }
+            for (int x : xs) { firstOnly = firstOnly + x; break; }
+            found = findFirstAbove(xs, 1);
+            int[][] grid = { { 1, 2 }, { 3 } };
+            for (int[] row : grid) {
+                for (int cell : row) { nestedSum = nestedSum + cell; }
+            }
+        }
+    `);
+    const forEachGlobals = forEachState.scopes[0];
+    assert.equal(forEachGlobals.get('sum'), 6);
+    assert.equal(forEachGlobals.get('firstOnly'), 1);
+    assert.equal(forEachGlobals.get('found'), 2);
+    assert.equal(forEachGlobals.get('nestedSum'), 6);
+    assert.equal(forEachState.scopes.length, 1);
+    assert.throws(
+        () => runProgram(parser, runner, 'void main() { int[] xs = null; for (int x : xs) {} }'),
+        /Cannot iterate over null/
+    );
+    assert.throws(
+        () => runProgram(parser, runner, 'void main() { for (Kachel k : new HashSet()) {} }'),
+        /for-each over HashSet is not supported \(only arrays\)/
+    );
+    assert.deepEqual(parser.collectExecutableLines(parses([
+        'void main() {',
+        '    for (int x : xs) {',
+        '        vor();',
+        '    }',
+        '}',
+    ].join('\n'))), [2, 3]);
+    assert.ok(parser.collectProgramErrors('void main() {\n    for (int x : ) {}\n}', { requireMain: false })
+        .some(error => error.token?.line === 2), 'malformed for-each must report a located error');
 
     console.log('Language smoke checks passed');
 })().catch(error => {

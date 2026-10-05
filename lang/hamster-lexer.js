@@ -111,7 +111,6 @@ export class Token {
  */
 export const UnsupportedConstruct = Object.freeze({
     Enum: 'enum',
-    EnhancedFor: 'enhanced-for',
     Varargs: 'varargs',
 });
 

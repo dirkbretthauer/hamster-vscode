@@ -498,6 +498,22 @@ function* executeStatementGen(node, state, callDepth) {
             return undefined;
         }
 
+        case ASTNodeType.ForEachStatement: {
+            const elements = forEachArray(yield* evalExpressionGen(node.iterable, state, callDepth));
+            for (let i = 0; i < elements.length; i++) {
+                state.scopes.push(new Map([[node.name, elements[i]]]));
+                let result;
+                try {
+                    result = yield* executeStatementGen(node.body, state, callDepth);
+                } finally {
+                    state.scopes.pop();
+                }
+                if (result instanceof BreakSignal) return undefined;
+                if (result instanceof ReturnSignal) return result;
+            }
+            return undefined;
+        }
+
         case ASTNodeType.ForStatement:
             throw new Error('For statements are not supported at runtime');
 
@@ -1150,6 +1166,18 @@ function constantInitializerValue(initializer) {
         values.push(constant.value);
     }
     return { isConstant: true, value: values };
+}
+
+/** Only arrays are iterable until Java collections are provided by the runtime. */
+function forEachArray(value) {
+    if (value == null) {
+        throw new Error('Cannot iterate over null');
+    }
+    if (!Array.isArray(value)) {
+        const typeName = runtimeTypeName(value) ?? value.className ?? typeof value;
+        throw new Error(`for-each over ${typeName} is not supported (only arrays)`);
+    }
+    return value;
 }
 
 function classLiteralFor(state, name) {

@@ -19,6 +19,7 @@ export const ASTNodeType = Object.freeze({
     WhileStatement: 'WhileStatement',
     DoWhileStatement: 'DoWhileStatement',
     ForStatement: 'ForStatement',
+    ForEachStatement: 'ForEachStatement',
     SwitchStatement: 'SwitchStatement',
     SwitchCase: 'SwitchCase',
     BreakStatement: 'BreakStatement',
@@ -62,7 +63,6 @@ export class HamsterParserError extends Error {
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
     [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
-    [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
     [UnsupportedConstruct.Varargs]: 'Variable-length parameter lists (varargs) are not supported',
 });
 
@@ -186,6 +186,7 @@ const EXECUTABLE_STATEMENT_TYPES = new Set([
     ASTNodeType.ThrowStatement,
     ASTNodeType.ReturnStatement,
     ASTNodeType.SynchronizedStatement,
+    ASTNodeType.ForEachStatement,
 ]);
 
 export function collectExecutableLines(ast) {
@@ -213,6 +214,7 @@ export function collectExecutableLines(ast) {
             case ASTNodeType.WhileStatement:
             case ASTNodeType.DoWhileStatement:
             case ASTNodeType.SynchronizedStatement:
+            case ASTNodeType.ForEachStatement:
                 collectStatement(node.body);
                 break;
             case ASTNodeType.SwitchStatement:
@@ -885,6 +887,10 @@ class Parser {
         let initializer = null;
         if (!this.checkSymbol(';')) {
             if (this.isTypeKeywordAhead()) {
+                const forEachHeader = this.tryParseForEachHeader();
+                if (forEachHeader) {
+                    return this.parseForEachRest(forToken, forEachHeader);
+                }
                 initializer = this.parseForVariableDeclaration();
             } else if (this.isAssignmentAhead()) {
                 initializer = this.parseForAssignment();
@@ -970,10 +976,36 @@ class Parser {
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
         }
-        if (this.checkSymbol(':')) {
-            throw unsupportedConstructError(UnsupportedConstruct.EnhancedFor, this.peek());
-        }
         return this.parseVariableDeclarators(typeToken, nameToken);
+    }
+
+    /** `Type name :` after `for (`; consumes it and returns the header, or rolls back and returns null. */
+    tryParseForEachHeader() {
+        const checkpoint = this.current;
+        this.skipModifiers();
+        const typeToken = this.consumeTypeName(false);
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in variable type');
+        }
+        const nameToken = this.consumeIdentifier('Expected variable name');
+        if (this.matchSymbol(':')) {
+            return { typeToken, nameToken };
+        }
+        this.current = checkpoint;
+        return null;
+    }
+
+    parseForEachRest(forToken, { typeToken, nameToken }) {
+        const iterable = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after for-each expression');
+        return {
+            type: ASTNodeType.ForEachStatement,
+            varType: typeToken.value,
+            name: nameToken.value,
+            iterable,
+            body: this.parseBreakableStatement(),
+            loc: locationFrom(forToken),
+        };
     }
 
     /**
