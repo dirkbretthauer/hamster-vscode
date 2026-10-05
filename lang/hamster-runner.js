@@ -552,6 +552,15 @@ function* executeStatementGen(node, state, callDepth) {
                 }
             }
 
+        case ASTNodeType.SynchronizedStatement: {
+            // The runner is single-threaded, so mutual exclusion holds without a real lock.
+            const lock = yield* evalExpressionGen(node.lock, state, callDepth);
+            if (lock == null) {
+                throw new Error('Cannot synchronize on null');
+            }
+            return yield* executeStatementGen(node.body, state, callDepth);
+        }
+
         case ASTNodeType.ThrowStatement: {
             const value = yield* evalExpressionGen(node.argument, state, callDepth);
             throw new HamsterLanguageException(value);

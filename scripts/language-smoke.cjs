@@ -833,6 +833,30 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(parser.parseExpression('i < n && j > m').operator, '&&');
     assert.equal(parser.parseExpression('x < y == z').operator, '==');
 
+    // ── synchronized (US1, T008) ──
+    const synchronizedProgram = parses([
+        '/*class*/',
+        'class Lager {',
+        '    synchronized static void f() {}',
+        '    public synchronized void g() {}',
+        '    synchronized void put(ErzeugerHamster ham) {}',
+        '    void aufStabWarten() {',
+        '        synchronized (Territorium.getKachel(this.getReihe(),',
+        '                this.getSpalte())) {',
+        '            vor();',
+        '        }',
+        '    }',
+        '}',
+    ].join('\n'));
+    const lagerMethods = synchronizedProgram.classes[0].methods;
+    assert.equal(lagerMethods.length, 4);
+    assert.ok(['synchronized', 'static'].every(modifier => lagerMethods[0].modifiers.includes(modifier)));
+    assert.ok(lagerMethods[1].modifiers.includes('synchronized'));
+    const synchronizedBlock = findNode(lagerMethods[3], node => node.type === parser.ASTNodeType.SynchronizedStatement);
+    assert.ok(synchronizedBlock, 'synchronized block should parse to a SynchronizedStatement');
+    assert.equal(synchronizedBlock.lock.type, parser.ASTNodeType.CallExpression);
+    assert.deepEqual(parser.collectExecutableLines(synchronizedProgram), [7, 9]);
+
     // ── Runtime: generics are erased (US3, T030) ──
     const genericRuntimeSource = `
         class Box<T> {
@@ -866,6 +890,46 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         .map(name => runProgram(parser, runner, erasedRuntimeSource).scopes[0].get(name));
     assert.deepEqual(genericResults, [5, 5, true]);
     assert.deepEqual(genericResults, erasedResults);
+
+    // ── Runtime: synchronized (US3, T031) ──
+    const synchronizedState = runProgram(parser, runner, `
+        class Counter {
+            synchronized void inc() { methodCalls = methodCalls + 1; }
+        }
+        int locks = 0;
+        int bodies = 0;
+        int fromReturn = 0;
+        int afterBreak = 0;
+        int methodCalls = 0;
+        Object lock() {
+            locks = locks + 1;
+            return new Object();
+        }
+        int guarded() {
+            synchronized (lock()) { return 42; }
+        }
+        void main() {
+            for (int i = 0; i < 3; i++) {
+                synchronized (lock()) { bodies = bodies + 1; }
+            }
+            fromReturn = guarded();
+            while (true) {
+                synchronized (lock()) { break; }
+            }
+            afterBreak = 1;
+            new Counter().inc();
+        }
+    `);
+    const synchronizedGlobals = synchronizedState.scopes[0];
+    assert.equal(synchronizedGlobals.get('locks'), 5);
+    assert.equal(synchronizedGlobals.get('bodies'), 3);
+    assert.equal(synchronizedGlobals.get('fromReturn'), 42);
+    assert.equal(synchronizedGlobals.get('afterBreak'), 1);
+    assert.equal(synchronizedGlobals.get('methodCalls'), 1);
+    assert.throws(
+        () => runProgram(parser, runner, 'void main() { synchronized (null) {} }'),
+        /Cannot synchronize on null/
+    );
 
     console.log('Language smoke checks passed');
 })().catch(error => {

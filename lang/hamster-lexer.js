@@ -32,6 +32,7 @@ const KEYWORDS = new Set([
     'static',
     'final',
     'abstract',
+    'synchronized',
     'throws',
     'package',
     'import',

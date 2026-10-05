@@ -21,6 +21,7 @@ export const ASTNodeType = Object.freeze({
     BreakStatement: 'BreakStatement',
     TryStatement: 'TryStatement',
     ThrowStatement: 'ThrowStatement',
+    SynchronizedStatement: 'SynchronizedStatement',
     ReturnStatement: 'ReturnStatement',
     ConditionalExpression: 'ConditionalExpression',
     BinaryExpression: 'BinaryExpression',
@@ -162,6 +163,7 @@ const EXECUTABLE_STATEMENT_TYPES = new Set([
     ASTNodeType.TryStatement,
     ASTNodeType.ThrowStatement,
     ASTNodeType.ReturnStatement,
+    ASTNodeType.SynchronizedStatement,
 ]);
 
 export function collectExecutableLines(ast) {
@@ -184,6 +186,7 @@ export function collectExecutableLines(ast) {
                 break;
             case ASTNodeType.WhileStatement:
             case ASTNodeType.DoWhileStatement:
+            case ASTNodeType.SynchronizedStatement:
                 collectStatement(node.body);
                 break;
             case ASTNodeType.SwitchStatement:
@@ -625,6 +628,9 @@ class Parser {
         if (this.checkKeyword('return')) {
             return this.parseReturnStatement();
         }
+        if (this.checkKeyword('synchronized') && this.checkNextSymbol('(')) {
+            return this.parseSynchronizedStatement();
+        }
         if (this.isTypeKeywordAhead()) {
             return this.parseVariableDeclaration();
         }
@@ -785,6 +791,19 @@ class Parser {
                 loc: locationFrom(typeToken),
             },
             loc: locationFrom(tryToken),
+        };
+    }
+
+    parseSynchronizedStatement() {
+        const synchronizedToken = this.consumeKeyword('synchronized', 'Expected synchronized');
+        this.consumeSymbol('(', 'Expected ( after synchronized');
+        const lock = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after synchronized lock');
+        return {
+            type: ASTNodeType.SynchronizedStatement,
+            lock,
+            body: this.parseBlock(),
+            loc: locationFrom(synchronizedToken),
         };
     }
 
@@ -1561,10 +1580,7 @@ class Parser {
     }
 
     isModifierToken(token) {
-        return token?.type === TokenType.KEYWORD &&
-            (token.value === 'public' || token.value === 'private' ||
-             token.value === 'protected' || token.value === 'static' ||
-             token.value === 'final' || token.value === 'abstract');
+        return token?.type === TokenType.KEYWORD && MODIFIER_KEYWORDS.has(token.value);
     }
 
     consumeQualifiedName(message) {
@@ -1881,6 +1897,10 @@ function makeBinary(operatorToken, left, right) {
 }
 
 const PRIMITIVE_TYPE_KEYWORDS = new Set(['int', 'boolean']);
+
+const MODIFIER_KEYWORDS = new Set([
+    'public', 'private', 'protected', 'static', 'final', 'abstract', 'synchronized',
+]);
 
 const REFERENCE_CAST_OPERAND_KEYWORDS = new Set(['this', 'super', 'new']);
 
