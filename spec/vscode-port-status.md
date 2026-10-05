@@ -48,7 +48,8 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 Full Band 1 statement/expression grammar: `if/else`, `while`, `do/while`, `for` (desugared), `return`, blocks, calls, member access, indexing, postfix `++`/`--`.
 - 🟢 Compatibility mode retains classes and interfaces with modifiers, inheritance, implemented interfaces, fields, constructors, and methods.
 - 🟢 `switch/case/default/break` and `try/catch/throw` parse to dedicated AST nodes.
-- 🔴 No `instanceof` or casts.
+- 🔴 No `instanceof`.
+- 🟢 Casts `(int) expr` / `(Type) expr` parse; `(int)` truncates like Java, and reference casts to known classes/interfaces throw a catchable `ClassCastException` on mismatch.
 - 🟢 Prefix and postfix `++`/`--` are parsed.
 - 🟢 Array creation (`new int[n]`, `new boolean[r][c]`, `new Type[n][]`) supports primitive element types and multiple dimensions, with Java default element values.
 - 🟡 Unsupported top-level syntax can be silently skipped in non-strict compatibility mode rather than reported as an error.

@@ -708,6 +708,58 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         /Expected array dimension after new int/
     );
 
+    assert.equal(parser.parseExpression('(a) + b').type, parser.ASTNodeType.BinaryExpression);
+    assert.equal(parser.parseExpression('(a) - 1').type, parser.ASTNodeType.BinaryExpression);
+    assert.equal(parser.parseExpression('(int) -x').type, parser.ASTNodeType.CastExpression);
+    assert.equal(parser.parseExpression('(a.b.Type[]) x').targetType, 'a.b.Type');
+    assert.equal(parser.parseExpression('((Base) b).value()').type, parser.ASTNodeType.CallExpression);
+
+    const castRuntime = createRuntime();
+    // Mirrors the webview runtime, which resolves capitalized names to class references.
+    castRuntime.resolveIdentifier = name => (name === 'Math' ? { __kind: 'class', name } : undefined);
+    castRuntime.callMethod = (receiver, name) => {
+        if (receiver?.name === 'Math' && name === 'random') return 0.75;
+        throw new Error('Unsupported method call: ' + name);
+    };
+    const castState = runProgram(parser, runner, `
+        interface Marker {}
+        class Base {
+            int value() { return 1; }
+        }
+        class Derived extends Base implements Marker {
+            int value() { return 2; }
+        }
+        class Other {}
+        int randomValue = 0;
+        int negativeValue = 0;
+        int derivedValue = 0;
+        int castCaught = 0;
+        boolean interfaceCast = false;
+        boolean nullCast = false;
+        void main() {
+            randomValue = (int) (Math.random() * 4);
+            negativeValue = (int) -(Math.random() * 4);
+            Base base = new Derived();
+            derivedValue = ((Derived) base).value() + ((Base) base).value();
+            Marker marker = (Marker) base;
+            interfaceCast = marker == base;
+            Object unknown = (Integer) base;
+            Other none = (Other) null;
+            nullCast = none == null;
+            try {
+                Other other = (Other) base;
+            } catch (ClassCastException error) {
+                castCaught = 1;
+            }
+        }
+    `, castRuntime);
+    assert.equal(castState.scopes[0].get('randomValue'), 3);
+    assert.equal(castState.scopes[0].get('negativeValue'), -3);
+    assert.equal(castState.scopes[0].get('derivedValue'), 4);
+    assert.equal(castState.scopes[0].get('interfaceCast'), true);
+    assert.equal(castState.scopes[0].get('nullCast'), true);
+    assert.equal(castState.scopes[0].get('castCaught'), 1);
+
     console.log('Language smoke checks passed');
 })().catch(error => {
     console.error(error);

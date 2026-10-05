@@ -143,7 +143,6 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ### Parser gaps
 - `instanceof` expression
-- Type cast `(Type) expr`
 
 ### Runner gaps
 - `instanceof` – not handled
