@@ -139,25 +139,21 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ### Lexer gaps
 - `$` not allowed in identifiers
-- `long` literals (`0L`) – rejected as a known gap (`long-literal`)
+- Hexadecimal/octal/binary and floating-point literals; `long` literals (`0L`) are accepted but are plain
+  JavaScript numbers (no 64-bit semantics)
 
 ### Parser gaps (known gaps)
-These are recognised and rejected with a `HamsterParserError` whose `unsupportedConstruct` field holds
-the code in parentheses (see `UnsupportedConstruct`). `npm run conformance` reports them separately
-from real failures:
-- Qualified type names in declarations, e.g. `java.util.Calendar c;` (`qualified-type-name`)
-- Several variables in one local/global/`for` declaration, e.g. `A a = null, b = null;`
-  (`multiple-declarators`); multiple *field* declarators are supported
-- `enum` declarations (`enum`)
-- Class literals `Foo.class` (`class-literal`)
-- for-each loops `for (T x : xs)` (`enhanced-for`)
-- Varargs parameters `T... xs` (`varargs`)
+All 920 Java-like reference samples parse (`node scripts/conformance.cjs --min-pass-rate=1`). Recognised
+but unsupported syntax is rejected with a `HamsterParserError` whose `unsupportedConstruct` field holds a
+code from `UnsupportedConstruct`; `npm run conformance` reports such programs separately as known gaps:
+- Enums with constructors, constant bodies, or members (`enum-body`); constant-only enums are supported
 - Not tagged, plain syntax errors (no sample uses them): explicit generic call type arguments
   (`obj.<T>m()`), `&` type-parameter bounds, multi-catch unions (`catch (A | B e)`), try-with-resources
 
 ### Runner gaps
 - No concurrency (`start()`/`run()`); `synchronized` runs without locking (single thread)
 - No Java library classes (`ArrayList`, `HashMap`, `Thread`, …): calls fail with a message naming the class
+- for-each iterates arrays only; collections fail with a message naming the type
 - Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
 
 ## Conventions

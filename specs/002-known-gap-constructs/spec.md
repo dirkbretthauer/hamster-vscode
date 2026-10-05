@@ -105,3 +105,10 @@ run time.
 - for-each over collections depends on the planned `java.util` subset (step 3) and is out of scope here.
 - Running these programs to completion can still be blocked by threads or library classes. Those remain separate gaps (steps 2 and 3), so SC-003 names only samples that need neither.
 - Java numbers are modelled as JavaScript numbers. `long` is not given 64-bit integer semantics.
+
+## Results
+
+- 2026-10-05: `node scripts/conformance.cjs --min-pass-rate=1` exits 0 with **920 passed / 0 failed / 0 known gaps**, up from 904 / 0 / 16. Each construct commit raised the count exactly as planned (906, 908, 911, 915, 917, 918, 920). `npm test` is green in about 2 s, and `npm run compile` builds.
+- Deliberate regression (for-each parsing disabled): the smoke suite fails, and the gate exits 3 at 917/920.
+- Implementation note: enum constants are kept in runner state (`state.enumConstants`) rather than on the AST, so parser output stays free of runtime data.
+- Still open: T031 (manual F5 check, SC-003) and T032 (push and PR).

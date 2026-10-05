@@ -27,6 +27,9 @@ the reference simulator now parse (`node scripts/conformance.cjs --min-pass-rate
 one of seven explicitly unsupported constructs and are reported as known gaps (see section 2).
 Concurrency and the Java class library remain runtime gaps.
 
+**Update 2026-10-05 (feature `specs/002-known-gap-constructs`):** the seven known-gap constructs are now
+supported, so all 920 Java-like sample programs parse, with 0 known gaps.
+
 | Area | Spec doc(s) | Status |
 | --- | --- | --- |
 | Editor & syntax highlighting | `editor.md` | 🟢 Appropriate simplification via native VS Code + TextMate grammar |
@@ -43,7 +46,7 @@ Concurrency and the Java class library remain runtime gaps.
 
 ### 1. Language: Lexer (`lang/hamster-lexer.js`)
 - 🟢 Control-flow keywords `switch`, `case`, `default`, `break`, `try`, `catch`, `finally`, and `throw` are recognized, as are `instanceof` and `synchronized`.
-- 🟡 `long` literals (`0L`) are rejected with a tagged "not supported" error (known gap `long-literal`).
+- 🟢 `long` literals (`0L`) are accepted. ⚪ Deviation: they are JavaScript numbers, exact only up to 2^53, with no 64-bit overflow semantics.
 - 🟢 Compound-assignment operators `+=`, `-=` are recognized.
 - 🟡 Identifier grammar excludes `$` (spec allows `[A-Za-z_$][A-Za-z0-9_$]*`).
 - 🟡 Unknown string escapes are silently accepted (drops backslash) instead of raising a lexical error.
@@ -57,7 +60,12 @@ Concurrency and the Java class library remain runtime gaps.
 - 🟢 Generics: type arguments (nested, wildcards, diamond after `new`) and type parameters on classes, interfaces, and methods parse and are erased in the AST.
 - 🟢 `synchronized` parses as a method modifier and as a `synchronized (lock) { … }` statement.
 - 🟢 Array initializers (`{ … }`, nested, trailing comma) parse in declarations and after `new T[]`.
-- 🟡 Known gaps, each rejected with a tagged error (`unsupportedConstruct`): qualified type names in declarations, several variables in one local/global declaration, `enum`, class literals `Foo.class`, for-each loops, varargs, and `long` literals.
+- 🟢 Qualified type names (`java.util.Calendar c`, `new pkg.Type()`) resolve by simple name, since packages are not modelled.
+- 🟢 Several variables in one local, global, or `for` declaration.
+- 🟢 Class literals `Foo.class` (one canonical value per class) and `getClass()`.
+- 🟢 for-each loops over arrays. 🟡 Collections are not iterable until Java collections exist; the error names the type.
+- 🟢 Varargs parameters, with Java's exact-arity-first overload choice and array pass-through.
+- 🟢 Constant-only enums: `values()`, `valueOf()`, `name()`, `ordinal()`, `compareTo()`, unqualified `switch` labels. 🟡 Enums with constructors, constant bodies, or members are a tagged known gap (`enum-body`); no sample uses them.
 - 🟢 Casts `(int) expr` / `(Type) expr` parse; `(int)` truncates like Java, and reference casts to known classes/interfaces throw a catchable `ClassCastException` on mismatch.
 - 🟢 Prefix and postfix `++`/`--` are parsed.
 - 🟢 Array creation (`new int[n]`, `new boolean[r][c]`, `new Type[n][]`) supports primitive element types and multiple dimensions, with Java default element values.
