@@ -143,6 +143,9 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 ### Parser gaps
 - `instanceof` expression
+- Generics (`List<T>`, `class Box<T>`), `synchronized`, `enum`, enhanced `for`, `Foo.class`,
+  array initializers (`{ 1, 2 }`), multiple declarators (`A a = null, b = null;`), `finally`,
+  multiple `catch` clauses — the most frequent remaining failures in `npm run conformance`
 
 ### Runner gaps
 - `instanceof` – not handled
@@ -162,7 +165,10 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 `npm test` runs `scripts/language-smoke.cjs` (lexer/parser/runner smoke coverage) and
 `node --test` (unit suites under `test/`, covering terrain parse/serialize round trips,
 terrain-file resolution, host/webview message guards, and executable-line collection).
-There is no automated webview/DAP integration suite yet. After making a language change:
+There is no automated webview/DAP integration suite yet. For a broader parser check, run
+`npm run conformance` (optionally `-- <referenceDir> --verbose --min-pass-rate=0.85`), which parses
+all ~950 sample programs under the reference simulator's `Programme/` folder and groups the failures;
+it is not part of `npm test` because the corpus lives outside the repo. After making a language change:
 1. Build: `npm run compile`
 2. Run `npm test` for fast regression coverage of the lexer/parser/runner and the above helpers.
 3. Launch the extension in VS Code (F5) and open a `.ham` file.
