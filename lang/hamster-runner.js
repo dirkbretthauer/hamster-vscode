@@ -537,20 +537,7 @@ function* executeStatementGen(node, state, callDepth) {
             return new BreakSignal();
 
         case ASTNodeType.TryStatement:
-            try {
-                return yield* executeStatementGen(node.block, state, callDepth);
-            } catch (error) {
-                if (!(error instanceof HamsterLanguageException) ||
-                    !exceptionMatchesType(error.value, node.handler.paramType, state)) {
-                    throw error;
-                }
-                state.scopes.push(new Map([[node.handler.paramName, error.value]]));
-                try {
-                    return yield* executeStatementGen(node.handler.body, state, callDepth);
-                } finally {
-                    state.scopes.pop();
-                }
-            }
+            return yield* executeTryStatementGen(node, state, callDepth);
 
         case ASTNodeType.SynchronizedStatement: {
             // The runner is single-threaded, so mutual exclusion holds without a real lock.
@@ -599,6 +586,53 @@ function* executeStatementGen(node, state, callDepth) {
 
         default:
             throw new Error('Unsupported statement type: ' + node.type);
+    }
+}
+
+/**
+ * Java `try`/`catch`/`finally`. Outcomes are captured explicitly rather than
+ * with a JavaScript `finally` around `yield*`: closing a suspended generator
+ * (e.g. when the debugger cleans up an evaluation) would otherwise run the
+ * program's own finally blocks.
+ */
+function* executeTryStatementGen(node, state, callDepth) {
+    let outcome = yield* captureOutcomeGen(executeStatementGen(node.block, state, callDepth));
+    if (outcome.threw && outcome.error instanceof HamsterLanguageException) {
+        const handler = node.handlers.find(candidate =>
+            exceptionMatchesType(outcome.error.value, candidate.paramType, state)
+        );
+        if (handler) {
+            outcome = yield* captureOutcomeGen(
+                executeCatchClauseGen(handler, outcome.error.value, state, callDepth)
+            );
+        }
+    }
+    if (node.finalizer) {
+        // A finally block that completes abruptly replaces the try/catch outcome.
+        const finalizerOutcome = yield* captureOutcomeGen(
+            executeStatementGen(node.finalizer, state, callDepth)
+        );
+        if (finalizerOutcome.threw) throw finalizerOutcome.error;
+        if (isControlSignal(finalizerOutcome.value)) return finalizerOutcome.value;
+    }
+    if (outcome.threw) throw outcome.error;
+    return outcome.value;
+}
+
+function* captureOutcomeGen(generator) {
+    try {
+        return { threw: false, value: yield* generator };
+    } catch (error) {
+        return { threw: true, error };
+    }
+}
+
+function* executeCatchClauseGen(handler, exceptionValue, state, callDepth) {
+    state.scopes.push(new Map([[handler.paramName, exceptionValue]]));
+    try {
+        return yield* executeStatementGen(handler.body, state, callDepth);
+    } finally {
+        state.scopes.pop();
     }
 }
 

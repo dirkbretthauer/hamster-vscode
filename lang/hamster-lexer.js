@@ -20,6 +20,7 @@ const KEYWORDS = new Set([
     'break',
     'try',
     'catch',
+    'finally',
     'throw',
     'return',
     'new',

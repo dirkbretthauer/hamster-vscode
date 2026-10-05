@@ -694,22 +694,35 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         () => parser.parseProgram('void main() { break; }'),
         /break is only valid inside a loop or switch/
     );
-    assert.throws(
-        () => parser.parseProgram(`
-            void main() {
-                try {} catch (Exception first) {} catch (Exception second) {}
-            }
-        `),
-        /Multiple catch clauses are not supported/
-    );
-    assert.throws(
-        () => parser.parseProgram('void main() { try {} catch (Exception e) {} finally {} }'),
-        /finally clauses are not supported/
-    );
-    assert.throws(
-        () => parser.parseProgram('void main() { try {} finally {} }'),
-        /finally clauses are not supported/
-    );
+    // ── try with multiple catch clauses and finally (US1, T009) ──
+    const isTry = node => node.type === parser.ASTNodeType.TryStatement;
+    const multiCatchTry = findNode(parses('void main() { try {} catch (A a) {} catch (B b) {} }'), isTry);
+    assert.equal(multiCatchTry.handlers.length, 2);
+    assert.ok(multiCatchTry.handlers.every(handler => handler.type === parser.ASTNodeType.CatchClause));
+    assert.deepEqual(multiCatchTry.handlers.map(handler => handler.paramType), ['A', 'B']);
+    assert.deepEqual(multiCatchTry.handlers.map(handler => handler.paramName), ['a', 'b']);
+    assert.equal(multiCatchTry.finalizer, null);
+    const catchFinallyTry = findNode(parses('void main() { try {} catch (A a) {} finally {} }'), isTry);
+    assert.equal(catchFinallyTry.handlers.length, 1);
+    assert.equal(catchFinallyTry.finalizer.type, parser.ASTNodeType.Block);
+    const finallyOnlyTry = findNode(parses('void main() { try {} finally {} }'), isTry);
+    assert.equal(finallyOnlyTry.handlers.length, 0);
+    assert.equal(finallyOnlyTry.finalizer.type, parser.ASTNodeType.Block);
+    parses('void main() { try {} catch (final A a) {} }');
+    parseFails('void main() { try {} }', /Expected catch or finally after try block/);
+    assert.deepEqual(parser.collectExecutableLines(parses([
+        'void main() {',
+        '    try {',
+        '        vor();',
+        '    } catch (A a) {',
+        '        linksUm();',
+        '    } catch (B b) {',
+        '        nimm();',
+        '    } finally {',
+        '        gib();',
+        '    }',
+        '}',
+    ].join('\n'))), [2, 3, 5, 7, 9]);
 
     const arrayState = runProgram(parser, runner, `
         int[] counts = null;
@@ -856,6 +869,114 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.ok(synchronizedBlock, 'synchronized block should parse to a SynchronizedStatement');
     assert.equal(synchronizedBlock.lock.type, parser.ASTNodeType.CallExpression);
     assert.deepEqual(parser.collectExecutableLines(synchronizedProgram), [7, 9]);
+
+    // ── Diagnostics stay precise around the new constructs (US1, T012) ──
+    const errorsAt = lines => parser.collectProgramErrors(lines.join('\n'), { requireMain: false });
+    assert.ok(errorsAt([
+        'void main() {',
+        '    try {',
+        '        vor();',
+        '    } finally {',
+        '        gib();',
+        '}',
+    ]).length > 0, 'missing } after finally block must be reported');
+    for (const brokenLine of ['    Speicher<Integer k;', '    try {} catch () {}', '    synchronized () {}']) {
+        const errors = errorsAt(['void main() {', brokenLine, '}']);
+        assert.ok(errors.some(error => error.token?.line === 2), 'expected an error on line 2 for: ' + brokenLine);
+    }
+
+    // ── Runtime: multiple catch clauses (US2, T021) ──
+    const multiCatchState = runProgram(parser, runner, `
+        int specific = 0;
+        int second = 0;
+        int general = 0;
+        void main() {
+            try { throw new KachelLeerException("x"); }
+            catch (KachelLeerException e) { specific = specific + 1; }
+            catch (HamsterException e) { general = general + 100; }
+            try { throw new MauerDaException("x"); }
+            catch (KachelLeerException e) { specific = specific + 100; }
+            catch (MauerDaException e) { second = second + 1; }
+            try { throw new KachelLeerException("x"); }
+            catch (HamsterException e) { general = general + 1; }
+            catch (KachelLeerException e) { specific = specific + 100; }
+        }
+    `);
+    assert.equal(multiCatchState.scopes[0].get('specific'), 1);
+    assert.equal(multiCatchState.scopes[0].get('second'), 1);
+    assert.equal(multiCatchState.scopes[0].get('general'), 1);
+    assert.throws(
+        () => runProgram(parser, runner, `
+            void main() {
+                try { throw new MauerDaException("w"); }
+                catch (KachelLeerException e) {}
+                catch (MaulLeerException e) {}
+            }
+        `),
+        error => error instanceof runner.HamsterLanguageException && error.name === 'MauerDaException'
+    );
+
+    // ── Runtime: finally on every exit path (US2, T022, T028) ──
+    const finallyState = runProgram(parser, runner, `
+        int count = 0;
+        int caughtAt = 0;
+        int returned = 0;
+        int loops = 0;
+        int overridden = 0;
+        int replaced = 0;
+        String order = "";
+        int returnFromTry() {
+            try { return 7; } finally { count = count + 1; }
+        }
+        int finallyOverrides() {
+            try { return 1; } finally { return 2; }
+        }
+        void main() {
+            try { vor(); } finally { count = count + 1; }
+            try { throw new HamsterException("a"); }
+            catch (HamsterException e) { caughtAt = count; }
+            finally { count = count + 1; }
+            returned = returnFromTry();
+            while (true) {
+                try { loops = loops + 1; break; } finally { count = count + 1; }
+            }
+            overridden = finallyOverrides();
+            try {
+                try { throw new HamsterException("inner"); }
+                finally { throw new MauerDaException("replacement"); }
+            } catch (MauerDaException e) { replaced = replaced + 1; }
+            try {
+                try { count = count + 0; }
+                finally { throw new MauerDaException("after normal"); }
+            } catch (MauerDaException e) { replaced = replaced + 1; }
+            try {} finally { count = count + 1; }
+            try {
+                try { throw new HamsterException("nested"); }
+                finally { order = order + "inner"; }
+            } catch (HamsterException e) { order = order + "-catch"; }
+            finally { order = order + "-outer"; }
+        }
+    `);
+    const finallyGlobals = finallyState.scopes[0];
+    assert.equal(finallyGlobals.get('count'), 5);
+    assert.equal(finallyGlobals.get('caughtAt'), 1);
+    assert.equal(finallyGlobals.get('returned'), 7);
+    assert.equal(finallyGlobals.get('loops'), 1);
+    assert.equal(finallyGlobals.get('overridden'), 2);
+    assert.equal(finallyGlobals.get('replaced'), 2);
+    assert.equal(finallyGlobals.get('order'), 'inner-catch-outer');
+    assert.equal(finallyState.scopes.length, 1);
+    const uncaughtFinallyState = runner.createRunnerState(parses(`
+        int count = 0;
+        void main() {
+            try { throw new MauerDaException("u"); } finally { count = count + 1; }
+        }
+    `), createRuntime());
+    assert.throws(
+        () => { while (runner.executeRunnerStep(uncaughtFinallyState)) {} },
+        error => error instanceof runner.HamsterLanguageException && error.name === 'MauerDaException'
+    );
+    assert.equal(uncaughtFinallyState.scopes[0].get('count'), 1);
 
     // ── Runtime: generics are erased (US3, T030) ──
     const genericRuntimeSource = `

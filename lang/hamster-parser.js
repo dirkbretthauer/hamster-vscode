@@ -20,6 +20,7 @@ export const ASTNodeType = Object.freeze({
     SwitchCase: 'SwitchCase',
     BreakStatement: 'BreakStatement',
     TryStatement: 'TryStatement',
+    CatchClause: 'CatchClause',
     ThrowStatement: 'ThrowStatement',
     SynchronizedStatement: 'SynchronizedStatement',
     ReturnStatement: 'ReturnStatement',
@@ -198,7 +199,10 @@ export function collectExecutableLines(ast) {
                 break;
             case ASTNodeType.TryStatement:
                 collectStatement(node.block);
-                collectStatement(node.handler?.body);
+                for (const handler of node.handlers || []) {
+                    collectStatement(handler.body);
+                }
+                collectStatement(node.finalizer);
                 break;
         }
     };
@@ -766,31 +770,36 @@ class Parser {
     parseTryStatement() {
         const tryToken = this.consumeKeyword('try', 'Expected try');
         const block = this.parseBlock();
-        if (this.peek().value === 'finally') {
-            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        const handlers = [];
+        while (this.checkKeyword('catch')) {
+            handlers.push(this.parseCatchClause());
         }
-        this.consumeKeyword('catch', 'Expected catch after try block');
-        this.consumeSymbol('(', 'Expected ( after catch');
-        const typeToken = this.consumeTypeName(false);
-        const parameter = this.consumeIdentifier('Expected catch parameter name');
-        this.consumeSymbol(')', 'Expected ) after catch parameter');
-        const handler = this.parseBlock();
-        if (this.checkKeyword('catch')) {
-            throw new HamsterParserError('Multiple catch clauses are not supported', this.peek());
-        }
-        if (this.peek().value === 'finally') {
-            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        const finalizer = this.matchKeyword('finally') ? this.parseBlock() : null;
+        if (handlers.length === 0 && !finalizer) {
+            throw new HamsterParserError('Expected catch or finally after try block', tryToken);
         }
         return {
             type: ASTNodeType.TryStatement,
             block,
-            handler: {
-                paramType: typeToken.value,
-                paramName: parameter.value,
-                body: handler,
-                loc: locationFrom(typeToken),
-            },
+            handlers,
+            finalizer,
             loc: locationFrom(tryToken),
+        };
+    }
+
+    parseCatchClause() {
+        const catchToken = this.consumeKeyword('catch', 'Expected catch');
+        this.consumeSymbol('(', 'Expected ( after catch');
+        this.parseModifiers();
+        const typeToken = this.consumeTypeName(false);
+        const parameter = this.consumeIdentifier('Expected catch parameter name');
+        this.consumeSymbol(')', 'Expected ) after catch parameter');
+        return {
+            type: ASTNodeType.CatchClause,
+            paramType: typeToken.value,
+            paramName: parameter.value,
+            body: this.parseBlock(),
+            loc: locationFrom(catchToken),
         };
     }
 
