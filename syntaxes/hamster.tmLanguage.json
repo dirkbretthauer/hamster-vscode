@@ -39,9 +39,9 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.hamster", "match": "\\b(if|else|while|do|for|switch|case|default|break|try|catch|throw|return)\\b" },
+        { "name": "keyword.control.hamster", "match": "\\b(if|else|while|do|for|switch|case|default|break|try|catch|finally|throw|return)\\b" },
         { "name": "keyword.other.hamster", "match": "\\b(new|this|super|class|interface|extends|implements|throws|package|import)\\b" },
-        { "name": "storage.modifier.hamster", "match": "\\b(public|private|protected|static|final|abstract)\\b" }
+        { "name": "storage.modifier.hamster", "match": "\\b(public|private|protected|static|final|abstract|synchronized)\\b" }
       ]
     },
     "types": {
@@ -64,6 +64,7 @@
     },
     "operators": {
       "patterns": [
+        { "name": "keyword.operator.instanceof.hamster", "match": "\\binstanceof\\b" },
         { "name": "keyword.operator.comparison.hamster", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.logical.hamster", "match": "&&|\\|\\||!" },
         { "name": "keyword.operator.assignment.hamster", "match": "\\+=|-=|=" },

@@ -62,6 +62,7 @@ out-of-scope constructs in FR-017:
 | `class-literal` | `.class` after a type name | `Class literals (Foo.class) are not supported` |
 | `long-literal` | an integer literal followed by `L`/`l` | `long literals are not supported` |
 | `enhanced-for` | `for (Type name : …)` | `for-each loops are not supported` |
+| `varargs` | `Type... name` in a parameter list (added during implementation) | `Variable-length parameter lists (varargs) are not supported` |
 
 Diagnostics show these like any other error, with a precise range.
 

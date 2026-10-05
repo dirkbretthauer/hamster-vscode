@@ -194,6 +194,8 @@ one construct and confirm that both catch it.
 - **FR-016**: Every one of the 808 sample programs accepted before this feature MUST still be accepted.
 - **FR-017**: The scope is limited to the six requested constructs. Qualified type names, several variables in one
   declaration, `enum`, class literals (`Foo.class`), `long` literals (`0L`), and the for-each loop are out of scope.
+  Varargs parameters (`T... xs`) are out of scope too. They surfaced during implementation in one sample
+  (`band 2/kapitel 15/beispielprogramm 2/Arrays.ham`) and are not among the six requested constructs.
   Sample programs that use any of them are excluded from the in-scope set and recorded as remaining known gaps
   (FR-021). The conformance check MUST report these programs separately from regressions, so that a 100% gate on the
   in-scope set does not fail because of them.

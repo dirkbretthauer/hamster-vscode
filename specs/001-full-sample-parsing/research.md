@@ -166,3 +166,19 @@ pattern.
 ## Baseline
 
 - 2026-10-05, before implementation: `node scripts/conformance.cjs` reports TOTAL 808 passed / 112 failed of 920 Java-like programs (87.8%).
+- 2026-10-05, after implementation: `node scripts/conformance.cjs --min-pass-rate=1` exits 0 and reports TOTAL
+  904 passed / 0 failed / 16 known gaps (in-scope rate 100%). All 808 programs that passed before still pass.
+  The known gaps are: `class-literal` 4, `qualified-type-name` 3, `multiple-declarators` 2, `enhanced-for` 2,
+  `enum` 2, `long-literal` 2, `varargs` 1. The spec estimated about 10 known gaps; the extra ones are
+  `synchronized (Foo.class)` locks, a `Thread.sleep(…L)` call, and the varargs sample.
+
+## Implementation notes
+
+- **D7, a seventh code (`varargs`)**: `Arrays.ham` (`band 2/kapitel 15/beispielprogramm 2`) declares
+  `T... elements`. Varargs is not one of the six requested constructs, so following clarification Q1 (option B)
+  it became a known gap rather than new scope.
+- **D2, erasure needed no runner change (T034)**: type parameters such as `T` only appear in type positions
+  (field, parameter, and return types), which the runner never evaluates. Their fields default to `null`.
+- **D7 limitation check (T041)**: each known-gap program is classified by its first error. A second, in-scope
+  construct later in the same file would stay hidden. This was not checked further for the 16 programs. Once a
+  known gap is implemented, its programs are re-evaluated automatically by the gate.
