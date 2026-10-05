@@ -885,7 +885,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
     const candidates = (state.functions.get(calleeName) || []).filter(
         candidate => candidate.body && !candidate.owner
     );
-    const fn = candidates.find(c => (c.parameters || []).length === args.length);
+    const fn = selectByArity(candidates, args.length);
     if (fn) {
         // Stop on the call site so the debugger highlights the
         // function-call line before stepping into the function.
@@ -933,13 +933,14 @@ function* invokeUserFunctionGen(fn, args, state, callDepth, receiver = null, cla
     if (callDepth > 256) {
         throw new Error('Maximum function call depth exceeded');
     }
-    if ((fn.parameters || []).length !== args.length) {
+    if (!acceptsArgumentCount(fn, args.length)) {
         throw new Error('Function ' + fn.name + ' expects ' + fn.parameters.length + ' arguments but got ' + args.length);
     }
 
     const functionScope = new Map();
+    const boundArgs = bindArguments(fn.parameters, args);
     for (let i = 0; i < fn.parameters.length; i++) {
-        functionScope.set(fn.parameters[i].name, args[i]);
+        functionScope.set(fn.parameters[i].name, boundArgs[i]);
     }
     if (receiver != null) {
         functionScope.set('this', receiver);
@@ -1290,9 +1291,7 @@ function* instantiateClassGen(className, args, state, callDepth, loc) {
         fields: Object.create(null),
         __fieldScopes: Object.create(null),
     };
-    const constructor = (declaration.constructors || []).find(
-        candidate => (candidate.parameters || []).length === args.length
-    );
+    const constructor = selectByArity(declaration.constructors || [], args.length);
     if (!constructor && ((declaration.constructors || []).length > 0 || args.length > 0)) {
         throw new Error('No matching constructor for ' + className + '(' + args.length + ' arguments)');
     }
@@ -1306,8 +1305,9 @@ function* invokeConstructorGen(declaration, constructor, args, receiver, state, 
     }
     const constructorScope = new Map([['this', receiver]]);
     if (constructor) {
+        const boundArgs = bindArguments(constructor.parameters, args);
         for (let i = 0; i < constructor.parameters.length; i++) {
-            constructorScope.set(constructor.parameters[i].name, args[i]);
+            constructorScope.set(constructor.parameters[i].name, boundArgs[i]);
         }
     }
     state.frames.push({
@@ -1326,9 +1326,9 @@ function* invokeConstructorGen(declaration, constructor, args, receiver, state, 
             for (const argument of chainingCall.arguments) {
                 chainedArgs.push(yield* evalExpressionGen(argument, state, callDepth));
             }
-            const target = (declaration.constructors || []).find(
-                candidate => candidate !== constructor &&
-                    (candidate.parameters || []).length === chainedArgs.length
+            const target = selectByArity(
+                (declaration.constructors || []).filter(candidate => candidate !== constructor),
+                chainedArgs.length
             );
             if (!target) {
                 throw new Error('No matching constructor for this(...) in ' + declaration.name);
@@ -1401,9 +1401,7 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
     }
     const superDeclaration = state.classes.get(declaration.superClass);
     if (superDeclaration) {
-        const constructor = (superDeclaration.constructors || []).find(
-            candidate => (candidate.parameters || []).length === args.length
-        );
+        const constructor = selectByArity(superDeclaration.constructors || [], args.length);
         if (!constructor && (superDeclaration.constructors || []).length > 0) {
             throw new Error('No matching superclass constructor for ' + declaration.superClass);
         }
@@ -1811,6 +1809,38 @@ function selectMainFunction(candidates) {
     throw new Error('Program must define void main()');
 }
 
+function isVarargsCallable(callable) {
+    const parameters = callable.parameters || [];
+    return parameters.length > 0 && parameters[parameters.length - 1].isVarargs === true;
+}
+
+function acceptsArgumentCount(callable, count) {
+    const parameterCount = (callable.parameters || []).length;
+    return isVarargsCallable(callable) ? count >= parameterCount - 1 : count === parameterCount;
+}
+
+/** Like Java, an exact-arity candidate wins over one that needs varargs packing. */
+function selectByArity(candidates, count) {
+    return candidates.find(candidate =>
+        !isVarargsCallable(candidate) && (candidate.parameters || []).length === count
+    ) ?? candidates.find(candidate =>
+        isVarargsCallable(candidate) && acceptsArgumentCount(candidate, count)
+    ) ?? null;
+}
+
+/**
+ * Packs trailing arguments into the varargs array. An array (or null) passed
+ * directly in the varargs position is used as the array itself, as in Java.
+ */
+function bindArguments(parameters, args) {
+    if (!parameters[parameters.length - 1]?.isVarargs) return args;
+    const fixedCount = parameters.length - 1;
+    const varargsValue = args[fixedCount];
+    const passesArrayDirectly = args.length === parameters.length &&
+        (Array.isArray(varargsValue) || varargsValue === null);
+    return passesArrayDirectly ? args : [...args.slice(0, fixedCount), args.slice(fixedCount)];
+}
+
 function findMethod(state, className, methodName, argumentCount, requireStatic) {
     let current = className;
     const visited = new Set();
@@ -1821,12 +1851,11 @@ function findMethod(state, className, methodName, argumentCount, requireStatic) 
             return null;
         }
 
-        const method = (declaration.methods || []).find(candidate => {
-            const isStatic = (candidate.modifiers || []).includes('static');
-            return candidate.name === methodName &&
-                (candidate.parameters || []).length === argumentCount &&
-                (!requireStatic || isStatic);
-        });
+        const namedMethods = (declaration.methods || []).filter(candidate =>
+            candidate.name === methodName &&
+            (!requireStatic || (candidate.modifiers || []).includes('static'))
+        );
+        const method = selectByArity(namedMethods, argumentCount);
         if (method) {
             return method;
         }

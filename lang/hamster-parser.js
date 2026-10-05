@@ -63,7 +63,6 @@ export class HamsterParserError extends Error {
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
     [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
-    [UnsupportedConstruct.Varargs]: 'Variable-length parameter lists (varargs) are not supported',
 });
 
 function unsupportedConstructError(construct, token) {
@@ -532,14 +531,33 @@ class Parser {
 
     parseParameterList() {
         this.consumeSymbol('(', 'Expected ( before parameter list');
-        const parameters = [];
-        if (!this.checkSymbol(')')) {
-            do {
-                parameters.push(this.parseParameter());
-            } while (this.matchSymbol(','));
-        }
+        const parameters = this.parseParameters();
         this.consumeSymbol(')', 'Expected ) after parameter list');
         return parameters;
+    }
+
+    /** Comma-separated parameters up to (not including) `)`; only the last may be varargs. */
+    parseParameters() {
+        const parameters = [];
+        if (this.checkSymbol(')')) return parameters;
+        do {
+            const parameterToken = this.peek();
+            const parameter = this.parseParameter();
+            if (parameters.some(previous => previous.isVarargs)) {
+                throw new HamsterParserError('Varargs parameter must be last', parameterToken);
+            }
+            parameters.push(parameter);
+        } while (this.matchSymbol(','));
+        return parameters;
+    }
+
+    /** `...` after a parameter type marks a varargs parameter (`int... values`). */
+    matchVarargsEllipsis() {
+        if (!(this.checkSymbol('.') && this.checkNextSymbol('.'))) return false;
+        this.advance();
+        this.advance();
+        this.consumeSymbol('.', 'Expected ... in varargs parameter');
+        return true;
     }
 
     parseThrowsClause() {
@@ -562,12 +580,7 @@ class Parser {
             }
         }
         this.consumeSymbol('(', 'Expected ( after function name');
-        const parameters = [];
-        if (!this.checkSymbol(')')) {
-            do {
-                parameters.push(this.parseParameter());
-            } while (this.matchSymbol(','));
-        }
+        const parameters = this.parseParameters();
         this.consumeSymbol(')', 'Expected ) after parameter list');
         const body = this.parseBlock();
         return {
@@ -589,9 +602,7 @@ class Parser {
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in parameter type');
         }
-        if (this.checkSymbol('.') && this.checkNextSymbol('.')) {
-            throw unsupportedConstructError(UnsupportedConstruct.Varargs, this.peek());
-        }
+        const isVarargs = this.matchVarargsEllipsis();
 
         const nameToken = this.consumeIdentifier('Expected parameter name');
         while (this.matchSymbol('[')) {
@@ -601,6 +612,7 @@ class Parser {
             type: ASTNodeType.Parameter,
             name: nameToken.value,
             paramType: typeToken.value,
+            isVarargs,
             loc: locationFrom(nameToken),
         };
     }
@@ -1869,12 +1881,7 @@ class Parser {
                 return null;
             }
             this.consumeSymbol('(', 'Expected ( after function name');
-            const parameters = [];
-            if (!this.checkSymbol(')')) {
-                do {
-                    parameters.push(this.parseParameter());
-                } while (this.matchSymbol(','));
-            }
+            const parameters = this.parseParameters();
             this.consumeSymbol(')', 'Expected ) after parameter list');
             const body = this.parseBlock();
             return {

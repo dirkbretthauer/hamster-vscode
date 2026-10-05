@@ -1026,7 +1026,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     const knownGapCases = [
         ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
         ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
-        ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
     ];
     for (const [source, code, pattern] of knownGapCases) {
         const error = parseFails(source, pattern);
@@ -1039,7 +1038,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
             'expected a located diagnostic for: ' + source
         );
     }
-    assert.equal(parser.UnsupportedConstruct.Varargs, 'varargs');
     assert.equal(parses('/*class*/ class C { int a = 1, b = 2; }').classes[0].fields.length, 2);
 
     // instanceof is read-only, so debugger hover/watch evaluation allows it (US2, T026).
@@ -1359,6 +1357,85 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     ].join('\n'))), [2, 3]);
     assert.ok(parser.collectProgramErrors('void main() {\n    for (int x : ) {}\n}', { requireMain: false })
         .some(error => error.token?.line === 2), 'malformed for-each must report a located error');
+
+    // ── varargs parameters (002, T017) ──
+    const varargsParameter = parses('/*class*/ class C { void f(int first, int... rest) {} }')
+        .classes[0].methods[0].parameters;
+    assert.deepEqual(varargsParameter.map(parameter => parameter.isVarargs), [false, true]);
+    const addAllMethod = parses(`
+        /*class*/public class Arrays {
+            public static <T> void addAll(Array<? super T> array,
+                    T... elements) {
+                for (T element : elements) {
+                    array.add(element);
+                }
+            }
+        }
+    `).classes[0].methods[0];
+    assert.equal(addAllMethod.parameters[1].isVarargs, true);
+    assert.equal(addAllMethod.parameters[1].paramType, 'T');
+    parseFails('void f(int... a, int b) {} void main() {}', /Varargs parameter must be last/);
+    parseFails('/*class*/ class C { void f(int... a, int b) {} }', /Varargs parameter must be last/);
+    const varargsState = runProgram(parser, runner, `
+        class Box {
+            int count = 0;
+            int total = 0;
+            void add(int value) {
+                count = count + 1;
+                total = total + value;
+            }
+        }
+        class Arrays {
+            static void addAll(Box box, int... elements) {
+                for (int element : elements) {
+                    box.add(element);
+                }
+            }
+        }
+        class Bag {
+            int size;
+            Bag(int... items) { size = items.length; }
+        }
+        int none = -1;
+        int one = -1;
+        int many = -1;
+        int passedArray = -1;
+        int exact = -1;
+        int packed = -1;
+        int packedNone = -1;
+        int boxCount = -1;
+        int boxTotal = -1;
+        int bagSize = -1;
+        int emptyBagSize = -1;
+        int sum(int... values) {
+            int total = 0;
+            for (int value : values) { total = total + value; }
+            return total;
+        }
+        int pick(int value) { return 1; }
+        int pick(int... values) { return 2; }
+        void main() {
+            none = sum();
+            one = sum(1);
+            many = sum(1, 2, 3);
+            passedArray = sum(new int[] { 4, 5 });
+            exact = pick(5);
+            packed = pick(5, 6);
+            packedNone = pick();
+            Box box = new Box();
+            Arrays.addAll(box, 1, 2);
+            boxCount = box.count;
+            boxTotal = box.total;
+            bagSize = new Bag(7, 8, 9).size;
+            emptyBagSize = new Bag().size;
+        }
+    `);
+    const varargsGlobals = varargsState.scopes[0];
+    assert.deepEqual(
+        ['none', 'one', 'many', 'passedArray', 'exact', 'packed', 'packedNone',
+            'boxCount', 'boxTotal', 'bagSize', 'emptyBagSize'].map(name => varargsGlobals.get(name)),
+        [0, 1, 6, 9, 1, 2, 2, 2, 3, 3, 0]
+    );
 
     console.log('Language smoke checks passed');
 })().catch(error => {

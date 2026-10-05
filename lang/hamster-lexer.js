@@ -111,7 +111,6 @@ export class Token {
  */
 export const UnsupportedConstruct = Object.freeze({
     Enum: 'enum',
-    Varargs: 'varargs',
 });
 
 export class HamsterLexerError extends Error {
