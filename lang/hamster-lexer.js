@@ -34,6 +34,7 @@ const KEYWORDS = new Set([
     'final',
     'abstract',
     'synchronized',
+    'instanceof',
     'throws',
     'package',
     'import',

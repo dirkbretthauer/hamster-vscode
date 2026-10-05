@@ -30,6 +30,7 @@ export const ASTNodeType = Object.freeze({
     PrefixExpression: 'PrefixExpression',
     PostfixExpression: 'PostfixExpression',
     CastExpression: 'CastExpression',
+    InstanceofExpression: 'InstanceofExpression',
     Literal: 'Literal',
     Identifier: 'Identifier',
     CallExpression: 'CallExpression',
@@ -1079,13 +1080,45 @@ class Parser {
 
     parseRelational() {
         let expr = this.parseAdditive();
-        while (this.matchOperator('<') || this.matchOperator('>') ||
-               this.matchOperator('<=') || this.matchOperator('>=')) {
-            const operator = this.previous();
-            const right = this.parseAdditive();
-            expr = makeBinary(operator, expr, right);
+        while (true) {
+            if (this.matchKeyword('instanceof')) {
+                expr = this.parseInstanceofRest(expr, this.previous());
+                continue;
+            }
+            if (this.matchOperator('<') || this.matchOperator('>') ||
+                this.matchOperator('<=') || this.matchOperator('>=')) {
+                const operator = this.previous();
+                const right = this.parseAdditive();
+                expr = makeBinary(operator, expr, right);
+                continue;
+            }
+            return expr;
         }
-        return expr;
+    }
+
+    parseInstanceofRest(argument, instanceofToken) {
+        let targetType;
+        if (this.isPrimitiveTypeKeywordAhead()) {
+            const primitiveToken = this.advance();
+            if (!this.checkSymbol('[')) {
+                throw new HamsterParserError('instanceof requires a reference type', primitiveToken);
+            }
+            targetType = primitiveToken.value;
+        } else {
+            targetType = this.consumeQualifiedName('Expected type name after instanceof');
+        }
+        let arrayDimensions = 0;
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in instanceof type');
+            arrayDimensions += 1;
+        }
+        return {
+            type: ASTNodeType.InstanceofExpression,
+            argument,
+            targetType,
+            arrayDimensions,
+            loc: locationFrom(instanceofToken),
+        };
     }
 
     parseAdditive() {

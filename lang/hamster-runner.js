@@ -693,6 +693,9 @@ function* evalExpressionGen(node, state, callDepth) {
             return current;
         }
 
+        case ASTNodeType.InstanceofExpression:
+            return isInstanceOf(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
+
         case ASTNodeType.CastExpression:
             return castValue(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
 
@@ -1101,6 +1104,16 @@ function createNestedArray(lengths, leafValue) {
         return new Array(length).fill(leafValue);
     }
     return Array.from({ length }, () => createNestedArray(innerLengths, leafValue));
+}
+
+function isInstanceOf(value, node, state) {
+    if (value == null) return false;
+    if (node.arrayDimensions > 0) return Array.isArray(value);
+    const targetType = simpleTypeName(node.targetType);
+    if (targetType === 'Object') return true;
+    if (typeof value === 'string') return targetType === 'String';
+    const valueType = runtimeTypeName(value);
+    return valueType !== null && isAssignableToType(state, valueType, targetType);
 }
 
 function castValue(value, node, state) {

@@ -870,6 +870,23 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(synchronizedBlock.lock.type, parser.ASTNodeType.CallExpression);
     assert.deepEqual(parser.collectExecutableLines(synchronizedProgram), [7, 9]);
 
+    // ── instanceof (US1, T010) ──
+    const simpleInstanceof = parser.parseExpression('h instanceof BeuteHamster');
+    assert.equal(simpleInstanceof.type, parser.ASTNodeType.InstanceofExpression);
+    assert.equal(simpleInstanceof.targetType, 'BeuteHamster');
+    assert.equal(simpleInstanceof.arrayDimensions, 0);
+    const instanceofAnd = parser.parseExpression('a instanceof B && c');
+    assert.equal(instanceofAnd.operator, '&&');
+    assert.equal(instanceofAnd.left.type, parser.ASTNodeType.InstanceofExpression);
+    assert.equal(parser.parseExpression('!(a instanceof B)').type, parser.ASTNodeType.UnaryExpression);
+    const arrayInstanceof = parser.parseExpression('x instanceof pkg.Foo[]');
+    assert.equal(arrayInstanceof.targetType, 'pkg.Foo');
+    assert.equal(arrayInstanceof.arrayDimensions, 1);
+    assert.equal(parser.parseExpression('x instanceof Box<T>').targetType, 'Box');
+    assert.equal(parser.parseExpression('x instanceof int[]').targetType, 'int');
+    assert.throws(() => parser.parseExpression('x instanceof int'), /instanceof requires a reference type/);
+    parses('void main() { if (hamster[i] instanceof BeuteHamster) { vor(); } }');
+
     // ── Diagnostics stay precise around the new constructs (US1, T012) ──
     const errorsAt = lines => parser.collectProgramErrors(lines.join('\n'), { requireMain: false });
     assert.ok(errorsAt([
@@ -977,6 +994,47 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         error => error instanceof runner.HamsterLanguageException && error.name === 'MauerDaException'
     );
     assert.equal(uncaughtFinallyState.scopes[0].get('count'), 1);
+
+    // instanceof is read-only, so debugger hover/watch evaluation allows it (US2, T026).
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('value instanceof Object'), expressionState, 1),
+        true
+    );
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('items instanceof int[]'), expressionState, 1),
+        true
+    );
+
+    // ── Runtime: instanceof (US2, T023) ──
+    const instanceofState = runProgram(parser, runner, `
+        interface Marker {}
+        class Base {}
+        class Derived extends Base implements Marker {}
+        class Other {}
+        class MyHamster extends Hamster {}
+        boolean[] results = null;
+        void main() {
+            Base derived = new Derived();
+            Base base = new Base();
+            Base nothing = null;
+            results = new boolean[12];
+            results[0] = derived instanceof Base;
+            results[1] = derived instanceof Derived;
+            results[2] = derived instanceof Marker;
+            results[3] = base instanceof Derived;
+            results[4] = derived instanceof Other;
+            results[5] = nothing instanceof Base;
+            results[6] = "text" instanceof String;
+            results[7] = derived instanceof Object;
+            results[8] = Hamster.getStandardHamster() instanceof Hamster;
+            results[9] = new MyHamster() instanceof Hamster;
+            results[10] = new int[2] instanceof int[];
+            results[11] = new int[2] instanceof Base;
+        }
+    `);
+    assert.deepEqual(instanceofState.scopes[0].get('results'), [
+        true, true, true, false, false, false, true, true, true, true, true, false,
+    ]);
 
     // ── Runtime: generics are erased (US3, T030) ──
     const genericRuntimeSource = `
