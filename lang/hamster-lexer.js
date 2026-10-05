@@ -114,7 +114,6 @@ export const UnsupportedConstruct = Object.freeze({
     MultipleDeclarators: 'multiple-declarators',
     Enum: 'enum',
     ClassLiteral: 'class-literal',
-    LongLiteral: 'long-literal',
     EnhancedFor: 'enhanced-for',
     Varargs: 'varargs',
 });
@@ -172,15 +171,9 @@ export class HamsterLexer {
 
         if (isDigit(ch)) {
             const value = this.readNumber(ch);
+            // A `long` suffix is accepted; values are plain numbers, without 64-bit semantics.
             if (this.peek() === 'L' || this.peek() === 'l') {
                 this.advance();
-                throw new HamsterLexerError(
-                    'long literals are not supported',
-                    startLine,
-                    startColumn,
-                    this.index - startIndex,
-                    UnsupportedConstruct.LongLiteral
-                );
             }
             return new Token(TokenType.INTEGER, value, startLine, startColumn, this.index - startIndex);
         }

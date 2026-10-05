@@ -1031,7 +1031,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
         ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
         ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
-        ['void main() { int x = 0L; }', 'long-literal', /long literals are not supported/],
         ['void main() { for (Hamster h : alle) {} }', 'enhanced-for', /for-each loops are not supported/],
         ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
     ];
@@ -1046,7 +1045,7 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
             'expected a located diagnostic for: ' + source
         );
     }
-    assert.equal(parser.UnsupportedConstruct.LongLiteral, 'long-literal');
+    assert.equal(parser.UnsupportedConstruct.Varargs, 'varargs');
     assert.equal(parses('/*class*/ class C { int a = 1, b = 2; }').classes[0].fields.length, 2);
 
     // instanceof is read-only, so debugger hover/watch evaluation allows it (US2, T026).
@@ -1206,6 +1205,17 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         () => runProgram(parser, runner, 'void main() { synchronized (null) {} }'),
         /Cannot synchronize on null/
     );
+
+    // ── long literals (002, T003) ──
+    parses('void main() { int x = 0L; }');
+    const longLiteral = parser.parseExpression('9223372036854775807L');
+    assert.equal(longLiteral.type, parser.ASTNodeType.Literal);
+    assert.equal(longLiteral.value, 9223372036854775807);
+    assert.equal(parser.parseExpression('7l').value, 7);
+    assert.equal(runProgram(parser, runner, `
+        int x = 0;
+        void main() { x = 5L + 1; }
+    `).scopes[0].get('x'), 6);
 
     console.log('Language smoke checks passed');
 })().catch(error => {
