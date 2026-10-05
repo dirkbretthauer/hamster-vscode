@@ -1,4 +1,6 @@
-import { HamsterLexer, HamsterLexerError, TokenType } from './hamster-lexer.js';
+import { HamsterLexer, HamsterLexerError, TokenType, UnsupportedConstruct } from './hamster-lexer.js';
+
+export { UnsupportedConstruct };
 
 export const ASTNodeType = Object.freeze({
     Program: 'Program',
@@ -43,12 +45,30 @@ export const ASTNodeType = Object.freeze({
 });
 
 export class HamsterParserError extends Error {
-    constructor(message, token) {
+    /**
+     * @param {string|null} unsupportedConstruct one of `UnsupportedConstruct`, set only for
+     *   recognised-but-unsupported Java syntax so tools can tell known gaps from real errors.
+     */
+    constructor(message, token, unsupportedConstruct = null) {
         const location = token ? ` (line ${token.line}, column ${token.column})` : '';
         super(message + location);
         this.name = 'HamsterParserError';
         this.token = token;
+        this.unsupportedConstruct = unsupportedConstruct;
     }
+}
+
+const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
+    [UnsupportedConstruct.QualifiedTypeName]: 'Qualified type names are not supported',
+    [UnsupportedConstruct.MultipleDeclarators]: 'Declaring several variables in one statement is not supported',
+    [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
+    [UnsupportedConstruct.ClassLiteral]: 'Class literals (Foo.class) are not supported',
+    [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
+    [UnsupportedConstruct.Varargs]: 'Variable-length parameter lists (varargs) are not supported',
+});
+
+function unsupportedConstructError(construct, token) {
+    return new HamsterParserError(UNSUPPORTED_CONSTRUCT_MESSAGES[construct], token, construct);
 }
 
 export const ProgramType = Object.freeze({
@@ -294,6 +314,7 @@ class Parser {
                     functions.push(...collectClassMethods(declaration));
                     continue;
                 }
+                this.rejectUnsupportedDeclarationAt(this.current);
                 const fn = this.tryParseFunction(true);
                 if (fn) {
                     functions.push(fn);
@@ -368,6 +389,7 @@ class Parser {
             if (this.matchSymbol(';')) {
                 continue;
             }
+            this.rejectUnsupportedDeclarationAt(this.current);
             const memberModifiers = this.parseModifiers();
             if (this.checkSymbol('{')) {
                 if (memberModifiers.some(modifier => modifier !== 'static')) {
@@ -556,11 +578,17 @@ class Parser {
 
     parseParameter() {
         this.skipModifiers();
+        if (this.isQualifiedTypeDeclarationAt(this.current)) {
+            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
+        }
         const typeToken = this.consumeTypeName(false);
 
         // Accept both `Type[] name` and `Type name[]` parameter forms.
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in parameter type');
+        }
+        if (this.checkSymbol('.') && this.checkNextSymbol('.')) {
+            throw unsupportedConstructError(UnsupportedConstruct.Varargs, this.peek());
         }
 
         const nameToken = this.consumeIdentifier('Expected parameter name');
@@ -636,6 +664,9 @@ class Parser {
         }
         if (this.checkKeyword('synchronized') && this.checkNextSymbol('(')) {
             return this.parseSynchronizedStatement();
+        }
+        if (this.isQualifiedTypeDeclarationAt(this.current)) {
+            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
         }
         if (this.isTypeKeywordAhead()) {
             return this.parseVariableDeclaration();
@@ -942,11 +973,15 @@ class Parser {
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
         }
+        if (this.checkSymbol(':')) {
+            throw unsupportedConstructError(UnsupportedConstruct.EnhancedFor, this.peek());
+        }
 
         let initializer = null;
         if (this.matchOperator('=')) {
             initializer = this.parseVariableInitializer();
         }
+        this.rejectMultipleDeclarators();
 
         return {
             type: ASTNodeType.VariableDecl,
@@ -986,6 +1021,7 @@ class Parser {
         if (this.matchOperator('=')) {
             initializer = this.parseVariableInitializer();
         }
+        this.rejectMultipleDeclarators();
         this.consumeSymbol(';', 'Expected ; after variable declaration');
         return {
             type: ASTNodeType.VariableDecl,
@@ -1190,6 +1226,9 @@ class Parser {
                 continue;
             }
             if (this.matchSymbol('.')) {
+                if (this.checkKeyword('class')) {
+                    throw unsupportedConstructError(UnsupportedConstruct.ClassLiteral, this.peek());
+                }
                 const property = this.consumeIdentifier('Expected member name after .');
                 expr = {
                     type: ASTNodeType.MemberExpression,
@@ -1695,6 +1734,7 @@ class Parser {
             if (this.matchOperator('=')) {
                 initializer = this.parseVariableInitializer();
             }
+            this.rejectMultipleDeclarators();
             this.consumeSymbol(';', 'Expected ; after variable declaration');
             return {
                 type: ASTNodeType.VariableDecl,
@@ -1704,8 +1744,59 @@ class Parser {
                 loc: locationFrom(nameToken),
             };
         } catch (error) {
+            // Known gaps are definitive answers, not reasons to try another parse.
+            if (error?.unsupportedConstruct) throw error;
             this.current = checkpoint;
             return null;
+        }
+    }
+
+    /** `a.b.Type name` at `index`: a declaration whose type is a qualified name (a known gap). */
+    isQualifiedTypeDeclarationAt(index) {
+        if (this.tokens[index]?.type !== TokenType.IDENTIFIER) return false;
+        let idx = index + 1;
+        let segments = 1;
+        while (isSymbolToken(this.tokens[idx], '.') && this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
+            idx += 2;
+            segments += 1;
+        }
+        if (segments < 2) return false;
+        idx = this.indexAfterTypeArguments(idx);
+        while (isSymbolToken(this.tokens[idx], '[') && isSymbolToken(this.tokens[idx + 1], ']')) {
+            idx += 2;
+        }
+        return this.tokens[idx]?.type === TokenType.IDENTIFIER;
+    }
+
+    /** `[modifiers] enum Name {` at `index` (a known gap); `enum` is not a keyword in this lexer. */
+    isEnumDeclarationAt(index) {
+        let idx = index;
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx += 1;
+        }
+        const keyword = this.tokens[idx];
+        return keyword?.type === TokenType.IDENTIFIER && keyword.value === 'enum' &&
+            this.tokens[idx + 1]?.type === TokenType.IDENTIFIER &&
+            isSymbolToken(this.tokens[idx + 2], '{');
+    }
+
+    /** Throws the known-gap error for declarations this extension does not support. */
+    rejectUnsupportedDeclarationAt(index) {
+        if (this.isEnumDeclarationAt(index)) {
+            throw unsupportedConstructError(UnsupportedConstruct.Enum, this.tokens[index]);
+        }
+        let idx = index;
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx += 1;
+        }
+        if (this.isQualifiedTypeDeclarationAt(idx)) {
+            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.tokens[idx]);
+        }
+    }
+
+    rejectMultipleDeclarators() {
+        if (this.checkSymbol(',')) {
+            throw unsupportedConstructError(UnsupportedConstruct.MultipleDeclarators, this.peek());
         }
     }
 
@@ -1770,6 +1861,8 @@ class Parser {
                 loc: locationFrom(nameToken),
             };
         } catch (error) {
+            // Known gaps are definitive answers, not reasons to try another parse.
+            if (error?.unsupportedConstruct) throw error;
             this.current = checkpoint;
             return null;
         }

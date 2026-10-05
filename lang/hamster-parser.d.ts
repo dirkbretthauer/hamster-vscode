@@ -7,7 +7,11 @@ export interface HamsterLanguageError extends Error {
     line?: number;
     column?: number;
     length?: number;
+    /** Set only for recognised-but-unsupported Java syntax (a known gap). */
+    unsupportedConstruct?: string | null;
 }
+
+export const UnsupportedConstruct: Readonly<Record<string, string>>;
 
 export const ProgramType: Readonly<Record<string, string>>;
 

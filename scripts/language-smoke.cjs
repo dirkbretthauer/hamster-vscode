@@ -1022,6 +1022,33 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     );
     assert.equal(uncaughtFinallyState.scopes[0].get('count'), 1);
 
+    // ── Known gaps: out-of-scope constructs report a targeted, tagged error (US4, T036) ──
+    const knownGapCases = [
+        ['void main() { reversi.ReversiHamster paul = null; }', 'qualified-type-name', /Qualified type names are not supported/],
+        ['/*class*/ class C { java.util.Calendar c; }', 'qualified-type-name', /Qualified type names are not supported/],
+        ['void main() { Hamster a = null, b = null; }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
+        ['void main() { for (int i = 0, j = 0; i < 1; i++) {} }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
+        ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
+        ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
+        ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
+        ['void main() { int x = 0L; }', 'long-literal', /long literals are not supported/],
+        ['void main() { for (Hamster h : alle) {} }', 'enhanced-for', /for-each loops are not supported/],
+        ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
+    ];
+    for (const [source, code, pattern] of knownGapCases) {
+        const error = parseFails(source, pattern);
+        assert.equal(error.unsupportedConstruct, code, 'unsupportedConstruct for: ' + source);
+        const diagnostics = parser.collectProgramErrors(source, { requireMain: false });
+        assert.ok(
+            diagnostics.some(diagnostic => diagnostic.unsupportedConstruct === code &&
+                (diagnostic.token?.line ?? diagnostic.line) === 1 &&
+                (diagnostic.token?.column ?? diagnostic.column) > 0),
+            'expected a located diagnostic for: ' + source
+        );
+    }
+    assert.equal(parser.UnsupportedConstruct.LongLiteral, 'long-literal');
+    assert.equal(parses('/*class*/ class C { int a = 1, b = 2; }').classes[0].fields.length, 2);
+
     // instanceof is read-only, so debugger hover/watch evaluation allows it (US2, T026).
     assert.equal(
         runner.evaluateExpression(parser.parseExpression('value instanceof Object'), expressionState, 1),
