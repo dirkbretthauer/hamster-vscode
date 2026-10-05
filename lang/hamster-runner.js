@@ -136,6 +136,7 @@ export function createRunnerState(ast, runtime, classModules = []) {
     const staticInitializers = [];
     const staticInitializersByClass = new Map();
     const classInitialization = new Map();
+    const enumConstants = new Map();
     const declarations = [
         ...(ast.classes || []),
         ...classModules.flatMap(moduleAst => moduleAst.classes || []),
@@ -160,6 +161,12 @@ export function createRunnerState(ast, runtime, classModules = []) {
                     });
                 }
             }
+        }
+        if (declaration.isEnum) {
+            // Enum constants are fixed singletons, created eagerly as their static fields.
+            const constants = createEnumConstants(declaration);
+            enumConstants.set(declaration.name, constants);
+            constants.forEach(constant => classFields.set(constant.name, constant));
         }
         staticFields.set(declaration.name, classFields);
         for (const initializer of declaration.initializerBlocks || []) {
@@ -200,6 +207,8 @@ export function createRunnerState(ast, runtime, classModules = []) {
         frames: [],
         // One canonical value per class name, so `Foo.class == Foo.class` holds.
         classLiterals: new Map(),
+        // Enum name → its constants in declaration order.
+        enumConstants,
         generator: null,
     };
 
@@ -527,7 +536,11 @@ function* executeStatementGen(node, state, callDepth) {
                     defaultIndex = i;
                     continue;
                 }
-                const caseValue = yield* evalExpressionGen(switchCase.test, state, callDepth);
+                // Java writes enum case labels unqualified (`case NORD:`), resolved against the switched enum.
+                const caseValue = discriminant?.__kind === 'enum' &&
+                    switchCase.test.type === ASTNodeType.Identifier
+                    ? enumConstantNamed(state, discriminant.__className, switchCase.test.name)
+                    : yield* evalExpressionGen(switchCase.test, state, callDepth);
                 if (javaEquals(discriminant, caseValue)) {
                     startIndex = i;
                     break;
@@ -813,6 +826,13 @@ function* evalCallExpressionGen(node, state, callDepth) {
 
         if (methodName === 'getClass' && args.length === 0 && runtimeTypeName(receiver)) {
             return classLiteralFor(state, runtimeTypeName(receiver));
+        }
+
+        if (receiver?.__kind === 'enum') {
+            return invokeEnumMethod(receiver, methodName, args);
+        }
+        if (receiver?.__kind === 'class' && state.classes.get(receiver.name)?.isEnum) {
+            return invokeEnumStaticMethod(state, receiver.name, methodName, args);
         }
 
         if (receiver?.__kind === 'exception' ||
@@ -1169,6 +1189,45 @@ function constantInitializerValue(initializer) {
     return { isConstant: true, value: values };
 }
 
+/** Frozen singleton per constant; `toString` makes string concatenation print the name, as in Java. */
+function createEnumConstants(declaration) {
+    return declaration.enumConstants.map((name, ordinal) => Object.freeze({
+        __kind: 'enum',
+        __className: declaration.name,
+        name,
+        ordinal,
+        toString: () => name,
+    }));
+}
+
+function enumConstantNamed(state, enumName, constantName) {
+    const constant = state.enumConstants.get(enumName).find(candidate => candidate.name === constantName);
+    if (!constant) {
+        throw new Error('No enum constant ' + enumName + '.' + constantName);
+    }
+    return constant;
+}
+
+function invokeEnumMethod(constant, methodName, args) {
+    switch (methodName) {
+        case 'name':
+        case 'toString': return constant.name;
+        case 'ordinal':
+        case 'hashCode': return constant.ordinal;
+        case 'equals': return args[0] === constant;
+        case 'compareTo': return constant.ordinal - args[0].ordinal;
+        default: throw new Error('Unknown method ' + constant.__className + '.' + methodName);
+    }
+}
+
+function invokeEnumStaticMethod(state, enumName, methodName, args) {
+    switch (methodName) {
+        case 'values': return [...state.enumConstants.get(enumName)];
+        case 'valueOf': return enumConstantNamed(state, enumName, String(args[0]));
+        default: throw new Error('Unknown method ' + enumName + '.' + methodName);
+    }
+}
+
 /** Only arrays are iterable until Java collections are provided by the runtime. */
 function forEachArray(value) {
     if (value == null) {
@@ -1281,6 +1340,9 @@ function* instantiateClassGen(className, args, state, callDepth, loc) {
     const declaration = state.classes.get(className);
     if (!declaration || declaration.type !== ASTNodeType.ClassDecl) {
         throw new Error('Cannot instantiate unknown or non-class type ' + className);
+    }
+    if (declaration.isEnum) {
+        throw new Error('Cannot instantiate enum ' + className);
     }
     if ((declaration.modifiers || []).includes('abstract')) {
         throw new Error('Cannot instantiate abstract class ' + className);

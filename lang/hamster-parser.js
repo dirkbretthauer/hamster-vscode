@@ -62,7 +62,7 @@ export class HamsterParserError extends Error {
 }
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
-    [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
+    [UnsupportedConstruct.EnumBody]: 'Enums with constructors, fields, or methods are not supported',
 });
 
 function unsupportedConstructError(construct, token) {
@@ -318,7 +318,10 @@ class Parser {
                     functions.push(...collectClassMethods(declaration));
                     continue;
                 }
-                this.rejectUnsupportedDeclarationAt(this.current);
+                if (this.isEnumDeclarationAt(this.current)) {
+                    classes.push(this.parseEnumDeclaration());
+                    continue;
+                }
                 const fn = this.tryParseFunction(true);
                 if (fn) {
                     functions.push(fn);
@@ -393,7 +396,10 @@ class Parser {
             if (this.matchSymbol(';')) {
                 continue;
             }
-            this.rejectUnsupportedDeclarationAt(this.current);
+            if (this.isEnumDeclarationAt(this.current)) {
+                nestedClasses.push(this.parseEnumDeclaration());
+                continue;
+            }
             const memberModifiers = this.parseModifiers();
             if (this.checkSymbol('{')) {
                 if (memberModifiers.some(modifier => modifier !== 'static')) {
@@ -1819,7 +1825,7 @@ class Parser {
         }
     }
 
-    /** `[modifiers] enum Name {` at `index` (a known gap); `enum` is not a keyword in this lexer. */
+    /** `[modifiers] enum Name {` at `index`; `enum` is not a keyword in this lexer. */
     isEnumDeclarationAt(index) {
         let idx = index;
         while (this.isModifierToken(this.tokens[idx])) {
@@ -1831,11 +1837,46 @@ class Parser {
             isSymbolToken(this.tokens[idx + 2], '{');
     }
 
-    /** Throws the known-gap error for declarations this extension does not support. */
-    rejectUnsupportedDeclarationAt(index) {
-        if (this.isEnumDeclarationAt(index)) {
-            throw unsupportedConstructError(UnsupportedConstruct.Enum, this.tokens[index]);
+    /**
+     * A constant-only enum (`enum Name { A, B, }`), represented as a class
+     * declaration with `isEnum` so static access, `instanceof`, and nesting reuse
+     * the class machinery. Constructors, constant bodies, and members are a
+     * tagged known gap.
+     */
+    parseEnumDeclaration() {
+        const modifiers = this.parseModifiers();
+        const enumToken = this.advance();
+        const nameToken = this.consumeIdentifier('Expected enum name');
+        this.consumeSymbol('{', 'Expected { to start enum body');
+        const enumConstants = [];
+        while (!this.checkSymbol('}') && !this.checkSymbol(';')) {
+            const constantToken = this.consumeIdentifier('Expected enum constant name');
+            if (this.checkSymbol('(') || this.checkSymbol('{')) {
+                throw unsupportedConstructError(UnsupportedConstruct.EnumBody, this.peek());
+            }
+            enumConstants.push(constantToken.value);
+            if (!this.matchSymbol(',')) break;
         }
+        if (this.matchSymbol(';') && !this.checkSymbol('}')) {
+            throw unsupportedConstructError(UnsupportedConstruct.EnumBody, this.peek());
+        }
+        this.consumeSymbol('}', 'Expected } to close enum body');
+        return {
+            type: ASTNodeType.ClassDecl,
+            name: nameToken.value,
+            isEnum: true,
+            enumConstants,
+            typeParameters: [],
+            superClass: null,
+            interfaces: [],
+            modifiers,
+            fields: [],
+            constructors: [],
+            methods: [],
+            nestedClasses: [],
+            initializerBlocks: [],
+            loc: locationFrom(enumToken),
+        };
     }
 
     isFunctionAhead() {

@@ -1024,8 +1024,9 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 
     // ── Known gaps: out-of-scope constructs report a targeted, tagged error (US4, T036) ──
     const knownGapCases = [
-        ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
-        ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
+        ['/*object-oriented program*/enum E { A(1) } void main() {}', 'enum-body', /Enums with constructors, fields, or methods are not supported/],
+        ['/*class*/ class C { enum E { A; void f() {} } }', 'enum-body', /Enums with constructors, fields, or methods are not supported/],
+        ['/*class*/ enum E { A { } }', 'enum-body', /Enums with constructors, fields, or methods are not supported/],
     ];
     for (const [source, code, pattern] of knownGapCases) {
         const error = parseFails(source, pattern);
@@ -1436,6 +1437,88 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
             'boxCount', 'boxTotal', 'bagSize', 'emptyBagSize'].map(name => varargsGlobals.get(name)),
         [0, 1, 6, 9, 1, 2, 2, 2, 3, 3, 0]
     );
+
+    // ── Constant-only enums (002, T020) ──
+    assert.equal(parser.UnsupportedConstruct.EnumBody, 'enum-body');
+    const topLevelEnum = parses('/*object-oriented program*/enum Richtung { NORD, WEST, SUED, OST } void main() {}').classes[0];
+    assert.equal(topLevelEnum.isEnum, true);
+    assert.equal(topLevelEnum.name, 'Richtung');
+    assert.deepEqual(topLevelEnum.enumConstants, ['NORD', 'WEST', 'SUED', 'OST']);
+    assert.deepEqual(parses('/*class*/ enum E { A, B, }').classes[0].enumConstants, ['A', 'B']);
+    assert.deepEqual(parses('/*class*/ public enum E { A, B; }').classes[0].enumConstants, ['A', 'B']);
+    assert.deepEqual(parses('/*class*/ enum E {}').classes[0].enumConstants, []);
+    const nestedEnum = parses('/*class*/ class C { enum Farbe { ROT, BLAU } }').classes[0].nestedClasses[0];
+    assert.equal(nestedEnum.isEnum, true);
+    parseFails('/*object-oriented program*/enum E { , } void main() {}', /Expected enum constant name/);
+    const enumState = runProgram(parser, runner, `
+        enum Richtung { NORD, WEST, SUED, OST }
+        class Kompass {
+            Richtung richtung;
+            Kompass(Richtung r) { richtung = r; }
+            boolean zeigtNachWesten() { return richtung == Richtung.WEST; }
+        }
+        boolean sameConstant = false;
+        boolean different = false;
+        String name = "";
+        int ordinal = -1;
+        String text = "";
+        String concatenated = "";
+        int count = -1;
+        String order = "";
+        boolean freshCopy = false;
+        boolean fromValueOf = false;
+        int compared = 0;
+        boolean westward = false;
+        int switched = -1;
+        boolean isRichtung = false;
+        boolean equalsCheck = false;
+        void main() {
+            Richtung r = Richtung.OST;
+            sameConstant = r == Richtung.OST;
+            different = r != Richtung.WEST;
+            name = r.name();
+            ordinal = r.ordinal();
+            text = r.toString();
+            concatenated = "" + r;
+            Richtung[] all = Richtung.values();
+            count = all.length;
+            for (Richtung each : all) { order = order + each.name() + ","; }
+            all[0] = null;
+            freshCopy = Richtung.values()[0] == Richtung.NORD;
+            fromValueOf = Richtung.valueOf("SUED") == Richtung.SUED;
+            compared = Richtung.NORD.compareTo(Richtung.SUED);
+            westward = new Kompass(Richtung.WEST).zeigtNachWesten();
+            switch (r) {
+                case NORD: switched = 0; break;
+                case OST: switched = 3; break;
+                default: switched = 9;
+            }
+            isRichtung = r instanceof Richtung;
+            equalsCheck = r.equals(Richtung.OST);
+        }
+    `);
+    const enumGlobals = enumState.scopes[0];
+    assert.deepEqual(
+        ['sameConstant', 'different', 'name', 'ordinal', 'text', 'concatenated', 'count', 'order',
+            'freshCopy', 'fromValueOf', 'compared', 'westward', 'switched', 'isRichtung', 'equalsCheck']
+            .map(globalName => enumGlobals.get(globalName)),
+        [true, true, 'OST', 3, 'OST', 'OST', 4, 'NORD,WEST,SUED,OST,', true, true, -2, true, 3, true, true]
+    );
+    assert.throws(
+        () => runProgram(parser, runner, 'enum Richtung { NORD } void main() { Richtung r = Richtung.valueOf("X"); }'),
+        /No enum constant Richtung\.X/
+    );
+    assert.throws(
+        () => runProgram(parser, runner, 'enum Richtung { NORD } void main() { Object r = new Richtung(); }'),
+        /Cannot instantiate enum Richtung/
+    );
+    const enumModuleState = runner.createRunnerState(
+        parses('int position = -1; void main() { position = Farbe.BLAU.ordinal(); }'),
+        createRuntime(),
+        [parser.parseProgram('/*class*/ public enum Farbe { ROT, BLAU }', { requireMain: false, strict: true })]
+    );
+    while (runner.executeRunnerStep(enumModuleState)) {}
+    assert.equal(enumModuleState.scopes[0].get('position'), 1);
 
     console.log('Language smoke checks passed');
 })().catch(error => {

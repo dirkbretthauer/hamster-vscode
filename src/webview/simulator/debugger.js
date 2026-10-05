@@ -14,7 +14,8 @@ function dbgFormatValue(v) {
     if (v === null || v === undefined) return String(v);
     if (typeof v === 'object') {
         if (v.__kind === 'hamster') return 'Hamster #' + v.id;
-        if (v.__kind === 'class') return 'class ' + (v.name || '');
+        if (v.__kind === 'class' || v.__kind === 'classLiteral') return 'class ' + (v.name || '');
+        if (v.__kind === 'enum') return v.__className + '.' + v.name;
         try { return JSON.stringify(v); } catch (e) { return String(v); }
     }
     if (typeof v === 'string') return JSON.stringify(v);

@@ -110,7 +110,7 @@ export class Token {
  * Errors carrying one of these codes are known gaps rather than parse bugs.
  */
 export const UnsupportedConstruct = Object.freeze({
-    Enum: 'enum',
+    EnumBody: 'enum-body',
 });
 
 export class HamsterLexerError extends Error {
