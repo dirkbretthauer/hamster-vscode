@@ -1547,16 +1547,8 @@ class Parser {
 
     isFunctionAhead() {
         let idx = this.current;
-        // skip modifiers
-        while (idx < this.tokens.length) {
-            const t = this.tokens[idx];
-            if (t.type === TokenType.KEYWORD && (t.value === 'public' || t.value === 'private' ||
-                t.value === 'protected' || t.value === 'static' || t.value === 'final' ||
-                t.value === 'abstract')) {
-                idx++;
-            } else {
-                break;
-            }
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx++;
         }
         // skip return type
         const typeToken = this.tokens[idx];
