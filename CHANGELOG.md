@@ -2,16 +2,24 @@
 
 ## Unreleased — Full Sample-Program Parsing
 
-- All 904 in-scope Java-like sample programs of the reference Hamster Simulator now parse without false errors
+- All 920 Java-like sample programs of the reference Hamster Simulator now parse without false errors
+- Formerly unsupported constructs now work:
+  - constant-only `enum`s with `values()`, `valueOf()`, `name()`, `ordinal()`, and `switch` over enum constants
+  - for-each loops over arrays
+  - varargs parameters (`int... values`)
+  - class literals `Foo.class` and `getClass()`
+  - several variables in one declaration (`A a = null, b = null;`)
+  - qualified type names (`java.util.Calendar c`, `new pkg.Type()`), resolved by simple name
+  - `long` literals (`0L`), as plain numbers
+- Enums with constructors, fields, or methods still report a clear "not supported" error
 - New language support:
   - generics (type arguments, wildcards, generic classes/interfaces/methods; erased at runtime)
   - `synchronized` methods and blocks
   - `try` with several `catch` clauses and `finally`
   - `instanceof`
   - array initializers (`{ 1, 2 }`, `new int[] { … }`)
-- Clear "… is not supported" messages instead of generic syntax errors for: qualified type names, several variables in one declaration, `enum`, `Foo.class`, for-each loops, varargs, and `long` literals
 - Runtime errors now name the missing Java library class (e.g. `ArrayList`) or say that hamster threads are not supported
-- Syntax highlighting for `finally`, `instanceof`, and `synchronized`
+- Syntax highlighting for `finally`, `instanceof`, `synchronized`, and `enum`
 - `npm run conformance` reports known gaps separately and can require a 100% in-scope pass rate
 
 ## 0.4.0 — Compile Button & Debugger Integration

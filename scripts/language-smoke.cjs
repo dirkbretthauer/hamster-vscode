@@ -1024,16 +1024,9 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 
     // ── Known gaps: out-of-scope constructs report a targeted, tagged error (US4, T036) ──
     const knownGapCases = [
-        ['void main() { reversi.ReversiHamster paul = null; }', 'qualified-type-name', /Qualified type names are not supported/],
-        ['/*class*/ class C { java.util.Calendar c; }', 'qualified-type-name', /Qualified type names are not supported/],
-        ['void main() { Hamster a = null, b = null; }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
-        ['void main() { for (int i = 0, j = 0; i < 1; i++) {} }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
-        ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
-        ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
-        ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
-        ['void main() { int x = 0L; }', 'long-literal', /long literals are not supported/],
-        ['void main() { for (Hamster h : alle) {} }', 'enhanced-for', /for-each loops are not supported/],
-        ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
+        ['/*object-oriented program*/enum E { A(1) } void main() {}', 'enum-body', /Enums with constructors, fields, or methods are not supported/],
+        ['/*class*/ class C { enum E { A; void f() {} } }', 'enum-body', /Enums with constructors, fields, or methods are not supported/],
+        ['/*class*/ enum E { A { } }', 'enum-body', /Enums with constructors, fields, or methods are not supported/],
     ];
     for (const [source, code, pattern] of knownGapCases) {
         const error = parseFails(source, pattern);
@@ -1046,7 +1039,6 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
             'expected a located diagnostic for: ' + source
         );
     }
-    assert.equal(parser.UnsupportedConstruct.LongLiteral, 'long-literal');
     assert.equal(parses('/*class*/ class C { int a = 1, b = 2; }').classes[0].fields.length, 2);
 
     // instanceof is read-only, so debugger hover/watch evaluation allows it (US2, T026).
@@ -1206,6 +1198,327 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         () => runProgram(parser, runner, 'void main() { synchronized (null) {} }'),
         /Cannot synchronize on null/
     );
+
+    // ── long literals (002, T003) ──
+    parses('void main() { int x = 0L; }');
+    const longLiteral = parser.parseExpression('9223372036854775807L');
+    assert.equal(longLiteral.type, parser.ASTNodeType.Literal);
+    assert.equal(longLiteral.value, 9223372036854775807);
+    assert.equal(parser.parseExpression('7l').value, 7);
+    assert.equal(runProgram(parser, runner, `
+        int x = 0;
+        void main() { x = 5L + 1; }
+    `).scopes[0].get('x'), 6);
+
+    // ── Several declarators in one declaration (002, T005) ──
+    const declarationGroup = findNode(parses('void main() { MeinHamster paul = null, willi = null; }'),
+        node => node.type === parser.ASTNodeType.VariableDeclarationGroup);
+    assert.deepEqual(declarationGroup.declarations.map(declaration => declaration.name), ['paul', 'willi']);
+    assert.ok(declarationGroup.declarations.every(declaration => declaration.varType === 'MeinHamster'));
+    assert.deepEqual(parses('int a = 1, b = 2; void main() {}').globals.map(global => global.name), ['a', 'b']);
+    const declaratorState = runProgram(parser, runner, `
+        int second = 0;
+        int loops = 0;
+        void main() {
+            int a = 1, b = a + 1;
+            second = b;
+            for (int i = 0, j = 3; i < j; i++) {
+                loops = loops + 1;
+            }
+        }
+    `);
+    assert.equal(declaratorState.scopes[0].get('second'), 2);
+    assert.equal(declaratorState.scopes[0].get('loops'), 3);
+    assert.deepEqual(parser.collectExecutableLines(parses([
+        'void main() {',
+        '    int a = 1,',
+        '        b = 2;',
+        '}',
+    ].join('\n'))), [2, 3]);
+
+    // ── Qualified type names resolve by simple name (002, T008) ──
+    const qualifiedLocal = findNode(parses('void main() { reversi.ReversiHamster paul = null; }'),
+        node => node.type === parser.ASTNodeType.VariableDecl);
+    assert.equal(qualifiedLocal.varType, 'ReversiHamster');
+    const qualifiedClass = parses(`
+        /*class*/
+        class C extends pkg.Base implements pkg.Marker, other.Named<T> {
+            java.util.Calendar calendar;
+            a.b.Box make(a.b.Box box) { return box; }
+        }
+    `).classes[0];
+    assert.equal(qualifiedClass.fields[0].varType, 'Calendar');
+    assert.equal(qualifiedClass.methods[0].returnType, 'Box');
+    assert.equal(qualifiedClass.methods[0].parameters[0].paramType, 'Box');
+    assert.equal(qualifiedClass.superClass, 'Base');
+    assert.deepEqual(qualifiedClass.interfaces, ['Marker', 'Named']);
+    assert.equal(findNode(parses('void main() { Territorium.getAnzahlReihen(); }'),
+        node => node.type === parser.ASTNodeType.ExpressionStmt).expression.type, parser.ASTNodeType.CallExpression);
+    assert.equal(findNode(parses('void main() { a.b = 1; }'),
+        node => node.type === parser.ASTNodeType.Assignment).target.type, parser.ASTNodeType.MemberExpression);
+    const qualifiedState = runProgram(parser, runner, `
+        class Box {
+            int value;
+            Box(int v) { value = v; }
+            int get() { return value; }
+        }
+        class Outer {
+            class Inner {
+                int answer() { return 42; }
+            }
+        }
+        int result = 0;
+        int nested = 0;
+        void main() {
+            pkg.Box b = new pkg.Box(4);
+            result = b.get();
+            Outer.Inner inner = new Outer.Inner();
+            nested = inner.answer();
+        }
+    `);
+    assert.equal(qualifiedState.scopes[0].get('result'), 4);
+    assert.equal(qualifiedState.scopes[0].get('nested'), 42);
+
+    // ── Class literals and getClass() (002, T011) ──
+    const isClassLiteral = node => node.type === parser.ASTNodeType.ClassLiteral;
+    assert.equal(findNode(parses('void main() { Object o = Hamster.class; }'), isClassLiteral).typeName, 'Hamster');
+    assert.equal(parser.parseExpression('pkg.Foo.class').typeName, 'Foo');
+    const classLiteralState = runProgram(parser, runner, `
+        class Foo {}
+        class Bar {}
+        boolean same = false;
+        boolean fooMatches = false;
+        boolean barMatches = true;
+        boolean missingSame = false;
+        int locked = 0;
+        void main() {
+            same = Foo.class == Foo.class;
+            fooMatches = new Foo().getClass() == Foo.class;
+            barMatches = new Bar().getClass() == Foo.class;
+            missingSame = Missing.class == Missing.class;
+            synchronized (Foo.class) { locked = locked + 1; }
+        }
+    `);
+    const classLiteralGlobals = classLiteralState.scopes[0];
+    assert.equal(classLiteralGlobals.get('same'), true);
+    assert.equal(classLiteralGlobals.get('fooMatches'), true);
+    assert.equal(classLiteralGlobals.get('barMatches'), false);
+    assert.equal(classLiteralGlobals.get('missingSame'), true);
+    assert.equal(classLiteralGlobals.get('locked'), 1);
+    parseFails('void main() { Object o = (a + b).class; }', /Expected type name before \.class/);
+
+    // ── for-each loops over arrays (002, T014) ──
+    const forEachNode = findNode(parses('/*class*/ class C { Belegung[] belegungen; void f() { for (Belegung b : this.belegungen) {} } }'),
+        node => node.type === parser.ASTNodeType.ForEachStatement);
+    assert.equal(forEachNode.varType, 'Belegung');
+    assert.equal(forEachNode.name, 'b');
+    assert.equal(forEachNode.iterable.type, parser.ASTNodeType.MemberExpression);
+    const forEachState = runProgram(parser, runner, `
+        int sum = 0;
+        int firstOnly = 0;
+        int found = 0;
+        int nestedSum = 0;
+        int findFirstAbove(int[] values, int limit) {
+            for (int value : values) {
+                if (value > limit) return value;
+            }
+            return -1;
+        }
+        void main() {
+            int[] xs = { 1, 2, 3 };
+            for (int x : xs) { sum = sum + x; }
+            for (int x : xs) { firstOnly = firstOnly + x; break; }
+            found = findFirstAbove(xs, 1);
+            int[][] grid = { { 1, 2 }, { 3 } };
+            for (int[] row : grid) {
+                for (int cell : row) { nestedSum = nestedSum + cell; }
+            }
+        }
+    `);
+    const forEachGlobals = forEachState.scopes[0];
+    assert.equal(forEachGlobals.get('sum'), 6);
+    assert.equal(forEachGlobals.get('firstOnly'), 1);
+    assert.equal(forEachGlobals.get('found'), 2);
+    assert.equal(forEachGlobals.get('nestedSum'), 6);
+    assert.equal(forEachState.scopes.length, 1);
+    assert.throws(
+        () => runProgram(parser, runner, 'void main() { int[] xs = null; for (int x : xs) {} }'),
+        /Cannot iterate over null/
+    );
+    assert.throws(
+        () => runProgram(parser, runner, 'void main() { for (Kachel k : new HashSet()) {} }'),
+        /for-each over HashSet is not supported \(only arrays\)/
+    );
+    assert.deepEqual(parser.collectExecutableLines(parses([
+        'void main() {',
+        '    for (int x : xs) {',
+        '        vor();',
+        '    }',
+        '}',
+    ].join('\n'))), [2, 3]);
+    assert.ok(parser.collectProgramErrors('void main() {\n    for (int x : ) {}\n}', { requireMain: false })
+        .some(error => error.token?.line === 2), 'malformed for-each must report a located error');
+
+    // ── varargs parameters (002, T017) ──
+    const varargsParameter = parses('/*class*/ class C { void f(int first, int... rest) {} }')
+        .classes[0].methods[0].parameters;
+    assert.deepEqual(varargsParameter.map(parameter => parameter.isVarargs), [false, true]);
+    const addAllMethod = parses(`
+        /*class*/public class Arrays {
+            public static <T> void addAll(Array<? super T> array,
+                    T... elements) {
+                for (T element : elements) {
+                    array.add(element);
+                }
+            }
+        }
+    `).classes[0].methods[0];
+    assert.equal(addAllMethod.parameters[1].isVarargs, true);
+    assert.equal(addAllMethod.parameters[1].paramType, 'T');
+    parseFails('void f(int... a, int b) {} void main() {}', /Varargs parameter must be last/);
+    parseFails('/*class*/ class C { void f(int... a, int b) {} }', /Varargs parameter must be last/);
+    const varargsState = runProgram(parser, runner, `
+        class Box {
+            int count = 0;
+            int total = 0;
+            void add(int value) {
+                count = count + 1;
+                total = total + value;
+            }
+        }
+        class Arrays {
+            static void addAll(Box box, int... elements) {
+                for (int element : elements) {
+                    box.add(element);
+                }
+            }
+        }
+        class Bag {
+            int size;
+            Bag(int... items) { size = items.length; }
+        }
+        int none = -1;
+        int one = -1;
+        int many = -1;
+        int passedArray = -1;
+        int exact = -1;
+        int packed = -1;
+        int packedNone = -1;
+        int boxCount = -1;
+        int boxTotal = -1;
+        int bagSize = -1;
+        int emptyBagSize = -1;
+        int sum(int... values) {
+            int total = 0;
+            for (int value : values) { total = total + value; }
+            return total;
+        }
+        int pick(int value) { return 1; }
+        int pick(int... values) { return 2; }
+        void main() {
+            none = sum();
+            one = sum(1);
+            many = sum(1, 2, 3);
+            passedArray = sum(new int[] { 4, 5 });
+            exact = pick(5);
+            packed = pick(5, 6);
+            packedNone = pick();
+            Box box = new Box();
+            Arrays.addAll(box, 1, 2);
+            boxCount = box.count;
+            boxTotal = box.total;
+            bagSize = new Bag(7, 8, 9).size;
+            emptyBagSize = new Bag().size;
+        }
+    `);
+    const varargsGlobals = varargsState.scopes[0];
+    assert.deepEqual(
+        ['none', 'one', 'many', 'passedArray', 'exact', 'packed', 'packedNone',
+            'boxCount', 'boxTotal', 'bagSize', 'emptyBagSize'].map(name => varargsGlobals.get(name)),
+        [0, 1, 6, 9, 1, 2, 2, 2, 3, 3, 0]
+    );
+
+    // ── Constant-only enums (002, T020) ──
+    assert.equal(parser.UnsupportedConstruct.EnumBody, 'enum-body');
+    const topLevelEnum = parses('/*object-oriented program*/enum Richtung { NORD, WEST, SUED, OST } void main() {}').classes[0];
+    assert.equal(topLevelEnum.isEnum, true);
+    assert.equal(topLevelEnum.name, 'Richtung');
+    assert.deepEqual(topLevelEnum.enumConstants, ['NORD', 'WEST', 'SUED', 'OST']);
+    assert.deepEqual(parses('/*class*/ enum E { A, B, }').classes[0].enumConstants, ['A', 'B']);
+    assert.deepEqual(parses('/*class*/ public enum E { A, B; }').classes[0].enumConstants, ['A', 'B']);
+    assert.deepEqual(parses('/*class*/ enum E {}').classes[0].enumConstants, []);
+    const nestedEnum = parses('/*class*/ class C { enum Farbe { ROT, BLAU } }').classes[0].nestedClasses[0];
+    assert.equal(nestedEnum.isEnum, true);
+    parseFails('/*object-oriented program*/enum E { , } void main() {}', /Expected enum constant name/);
+    const enumState = runProgram(parser, runner, `
+        enum Richtung { NORD, WEST, SUED, OST }
+        class Kompass {
+            Richtung richtung;
+            Kompass(Richtung r) { richtung = r; }
+            boolean zeigtNachWesten() { return richtung == Richtung.WEST; }
+        }
+        boolean sameConstant = false;
+        boolean different = false;
+        String name = "";
+        int ordinal = -1;
+        String text = "";
+        String concatenated = "";
+        int count = -1;
+        String order = "";
+        boolean freshCopy = false;
+        boolean fromValueOf = false;
+        int compared = 0;
+        boolean westward = false;
+        int switched = -1;
+        boolean isRichtung = false;
+        boolean equalsCheck = false;
+        void main() {
+            Richtung r = Richtung.OST;
+            sameConstant = r == Richtung.OST;
+            different = r != Richtung.WEST;
+            name = r.name();
+            ordinal = r.ordinal();
+            text = r.toString();
+            concatenated = "" + r;
+            Richtung[] all = Richtung.values();
+            count = all.length;
+            for (Richtung each : all) { order = order + each.name() + ","; }
+            all[0] = null;
+            freshCopy = Richtung.values()[0] == Richtung.NORD;
+            fromValueOf = Richtung.valueOf("SUED") == Richtung.SUED;
+            compared = Richtung.NORD.compareTo(Richtung.SUED);
+            westward = new Kompass(Richtung.WEST).zeigtNachWesten();
+            switch (r) {
+                case NORD: switched = 0; break;
+                case OST: switched = 3; break;
+                default: switched = 9;
+            }
+            isRichtung = r instanceof Richtung;
+            equalsCheck = r.equals(Richtung.OST);
+        }
+    `);
+    const enumGlobals = enumState.scopes[0];
+    assert.deepEqual(
+        ['sameConstant', 'different', 'name', 'ordinal', 'text', 'concatenated', 'count', 'order',
+            'freshCopy', 'fromValueOf', 'compared', 'westward', 'switched', 'isRichtung', 'equalsCheck']
+            .map(globalName => enumGlobals.get(globalName)),
+        [true, true, 'OST', 3, 'OST', 'OST', 4, 'NORD,WEST,SUED,OST,', true, true, -2, true, 3, true, true]
+    );
+    assert.throws(
+        () => runProgram(parser, runner, 'enum Richtung { NORD } void main() { Richtung r = Richtung.valueOf("X"); }'),
+        /No enum constant Richtung\.X/
+    );
+    assert.throws(
+        () => runProgram(parser, runner, 'enum Richtung { NORD } void main() { Object r = new Richtung(); }'),
+        /Cannot instantiate enum Richtung/
+    );
+    const enumModuleState = runner.createRunnerState(
+        parses('int position = -1; void main() { position = Farbe.BLAU.ordinal(); }'),
+        createRuntime(),
+        [parser.parseProgram('/*class*/ public enum Farbe { ROT, BLAU }', { requireMain: false, strict: true })]
+    );
+    while (runner.executeRunnerStep(enumModuleState)) {}
+    assert.equal(enumModuleState.scopes[0].get('position'), 1);
 
     console.log('Language smoke checks passed');
 })().catch(error => {

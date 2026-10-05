@@ -136,6 +136,7 @@ export function createRunnerState(ast, runtime, classModules = []) {
     const staticInitializers = [];
     const staticInitializersByClass = new Map();
     const classInitialization = new Map();
+    const enumConstants = new Map();
     const declarations = [
         ...(ast.classes || []),
         ...classModules.flatMap(moduleAst => moduleAst.classes || []),
@@ -160,6 +161,12 @@ export function createRunnerState(ast, runtime, classModules = []) {
                     });
                 }
             }
+        }
+        if (declaration.isEnum) {
+            // Enum constants are fixed singletons, created eagerly as their static fields.
+            const constants = createEnumConstants(declaration);
+            enumConstants.set(declaration.name, constants);
+            constants.forEach(constant => classFields.set(constant.name, constant));
         }
         staticFields.set(declaration.name, classFields);
         for (const initializer of declaration.initializerBlocks || []) {
@@ -198,6 +205,10 @@ export function createRunnerState(ast, runtime, classModules = []) {
         //   { name, loc, scopeIndex, callerLoc }
         // The root frame (main) is pushed by programGenerator.
         frames: [],
+        // One canonical value per class name, so `Foo.class == Foo.class` holds.
+        classLiterals: new Map(),
+        // Enum name → its constants in declaration order.
+        enumConstants,
         generator: null,
     };
 
@@ -496,6 +507,22 @@ function* executeStatementGen(node, state, callDepth) {
             return undefined;
         }
 
+        case ASTNodeType.ForEachStatement: {
+            const elements = forEachArray(yield* evalExpressionGen(node.iterable, state, callDepth));
+            for (let i = 0; i < elements.length; i++) {
+                state.scopes.push(new Map([[node.name, elements[i]]]));
+                let result;
+                try {
+                    result = yield* executeStatementGen(node.body, state, callDepth);
+                } finally {
+                    state.scopes.pop();
+                }
+                if (result instanceof BreakSignal) return undefined;
+                if (result instanceof ReturnSignal) return result;
+            }
+            return undefined;
+        }
+
         case ASTNodeType.ForStatement:
             throw new Error('For statements are not supported at runtime');
 
@@ -509,7 +536,11 @@ function* executeStatementGen(node, state, callDepth) {
                     defaultIndex = i;
                     continue;
                 }
-                const caseValue = yield* evalExpressionGen(switchCase.test, state, callDepth);
+                // Java writes enum case labels unqualified (`case NORD:`), resolved against the switched enum.
+                const caseValue = discriminant?.__kind === 'enum' &&
+                    switchCase.test.type === ASTNodeType.Identifier
+                    ? enumConstantNamed(state, discriminant.__className, switchCase.test.name)
+                    : yield* evalExpressionGen(switchCase.test, state, callDepth);
                 if (javaEquals(discriminant, caseValue)) {
                     startIndex = i;
                     break;
@@ -559,6 +590,13 @@ function* executeStatementGen(node, state, callDepth) {
             declareVariable(state, node.name, value);
             return undefined;
         }
+
+        case ASTNodeType.VariableDeclarationGroup:
+            // No new scope: `int a = 1, b = a;` declares both in the enclosing block.
+            for (const declaration of node.declarations) {
+                yield* executeStatementGen(declaration, state, callDepth);
+            }
+            return undefined;
 
         case ASTNodeType.Assignment: {
             const reference = yield* resolveAssignmentTargetGen(
@@ -702,6 +740,9 @@ function* evalExpressionGen(node, state, callDepth) {
             return elements;
         }
 
+        case ASTNodeType.ClassLiteral:
+            return classLiteralFor(state, node.typeName);
+
         case ASTNodeType.CastExpression:
             return castValue(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
 
@@ -783,6 +824,17 @@ function* evalCallExpressionGen(node, state, callDepth) {
             }
         }
 
+        if (methodName === 'getClass' && args.length === 0 && runtimeTypeName(receiver)) {
+            return classLiteralFor(state, runtimeTypeName(receiver));
+        }
+
+        if (receiver?.__kind === 'enum') {
+            return invokeEnumMethod(receiver, methodName, args);
+        }
+        if (receiver?.__kind === 'class' && state.classes.get(receiver.name)?.isEnum) {
+            return invokeEnumStaticMethod(state, receiver.name, methodName, args);
+        }
+
         if (receiver?.__kind === 'exception' ||
             (receiver?.__className && exceptionMatchesType(receiver, 'Throwable', state))) {
             return invokeExceptionMethod(receiver, methodName, args);
@@ -853,7 +905,7 @@ function* evalCallExpressionGen(node, state, callDepth) {
     const candidates = (state.functions.get(calleeName) || []).filter(
         candidate => candidate.body && !candidate.owner
     );
-    const fn = candidates.find(c => (c.parameters || []).length === args.length);
+    const fn = selectByArity(candidates, args.length);
     if (fn) {
         // Stop on the call site so the debugger highlights the
         // function-call line before stepping into the function.
@@ -901,13 +953,14 @@ function* invokeUserFunctionGen(fn, args, state, callDepth, receiver = null, cla
     if (callDepth > 256) {
         throw new Error('Maximum function call depth exceeded');
     }
-    if ((fn.parameters || []).length !== args.length) {
+    if (!acceptsArgumentCount(fn, args.length)) {
         throw new Error('Function ' + fn.name + ' expects ' + fn.parameters.length + ' arguments but got ' + args.length);
     }
 
     const functionScope = new Map();
+    const boundArgs = bindArguments(fn.parameters, args);
     for (let i = 0; i < fn.parameters.length; i++) {
-        functionScope.set(fn.parameters[i].name, args[i]);
+        functionScope.set(fn.parameters[i].name, boundArgs[i]);
     }
     if (receiver != null) {
         functionScope.set('this', receiver);
@@ -1057,7 +1110,8 @@ function* evalNewExpressionGen(node, state, callDepth) {
     for (const arg of (node.arguments || [])) {
         args.push(yield* evalExpressionGen(arg, state, callDepth));
     }
-    const className = resolveCalleeName(node.callee) || 'Object';
+    // Packages aren't modelled: `new pkg.Type()` and `new Outer.Inner()` resolve by simple name.
+    const className = simpleTypeName(resolveCalleeName(node.callee) || 'Object');
     if (state.classes.has(className)) {
         yield* initializeClassGen(state, className, callDepth, node.loc);
         return yield* instantiateClassGen(className, args, state, callDepth, node.loc);
@@ -1133,6 +1187,66 @@ function constantInitializerValue(initializer) {
         values.push(constant.value);
     }
     return { isConstant: true, value: values };
+}
+
+/** Frozen singleton per constant; `toString` makes string concatenation print the name, as in Java. */
+function createEnumConstants(declaration) {
+    return declaration.enumConstants.map((name, ordinal) => Object.freeze({
+        __kind: 'enum',
+        __className: declaration.name,
+        name,
+        ordinal,
+        toString: () => name,
+    }));
+}
+
+function enumConstantNamed(state, enumName, constantName) {
+    const constant = state.enumConstants.get(enumName).find(candidate => candidate.name === constantName);
+    if (!constant) {
+        throw new Error('No enum constant ' + enumName + '.' + constantName);
+    }
+    return constant;
+}
+
+function invokeEnumMethod(constant, methodName, args) {
+    switch (methodName) {
+        case 'name':
+        case 'toString': return constant.name;
+        case 'ordinal':
+        case 'hashCode': return constant.ordinal;
+        case 'equals': return args[0] === constant;
+        case 'compareTo': return constant.ordinal - args[0].ordinal;
+        default: throw new Error('Unknown method ' + constant.__className + '.' + methodName);
+    }
+}
+
+function invokeEnumStaticMethod(state, enumName, methodName, args) {
+    switch (methodName) {
+        case 'values': return [...state.enumConstants.get(enumName)];
+        case 'valueOf': return enumConstantNamed(state, enumName, String(args[0]));
+        default: throw new Error('Unknown method ' + enumName + '.' + methodName);
+    }
+}
+
+/** Only arrays are iterable until Java collections are provided by the runtime. */
+function forEachArray(value) {
+    if (value == null) {
+        throw new Error('Cannot iterate over null');
+    }
+    if (!Array.isArray(value)) {
+        const typeName = runtimeTypeName(value) ?? value.className ?? typeof value;
+        throw new Error(`for-each over ${typeName} is not supported (only arrays)`);
+    }
+    return value;
+}
+
+function classLiteralFor(state, name) {
+    let literal = state.classLiterals.get(name);
+    if (!literal) {
+        literal = Object.freeze({ __kind: 'classLiteral', name, toString: () => 'class ' + name });
+        state.classLiterals.set(name, literal);
+    }
+    return literal;
 }
 
 function isInstanceOf(value, node, state) {
@@ -1227,6 +1341,9 @@ function* instantiateClassGen(className, args, state, callDepth, loc) {
     if (!declaration || declaration.type !== ASTNodeType.ClassDecl) {
         throw new Error('Cannot instantiate unknown or non-class type ' + className);
     }
+    if (declaration.isEnum) {
+        throw new Error('Cannot instantiate enum ' + className);
+    }
     if ((declaration.modifiers || []).includes('abstract')) {
         throw new Error('Cannot instantiate abstract class ' + className);
     }
@@ -1236,9 +1353,7 @@ function* instantiateClassGen(className, args, state, callDepth, loc) {
         fields: Object.create(null),
         __fieldScopes: Object.create(null),
     };
-    const constructor = (declaration.constructors || []).find(
-        candidate => (candidate.parameters || []).length === args.length
-    );
+    const constructor = selectByArity(declaration.constructors || [], args.length);
     if (!constructor && ((declaration.constructors || []).length > 0 || args.length > 0)) {
         throw new Error('No matching constructor for ' + className + '(' + args.length + ' arguments)');
     }
@@ -1252,8 +1367,9 @@ function* invokeConstructorGen(declaration, constructor, args, receiver, state, 
     }
     const constructorScope = new Map([['this', receiver]]);
     if (constructor) {
+        const boundArgs = bindArguments(constructor.parameters, args);
         for (let i = 0; i < constructor.parameters.length; i++) {
-            constructorScope.set(constructor.parameters[i].name, args[i]);
+            constructorScope.set(constructor.parameters[i].name, boundArgs[i]);
         }
     }
     state.frames.push({
@@ -1272,9 +1388,9 @@ function* invokeConstructorGen(declaration, constructor, args, receiver, state, 
             for (const argument of chainingCall.arguments) {
                 chainedArgs.push(yield* evalExpressionGen(argument, state, callDepth));
             }
-            const target = (declaration.constructors || []).find(
-                candidate => candidate !== constructor &&
-                    (candidate.parameters || []).length === chainedArgs.length
+            const target = selectByArity(
+                (declaration.constructors || []).filter(candidate => candidate !== constructor),
+                chainedArgs.length
             );
             if (!target) {
                 throw new Error('No matching constructor for this(...) in ' + declaration.name);
@@ -1347,9 +1463,7 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
     }
     const superDeclaration = state.classes.get(declaration.superClass);
     if (superDeclaration) {
-        const constructor = (superDeclaration.constructors || []).find(
-            candidate => (candidate.parameters || []).length === args.length
-        );
+        const constructor = selectByArity(superDeclaration.constructors || [], args.length);
         if (!constructor && (superDeclaration.constructors || []).length > 0) {
             throw new Error('No matching superclass constructor for ' + declaration.superClass);
         }
@@ -1757,6 +1871,38 @@ function selectMainFunction(candidates) {
     throw new Error('Program must define void main()');
 }
 
+function isVarargsCallable(callable) {
+    const parameters = callable.parameters || [];
+    return parameters.length > 0 && parameters[parameters.length - 1].isVarargs === true;
+}
+
+function acceptsArgumentCount(callable, count) {
+    const parameterCount = (callable.parameters || []).length;
+    return isVarargsCallable(callable) ? count >= parameterCount - 1 : count === parameterCount;
+}
+
+/** Like Java, an exact-arity candidate wins over one that needs varargs packing. */
+function selectByArity(candidates, count) {
+    return candidates.find(candidate =>
+        !isVarargsCallable(candidate) && (candidate.parameters || []).length === count
+    ) ?? candidates.find(candidate =>
+        isVarargsCallable(candidate) && acceptsArgumentCount(candidate, count)
+    ) ?? null;
+}
+
+/**
+ * Packs trailing arguments into the varargs array. An array (or null) passed
+ * directly in the varargs position is used as the array itself, as in Java.
+ */
+function bindArguments(parameters, args) {
+    if (!parameters[parameters.length - 1]?.isVarargs) return args;
+    const fixedCount = parameters.length - 1;
+    const varargsValue = args[fixedCount];
+    const passesArrayDirectly = args.length === parameters.length &&
+        (Array.isArray(varargsValue) || varargsValue === null);
+    return passesArrayDirectly ? args : [...args.slice(0, fixedCount), args.slice(fixedCount)];
+}
+
 function findMethod(state, className, methodName, argumentCount, requireStatic) {
     let current = className;
     const visited = new Set();
@@ -1767,12 +1913,11 @@ function findMethod(state, className, methodName, argumentCount, requireStatic) 
             return null;
         }
 
-        const method = (declaration.methods || []).find(candidate => {
-            const isStatic = (candidate.modifiers || []).includes('static');
-            return candidate.name === methodName &&
-                (candidate.parameters || []).length === argumentCount &&
-                (!requireStatic || isStatic);
-        });
+        const namedMethods = (declaration.methods || []).filter(candidate =>
+            candidate.name === methodName &&
+            (!requireStatic || (candidate.modifiers || []).includes('static'))
+        );
+        const method = selectByArity(namedMethods, argumentCount);
         if (method) {
             return method;
         }

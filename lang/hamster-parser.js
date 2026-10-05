@@ -12,12 +12,14 @@ export const ASTNodeType = Object.freeze({
     Parameter: 'Parameter',
     Block: 'BlockStatement',
     VariableDecl: 'VariableDeclaration',
+    VariableDeclarationGroup: 'VariableDeclarationGroup',
     Assignment: 'AssignmentStatement',
     ExpressionStmt: 'ExpressionStatement',
     IfStatement: 'IfStatement',
     WhileStatement: 'WhileStatement',
     DoWhileStatement: 'DoWhileStatement',
     ForStatement: 'ForStatement',
+    ForEachStatement: 'ForEachStatement',
     SwitchStatement: 'SwitchStatement',
     SwitchCase: 'SwitchCase',
     BreakStatement: 'BreakStatement',
@@ -34,6 +36,7 @@ export const ASTNodeType = Object.freeze({
     CastExpression: 'CastExpression',
     InstanceofExpression: 'InstanceofExpression',
     ArrayInitializer: 'ArrayInitializer',
+    ClassLiteral: 'ClassLiteral',
     Literal: 'Literal',
     Identifier: 'Identifier',
     CallExpression: 'CallExpression',
@@ -59,12 +62,7 @@ export class HamsterParserError extends Error {
 }
 
 const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
-    [UnsupportedConstruct.QualifiedTypeName]: 'Qualified type names are not supported',
-    [UnsupportedConstruct.MultipleDeclarators]: 'Declaring several variables in one statement is not supported',
-    [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
-    [UnsupportedConstruct.ClassLiteral]: 'Class literals (Foo.class) are not supported',
-    [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
-    [UnsupportedConstruct.Varargs]: 'Variable-length parameter lists (varargs) are not supported',
+    [UnsupportedConstruct.EnumBody]: 'Enums with constructors, fields, or methods are not supported',
 });
 
 function unsupportedConstructError(construct, token) {
@@ -187,6 +185,7 @@ const EXECUTABLE_STATEMENT_TYPES = new Set([
     ASTNodeType.ThrowStatement,
     ASTNodeType.ReturnStatement,
     ASTNodeType.SynchronizedStatement,
+    ASTNodeType.ForEachStatement,
 ]);
 
 export function collectExecutableLines(ast) {
@@ -197,6 +196,10 @@ export function collectExecutableLines(ast) {
             for (const statement of node.statements || []) {
                 collectStatement(statement);
             }
+            return;
+        }
+        if (node.type === ASTNodeType.VariableDeclarationGroup) {
+            node.declarations.forEach(collectStatement);
             return;
         }
         if (EXECUTABLE_STATEMENT_TYPES.has(node.type) && node.loc?.line) {
@@ -210,6 +213,7 @@ export function collectExecutableLines(ast) {
             case ASTNodeType.WhileStatement:
             case ASTNodeType.DoWhileStatement:
             case ASTNodeType.SynchronizedStatement:
+            case ASTNodeType.ForEachStatement:
                 collectStatement(node.body);
                 break;
             case ASTNodeType.SwitchStatement:
@@ -283,7 +287,7 @@ class Parser {
         const globals = [];
         // Parse global variable declarations before main()
         while (!this.isAtEnd() && this.isTypeKeywordAhead() && !this.isFunctionAhead()) {
-            globals.push(this.parseVariableDeclaration());
+            globals.push(...declarationsOf(this.parseVariableDeclaration()));
         }
         if (this.isAtEnd()) {
             if (this.options.requireMain) {
@@ -314,7 +318,10 @@ class Parser {
                     functions.push(...collectClassMethods(declaration));
                     continue;
                 }
-                this.rejectUnsupportedDeclarationAt(this.current);
+                if (this.isEnumDeclarationAt(this.current)) {
+                    classes.push(this.parseEnumDeclaration());
+                    continue;
+                }
                 const fn = this.tryParseFunction(true);
                 if (fn) {
                     functions.push(fn);
@@ -322,7 +329,7 @@ class Parser {
                 }
                 const varDecl = this.tryParseGlobalVariable();
                 if (varDecl) {
-                    globals.push(varDecl);
+                    globals.push(...declarationsOf(varDecl));
                     continue;
                 }
                 if (this.options.strict) {
@@ -366,15 +373,15 @@ class Parser {
         if (this.matchKeyword('extends')) {
             if (isInterface) {
                 do {
-                    interfaces.push(this.consumeQualifiedName('Expected interface name after extends'));
+                    interfaces.push(simpleTypeName(this.consumeQualifiedName('Expected interface name after extends')));
                 } while (this.matchSymbol(','));
             } else {
-                superClass = this.consumeQualifiedName('Expected superclass name after extends');
+                superClass = simpleTypeName(this.consumeQualifiedName('Expected superclass name after extends'));
             }
         }
         if (!isInterface && this.matchKeyword('implements')) {
             do {
-                interfaces.push(this.consumeQualifiedName('Expected interface name after implements'));
+                interfaces.push(simpleTypeName(this.consumeQualifiedName('Expected interface name after implements')));
             } while (this.matchSymbol(','));
         }
 
@@ -389,7 +396,10 @@ class Parser {
             if (this.matchSymbol(';')) {
                 continue;
             }
-            this.rejectUnsupportedDeclarationAt(this.current);
+            if (this.isEnumDeclarationAt(this.current)) {
+                nestedClasses.push(this.parseEnumDeclaration());
+                continue;
+            }
             const memberModifiers = this.parseModifiers();
             if (this.checkSymbol('{')) {
                 if (memberModifiers.some(modifier => modifier !== 'static')) {
@@ -527,14 +537,33 @@ class Parser {
 
     parseParameterList() {
         this.consumeSymbol('(', 'Expected ( before parameter list');
-        const parameters = [];
-        if (!this.checkSymbol(')')) {
-            do {
-                parameters.push(this.parseParameter());
-            } while (this.matchSymbol(','));
-        }
+        const parameters = this.parseParameters();
         this.consumeSymbol(')', 'Expected ) after parameter list');
         return parameters;
+    }
+
+    /** Comma-separated parameters up to (not including) `)`; only the last may be varargs. */
+    parseParameters() {
+        const parameters = [];
+        if (this.checkSymbol(')')) return parameters;
+        do {
+            const parameterToken = this.peek();
+            const parameter = this.parseParameter();
+            if (parameters.some(previous => previous.isVarargs)) {
+                throw new HamsterParserError('Varargs parameter must be last', parameterToken);
+            }
+            parameters.push(parameter);
+        } while (this.matchSymbol(','));
+        return parameters;
+    }
+
+    /** `...` after a parameter type marks a varargs parameter (`int... values`). */
+    matchVarargsEllipsis() {
+        if (!(this.checkSymbol('.') && this.checkNextSymbol('.'))) return false;
+        this.advance();
+        this.advance();
+        this.consumeSymbol('.', 'Expected ... in varargs parameter');
+        return true;
     }
 
     parseThrowsClause() {
@@ -557,12 +586,7 @@ class Parser {
             }
         }
         this.consumeSymbol('(', 'Expected ( after function name');
-        const parameters = [];
-        if (!this.checkSymbol(')')) {
-            do {
-                parameters.push(this.parseParameter());
-            } while (this.matchSymbol(','));
-        }
+        const parameters = this.parseParameters();
         this.consumeSymbol(')', 'Expected ) after parameter list');
         const body = this.parseBlock();
         return {
@@ -578,18 +602,13 @@ class Parser {
 
     parseParameter() {
         this.skipModifiers();
-        if (this.isQualifiedTypeDeclarationAt(this.current)) {
-            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
-        }
         const typeToken = this.consumeTypeName(false);
 
         // Accept both `Type[] name` and `Type name[]` parameter forms.
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in parameter type');
         }
-        if (this.checkSymbol('.') && this.checkNextSymbol('.')) {
-            throw unsupportedConstructError(UnsupportedConstruct.Varargs, this.peek());
-        }
+        const isVarargs = this.matchVarargsEllipsis();
 
         const nameToken = this.consumeIdentifier('Expected parameter name');
         while (this.matchSymbol('[')) {
@@ -599,6 +618,7 @@ class Parser {
             type: ASTNodeType.Parameter,
             name: nameToken.value,
             paramType: typeToken.value,
+            isVarargs,
             loc: locationFrom(nameToken),
         };
     }
@@ -664,9 +684,6 @@ class Parser {
         }
         if (this.checkKeyword('synchronized') && this.checkNextSymbol('(')) {
             return this.parseSynchronizedStatement();
-        }
-        if (this.isQualifiedTypeDeclarationAt(this.current)) {
-            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
         }
         if (this.isTypeKeywordAhead()) {
             return this.parseVariableDeclaration();
@@ -888,6 +905,10 @@ class Parser {
         let initializer = null;
         if (!this.checkSymbol(';')) {
             if (this.isTypeKeywordAhead()) {
+                const forEachHeader = this.tryParseForEachHeader();
+                if (forEachHeader) {
+                    return this.parseForEachRest(forToken, forEachHeader);
+                }
                 initializer = this.parseForVariableDeclaration();
             } else if (this.isAssignmentAhead()) {
                 initializer = this.parseForAssignment();
@@ -973,22 +994,66 @@ class Parser {
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
         }
-        if (this.checkSymbol(':')) {
-            throw unsupportedConstructError(UnsupportedConstruct.EnhancedFor, this.peek());
-        }
+        return this.parseVariableDeclarators(typeToken, nameToken);
+    }
 
-        let initializer = null;
-        if (this.matchOperator('=')) {
-            initializer = this.parseVariableInitializer();
+    /** `Type name :` after `for (`; consumes it and returns the header, or rolls back and returns null. */
+    tryParseForEachHeader() {
+        const checkpoint = this.current;
+        this.skipModifiers();
+        const typeToken = this.consumeTypeName(false);
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in variable type');
         }
-        this.rejectMultipleDeclarators();
+        const nameToken = this.consumeIdentifier('Expected variable name');
+        if (this.matchSymbol(':')) {
+            return { typeToken, nameToken };
+        }
+        this.current = checkpoint;
+        return null;
+    }
 
+    parseForEachRest(forToken, { typeToken, nameToken }) {
+        const iterable = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after for-each expression');
         return {
-            type: ASTNodeType.VariableDecl,
+            type: ASTNodeType.ForEachStatement,
             varType: typeToken.value,
             name: nameToken.value,
-            initializer,
-            loc: locationFrom(nameToken),
+            iterable,
+            body: this.parseBreakableStatement(),
+            loc: locationFrom(forToken),
+        };
+    }
+
+    /**
+     * Declarators after the type, starting at the first name: `a = 1, b[] = { 2 }`.
+     * One declarator yields a VariableDeclaration; several yield a
+     * VariableDeclarationGroup, whose declarations run in order in the current scope.
+     */
+    parseVariableDeclarators(typeToken, firstNameToken) {
+        const declarations = [];
+        let nameToken = firstNameToken;
+        while (true) {
+            while (this.matchSymbol('[')) {
+                this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
+            }
+            const initializer = this.matchOperator('=') ? this.parseVariableInitializer() : null;
+            declarations.push({
+                type: ASTNodeType.VariableDecl,
+                varType: typeToken.value,
+                name: nameToken.value,
+                initializer,
+                loc: locationFrom(nameToken),
+            });
+            if (!this.matchSymbol(',')) break;
+            nameToken = this.consumeIdentifier('Expected variable name after comma');
+        }
+        if (declarations.length === 1) return declarations[0];
+        return {
+            type: ASTNodeType.VariableDeclarationGroup,
+            declarations,
+            loc: declarations[0].loc,
         };
     }
 
@@ -1013,23 +1078,9 @@ class Parser {
             this.consumeSymbol(']', 'Expected ] after [ in variable type');
         }
         const nameToken = this.consumeIdentifier('Expected variable name');
-        while (this.matchSymbol('[')) {
-            // Skip array declarator after variable name (e.g., int a[])
-            this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
-        }
-        let initializer = null;
-        if (this.matchOperator('=')) {
-            initializer = this.parseVariableInitializer();
-        }
-        this.rejectMultipleDeclarators();
+        const declaration = this.parseVariableDeclarators(typeToken, nameToken);
         this.consumeSymbol(';', 'Expected ; after variable declaration');
-        return {
-            type: ASTNodeType.VariableDecl,
-            varType: typeToken.value,
-            name: nameToken.value,
-            initializer,
-            loc: locationFrom(nameToken),
-        };
+        return declaration;
     }
 
     parseAssignmentStatement() {
@@ -1226,8 +1277,9 @@ class Parser {
                 continue;
             }
             if (this.matchSymbol('.')) {
-                if (this.checkKeyword('class')) {
-                    throw unsupportedConstructError(UnsupportedConstruct.ClassLiteral, this.peek());
+                if (this.matchKeyword('class')) {
+                    expr = this.makeClassLiteral(expr, this.previous());
+                    continue;
                 }
                 const property = this.consumeIdentifier('Expected member name after .');
                 expr = {
@@ -1438,6 +1490,19 @@ class Parser {
         return names;
     }
 
+    /** `Name.class` / `pkg.Name.class`, resolved by simple name like other type references. */
+    makeClassLiteral(typeExpression, classToken) {
+        const qualifiedName = qualifiedNameOf(typeExpression);
+        if (!qualifiedName) {
+            throw new HamsterParserError('Expected type name before .class', classToken);
+        }
+        return {
+            type: ASTNodeType.ClassLiteral,
+            typeName: simpleTypeName(qualifiedName),
+            loc: typeExpression.loc,
+        };
+    }
+
     ensureAssignableUpdateTarget(argument, operator) {
         if (argument.type === ASTNodeType.Identifier ||
             argument.type === ASTNodeType.MemberExpression ||
@@ -1598,7 +1663,7 @@ class Parser {
             return true;
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            let idx = this.indexAfterTypeArguments(this.current + 1);
+            let idx = this.indexAfterTypeArguments(this.indexAfterQualifiedName(this.current));
             while (idx < this.tokens.length && this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '[') {
                 if (this.tokens[idx + 1]?.type !== TokenType.SYMBOL || this.tokens[idx + 1]?.value !== ']') {
                     return false;
@@ -1620,11 +1685,33 @@ class Parser {
             return this.advance();
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            const typeToken = this.advance();
+            const typeToken = this.consumeQualifiedTypeName();
             this.skipTypeArguments();
             return typeToken;
         }
         throw new HamsterParserError('Expected type keyword', this.peek());
+    }
+
+    /**
+     * `a.b.Type` in a type position: returns the last segment's token, so types
+     * resolve by simple name (the class model has no packages).
+     */
+    consumeQualifiedTypeName() {
+        let typeToken = this.consumeIdentifier('Expected type name');
+        while (this.checkSymbol('.') && this.peekNext()?.type === TokenType.IDENTIFIER) {
+            this.advance();
+            typeToken = this.advance();
+        }
+        return typeToken;
+    }
+
+    /** Index after `Name(.Name)*` starting at the identifier at `index`. */
+    indexAfterQualifiedName(index) {
+        let idx = index + 1;
+        while (isSymbolToken(this.tokens[idx], '.') && this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
+            idx += 2;
+        }
+        return idx;
     }
 
     parseAssignableExpression() {
@@ -1722,27 +1809,14 @@ class Parser {
                 this.consumeSymbol(']', 'Expected ] after [ in variable type');
             }
             const nameToken = this.consumeIdentifier('Expected variable name');
-            while (this.matchSymbol('[')) {
-                this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
-            }
-            // Must be followed by '=' or ';' — not '(' (that would be a function)
+            // Must be followed by '=', ',', '[' or ';' — not '(' (that would be a function)
             if (this.checkSymbol('(')) {
                 this.current = checkpoint;
                 return null;
             }
-            let initializer = null;
-            if (this.matchOperator('=')) {
-                initializer = this.parseVariableInitializer();
-            }
-            this.rejectMultipleDeclarators();
+            const declaration = this.parseVariableDeclarators(typeToken, nameToken);
             this.consumeSymbol(';', 'Expected ; after variable declaration');
-            return {
-                type: ASTNodeType.VariableDecl,
-                varType: typeToken.value,
-                name: nameToken.value,
-                initializer,
-                loc: locationFrom(nameToken),
-            };
+            return declaration;
         } catch (error) {
             // Known gaps are definitive answers, not reasons to try another parse.
             if (error?.unsupportedConstruct) throw error;
@@ -1751,24 +1825,7 @@ class Parser {
         }
     }
 
-    /** `a.b.Type name` at `index`: a declaration whose type is a qualified name (a known gap). */
-    isQualifiedTypeDeclarationAt(index) {
-        if (this.tokens[index]?.type !== TokenType.IDENTIFIER) return false;
-        let idx = index + 1;
-        let segments = 1;
-        while (isSymbolToken(this.tokens[idx], '.') && this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
-            idx += 2;
-            segments += 1;
-        }
-        if (segments < 2) return false;
-        idx = this.indexAfterTypeArguments(idx);
-        while (isSymbolToken(this.tokens[idx], '[') && isSymbolToken(this.tokens[idx + 1], ']')) {
-            idx += 2;
-        }
-        return this.tokens[idx]?.type === TokenType.IDENTIFIER;
-    }
-
-    /** `[modifiers] enum Name {` at `index` (a known gap); `enum` is not a keyword in this lexer. */
+    /** `[modifiers] enum Name {` at `index`; `enum` is not a keyword in this lexer. */
     isEnumDeclarationAt(index) {
         let idx = index;
         while (this.isModifierToken(this.tokens[idx])) {
@@ -1780,24 +1837,46 @@ class Parser {
             isSymbolToken(this.tokens[idx + 2], '{');
     }
 
-    /** Throws the known-gap error for declarations this extension does not support. */
-    rejectUnsupportedDeclarationAt(index) {
-        if (this.isEnumDeclarationAt(index)) {
-            throw unsupportedConstructError(UnsupportedConstruct.Enum, this.tokens[index]);
+    /**
+     * A constant-only enum (`enum Name { A, B, }`), represented as a class
+     * declaration with `isEnum` so static access, `instanceof`, and nesting reuse
+     * the class machinery. Constructors, constant bodies, and members are a
+     * tagged known gap.
+     */
+    parseEnumDeclaration() {
+        const modifiers = this.parseModifiers();
+        const enumToken = this.advance();
+        const nameToken = this.consumeIdentifier('Expected enum name');
+        this.consumeSymbol('{', 'Expected { to start enum body');
+        const enumConstants = [];
+        while (!this.checkSymbol('}') && !this.checkSymbol(';')) {
+            const constantToken = this.consumeIdentifier('Expected enum constant name');
+            if (this.checkSymbol('(') || this.checkSymbol('{')) {
+                throw unsupportedConstructError(UnsupportedConstruct.EnumBody, this.peek());
+            }
+            enumConstants.push(constantToken.value);
+            if (!this.matchSymbol(',')) break;
         }
-        let idx = index;
-        while (this.isModifierToken(this.tokens[idx])) {
-            idx += 1;
+        if (this.matchSymbol(';') && !this.checkSymbol('}')) {
+            throw unsupportedConstructError(UnsupportedConstruct.EnumBody, this.peek());
         }
-        if (this.isQualifiedTypeDeclarationAt(idx)) {
-            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.tokens[idx]);
-        }
-    }
-
-    rejectMultipleDeclarators() {
-        if (this.checkSymbol(',')) {
-            throw unsupportedConstructError(UnsupportedConstruct.MultipleDeclarators, this.peek());
-        }
+        this.consumeSymbol('}', 'Expected } to close enum body');
+        return {
+            type: ASTNodeType.ClassDecl,
+            name: nameToken.value,
+            isEnum: true,
+            enumConstants,
+            typeParameters: [],
+            superClass: null,
+            interfaces: [],
+            modifiers,
+            fields: [],
+            constructors: [],
+            methods: [],
+            nestedClasses: [],
+            initializerBlocks: [],
+            loc: locationFrom(enumToken),
+        };
     }
 
     isFunctionAhead() {
@@ -1813,7 +1892,7 @@ class Parser {
         if (typeToken.type === TokenType.KEYWORD && (typeToken.value === 'void' || typeToken.value === 'int' || typeToken.value === 'boolean')) {
             idx++;
         } else if (typeToken.type === TokenType.IDENTIFIER) {
-            idx = this.indexAfterTypeArguments(idx + 1);
+            idx = this.indexAfterTypeArguments(this.indexAfterQualifiedName(idx));
         } else {
             return false;
         }
@@ -1843,12 +1922,7 @@ class Parser {
                 return null;
             }
             this.consumeSymbol('(', 'Expected ( after function name');
-            const parameters = [];
-            if (!this.checkSymbol(')')) {
-                do {
-                    parameters.push(this.parseParameter());
-                } while (this.matchSymbol(','));
-            }
+            const parameters = this.parseParameters();
             this.consumeSymbol(')', 'Expected ) after parameter list');
             const body = this.parseBlock();
             return {
@@ -2117,6 +2191,24 @@ function canStartReferenceCastOperand(token) {
         default:
             return false;
     }
+}
+
+/** `a.b.C` for an Identifier/MemberExpression chain, otherwise null. */
+function qualifiedNameOf(node) {
+    if (node?.type === ASTNodeType.Identifier) return node.name;
+    if (node?.type === ASTNodeType.MemberExpression) {
+        const objectName = qualifiedNameOf(node.object);
+        return objectName ? objectName + '.' + node.property : null;
+    }
+    return null;
+}
+
+function simpleTypeName(typeName) {
+    return typeName.slice(typeName.lastIndexOf('.') + 1);
+}
+
+function declarationsOf(node) {
+    return node.type === ASTNodeType.VariableDeclarationGroup ? node.declarations : [node];
 }
 
 function collectClassMethods(declaration) {

@@ -338,7 +338,7 @@ section. Breaking one construct makes `npm test` and the gate fail (quickstart s
 - [X] T046 [P] Add an "Unreleased" section to `CHANGELOG.md` listing the newly supported constructs, the clearer "not supported" messages for the six known gaps and for library classes and threads, and the conformance gate.
 - [X] T047 Run the full validation from `specs/001-full-sample-parsing/quickstart.md` steps 1, 2 and 4 (`npm test`, `node scripts/conformance.cjs --min-pass-rate=1`, `npm run compile`), and confirm `npm test` takes under 10 s (SC-004).
 - [ ] T048 Manual check (needs a human; Principle V): quickstart step 5 in the Extension Development Host (F5) and one sample in the Web Extension Host. Record the result in the PR test plan.
-- [ ] T049 Push branch `001-full-sample-parsing` and open a PR against `main`. The description summarises the per-construct commits, the conformance numbers before and after (from T002/T041), and the test plan, with T048 unchecked until it is done.
+- [X] T049 (Done as PR #56 from branch `speckit-001-full-sample-parsing`.) Push branch `001-full-sample-parsing` and open a PR against `main`. The description summarises the per-construct commits, the conformance numbers before and after (from T002/T041), and the test plan, with T048 unchecked until it is done.
 
 ---
 
