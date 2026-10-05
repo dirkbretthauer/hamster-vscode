@@ -40,6 +40,7 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['HamsterNotInitializedException', 'HamsterNichtInitialisiertException'],
     ['HamsterNichtInitialisiertException', 'HamsterException'],
     ['HamsterException', 'RuntimeException'],
+    ['ClassCastException', 'RuntimeException'],
     ['RuntimeException', 'Exception'],
     ['Exception', 'Throwable'],
     ['Throwable', 'Object'],
@@ -66,6 +67,10 @@ const HAMSTER_INSTRUCTIONS = new Set([
 ]);
 
 const DEBUG_EVALUATION_STEP_LIMIT = 10000;
+
+const JAVA_INT_MIN = -2147483648;
+const JAVA_INT_MAX = 2147483647;
+const NATIVE_HAMSTER_CLASS = 'Hamster';
 
 function isHamsterInstruction(name) {
     return HAMSTER_INSTRUCTIONS.has(name);
@@ -645,6 +650,9 @@ function* evalExpressionGen(node, state, callDepth) {
             return current;
         }
 
+        case ASTNodeType.CastExpression:
+            return castValue(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
+
         case ASTNodeType.BinaryExpression:
             return yield* evalBinaryExpressionGen(node, state, callDepth);
 
@@ -990,10 +998,7 @@ function readIndexValue(target, index) {
 
 function* evalNewExpressionGen(node, state, callDepth) {
     if (node.dimensions && node.dimensions.length > 0) {
-        const firstDim = node.dimensions[0];
-        const length = firstDim == null ? 0 : Number(yield* evalExpressionGen(firstDim, state, callDepth));
-        const safeLength = Number.isFinite(length) && length > 0 ? Math.trunc(length) : 0;
-        return new Array(safeLength).fill(null);
+        return yield* evalArrayCreationGen(node, state, callDepth);
     }
 
     const args = [];
@@ -1023,6 +1028,113 @@ function* evalNewExpressionGen(node, state, callDepth) {
         __args: args,
         fields: Object.create(null),
     };
+}
+
+/**
+ * `new T[a][b][]` allocates nested arrays for every sized dimension. Leaves
+ * get T's Java default (0/false/null), except when trailing dimensions are
+ * left unsized: then the innermost sized level holds null sub-array slots.
+ */
+function* evalArrayCreationGen(node, state, callDepth) {
+    const lengths = [];
+    for (const dimension of node.dimensions) {
+        if (dimension == null) break;
+        lengths.push(toArrayLength(yield* evalExpressionGen(dimension, state, callDepth)));
+    }
+    if (lengths.length === 0) return [];
+    const hasUnsizedDimensions = lengths.length < node.dimensions.length;
+    const leafValue = hasUnsizedDimensions ? null : defaultValueForType(resolveCalleeName(node.callee));
+    return createNestedArray(lengths, leafValue);
+}
+
+function toArrayLength(value) {
+    const length = Number(value);
+    return Number.isFinite(length) && length > 0 ? Math.trunc(length) : 0;
+}
+
+function createNestedArray(lengths, leafValue) {
+    const [length, ...innerLengths] = lengths;
+    if (innerLengths.length === 0) {
+        return new Array(length).fill(leafValue);
+    }
+    return Array.from({ length }, () => createNestedArray(innerLengths, leafValue));
+}
+
+function castValue(value, node, state) {
+    if (node.arrayDimensions > 0 || value == null) return value;
+    if (node.targetType === 'int') return toJavaInt(value);
+    if (node.targetType === 'boolean') return value;
+    const targetType = simpleTypeName(node.targetType);
+    const valueType = runtimeTypeName(value);
+    if (valueType && isKnownReferenceType(state, targetType) &&
+        !isAssignableToType(state, valueType, targetType)) {
+        throw new HamsterLanguageException(createExceptionValue(
+            'ClassCastException',
+            [valueType + ' cannot be cast to ' + targetType]
+        ));
+    }
+    return value;
+}
+
+/** Java's narrowing double→int conversion: truncate toward zero, NaN→0, saturate at the int range. */
+function toJavaInt(value) {
+    const number = Number(value);
+    if (Number.isNaN(number)) return 0;
+    return Math.trunc(Math.min(JAVA_INT_MAX, Math.max(JAVA_INT_MIN, number)));
+}
+
+function simpleTypeName(typeName) {
+    return typeName.slice(typeName.lastIndexOf('.') + 1);
+}
+
+/** Type name of a runner/runtime object value, or null for primitives, arrays, and class references. */
+function runtimeTypeName(value) {
+    if (typeof value !== 'object' || Array.isArray(value)) return null;
+    if (typeof value.__className === 'string') return value.__className;
+    if (value.__kind === 'hamster') return value.className || 'Hamster';
+    return null;
+}
+
+/**
+ * Only types whose hierarchy the runner fully knows are checked; casts to
+ * anything else (e.g. `Integer`, library types) pass through unchanged
+ * rather than failing on a hierarchy we can't see.
+ */
+function isKnownReferenceType(state, typeName) {
+    return state.classes.has(typeName) ||
+        BUILTIN_EXCEPTION_SUPERTYPES.has(typeName) ||
+        typeName === NATIVE_HAMSTER_CLASS;
+}
+
+function isAssignableToType(state, typeName, targetType) {
+    const pending = [typeName];
+    const visited = new Set();
+    while (pending.length > 0) {
+        const current = pending.pop();
+        if (current === targetType || targetType === 'Object') return true;
+        if (visited.has(current)) continue;
+        visited.add(current);
+        pending.push(...directSupertypes(state, current));
+    }
+    return false;
+}
+
+function directSupertypes(state, typeName) {
+    const declaration = state.classes.get(typeName);
+    if (declaration) {
+        const interfaces = (declaration.interfaces || []).map(simpleTypeName);
+        return declaration.superClass
+            ? [simpleTypeName(declaration.superClass), ...interfaces]
+            : interfaces;
+    }
+    if (BUILTIN_EXCEPTION_SUPERTYPES.has(typeName)) {
+        return [BUILTIN_EXCEPTION_SUPERTYPES.get(typeName)];
+    }
+    // The runtime creates native objects for any `*Hamster` class name it doesn't know.
+    if (typeName !== NATIVE_HAMSTER_CLASS && typeName.endsWith(NATIVE_HAMSTER_CLASS)) {
+        return [NATIVE_HAMSTER_CLASS];
+    }
+    return [];
 }
 
 function* instantiateClassGen(className, args, state, callDepth, loc) {

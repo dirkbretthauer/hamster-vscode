@@ -27,6 +27,7 @@ export const ASTNodeType = Object.freeze({
     UnaryExpression: 'UnaryExpression',
     PrefixExpression: 'PrefixExpression',
     PostfixExpression: 'PostfixExpression',
+    CastExpression: 'CastExpression',
     Literal: 'Literal',
     Identifier: 'Identifier',
     CallExpression: 'CallExpression',
@@ -1081,6 +1082,9 @@ class Parser {
                 loc: locationFrom(operator),
             };
         }
+        if (this.isCastAhead()) {
+            return this.parseCastExpression();
+        }
         if (this.matchOperator('!') || this.matchOperator('-')) {
             const operator = this.previous();
             const argument = this.parseUnary();
@@ -1149,6 +1153,90 @@ class Parser {
         return expr;
     }
 
+    parseArrayCreationRest(newToken, elementTypeToken) {
+        if (!this.checkSymbol('[')) {
+            throw new HamsterParserError(
+                `Expected array dimension after new ${elementTypeToken.value}`,
+                this.peek()
+            );
+        }
+        const callee = {
+            type: ASTNodeType.Identifier,
+            name: elementTypeToken.value,
+            loc: locationFrom(elementTypeToken),
+        };
+        return this.parseArrayDimensionsRest(newToken, callee);
+    }
+
+    parseArrayDimensionsRest(newToken, callee) {
+        const dimensions = [];
+        while (this.matchSymbol('[')) {
+            dimensions.push(this.checkSymbol(']') ? null : this.parseExpression());
+            this.consumeSymbol(']', 'Expected ] after array dimension');
+        }
+        return {
+            type: ASTNodeType.NewExpression,
+            callee,
+            arguments: [],
+            dimensions,
+            loc: locationFrom(newToken),
+        };
+    }
+
+    /**
+     * Detects `(Type) operand` without consuming tokens. Primitive casts are
+     * unambiguous; for `(Name) ...` Java only treats it as a cast when the
+     * next token can start an operand that isn't `+`/`-`, otherwise
+     * `(a) + b` would be misread as casting `+b` to type `a`.
+     */
+    isCastAhead() {
+        if (!this.checkSymbol('(')) return false;
+        let idx = this.current + 1;
+        const firstToken = this.tokens[idx];
+        const isPrimitiveCast = isPrimitiveTypeToken(firstToken);
+        if (isPrimitiveCast) {
+            idx += 1;
+        } else if (firstToken?.type === TokenType.IDENTIFIER) {
+            idx += 1;
+            while (isSymbolToken(this.tokens[idx], '.') &&
+                   this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
+                idx += 2;
+            }
+        } else {
+            return false;
+        }
+        while (isSymbolToken(this.tokens[idx], '[') && isSymbolToken(this.tokens[idx + 1], ']')) {
+            idx += 2;
+        }
+        if (!isSymbolToken(this.tokens[idx], ')')) return false;
+        return isPrimitiveCast || canStartReferenceCastOperand(this.tokens[idx + 1]);
+    }
+
+    parseCastExpression() {
+        const lparen = this.consumeSymbol('(', 'Expected ( to start cast');
+        let targetType = this.advance().value;
+        while (this.matchSymbol('.')) {
+            targetType += '.' + this.consumeIdentifier('Expected type name after .').value;
+        }
+        let arrayDimensions = 0;
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in cast type');
+            arrayDimensions += 1;
+        }
+        this.consumeSymbol(')', 'Expected ) after cast type');
+        return {
+            type: ASTNodeType.CastExpression,
+            targetType,
+            arrayDimensions,
+            argument: this.parseUnary(),
+            loc: locationFrom(lparen),
+        };
+    }
+
+    isPrimitiveTypeKeywordAhead() {
+        return isPrimitiveTypeToken(this.peek());
+    }
+
     ensureAssignableUpdateTarget(argument, operator) {
         if (argument.type === ASTNodeType.Identifier ||
             argument.type === ASTNodeType.MemberExpression ||
@@ -1214,6 +1302,9 @@ class Parser {
         }
         if (this.matchKeyword('new')) {
             const newToken = this.previous();
+            if (this.isPrimitiveTypeKeywordAhead()) {
+                return this.parseArrayCreationRest(newToken, this.advance());
+            }
             const ctorName = this.consumeIdentifier('Expected constructor/type name after new');
             let callee = {
                 type: ASTNodeType.Identifier,
@@ -1247,23 +1338,8 @@ class Parser {
                 };
             }
 
-            const dimensions = [];
-            while (this.matchSymbol('[')) {
-                if (!this.checkSymbol(']')) {
-                    dimensions.push(this.parseExpression());
-                } else {
-                    dimensions.push(null);
-                }
-                this.consumeSymbol(']', 'Expected ] after array dimension');
-            }
-            if (dimensions.length > 0) {
-                return {
-                    type: ASTNodeType.NewExpression,
-                    callee,
-                    arguments: [],
-                    dimensions,
-                    loc: locationFrom(newToken),
-                };
+            if (this.checkSymbol('[')) {
+                return this.parseArrayDimensionsRest(newToken, callee);
             }
 
             throw new HamsterParserError('Expected constructor call or array dimension after new', this.peek());
@@ -1730,6 +1806,38 @@ function makeBinary(operatorToken, left, right) {
         right,
         loc: locationFrom(operatorToken),
     };
+}
+
+const PRIMITIVE_TYPE_KEYWORDS = new Set(['int', 'boolean']);
+
+const REFERENCE_CAST_OPERAND_KEYWORDS = new Set(['this', 'super', 'new']);
+
+function isPrimitiveTypeToken(token) {
+    return token?.type === TokenType.KEYWORD && PRIMITIVE_TYPE_KEYWORDS.has(token.value);
+}
+
+function isSymbolToken(token, symbol) {
+    return token?.type === TokenType.SYMBOL && token.value === symbol;
+}
+
+function canStartReferenceCastOperand(token) {
+    if (!token) return false;
+    switch (token.type) {
+        case TokenType.IDENTIFIER:
+        case TokenType.INTEGER:
+        case TokenType.STRING:
+        case TokenType.BOOLEAN:
+        case TokenType.NULL:
+            return true;
+        case TokenType.KEYWORD:
+            return REFERENCE_CAST_OPERAND_KEYWORDS.has(token.value);
+        case TokenType.SYMBOL:
+            return token.value === '(';
+        case TokenType.OPERATOR:
+            return token.value === '!';
+        default:
+            return false;
+    }
 }
 
 function collectClassMethods(declaration) {
