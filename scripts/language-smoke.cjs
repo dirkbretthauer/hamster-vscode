@@ -89,6 +89,36 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
 (async () => {
     const { parser, runner } = await loadLanguageModules();
 
+    function parses(source, options = {}) {
+        return parser.parseProgram(source, { strict: true, ...options });
+    }
+
+    function parseFails(source, pattern) {
+        let caught = null;
+        try {
+            parser.parseProgram(source, { strict: true });
+        } catch (error) {
+            caught = error;
+        }
+        assert.ok(caught, 'expected a parse error for: ' + source);
+        assert.match(caught.message, pattern);
+        return caught;
+    }
+
+    /** Walks an AST and returns the first node satisfying `predicate`, for asserting on nested shapes. */
+    function findNode(node, predicate) {
+        if (!node || typeof node !== 'object') return null;
+        if (predicate(node)) return node;
+        for (const value of Object.values(node)) {
+            const children = Array.isArray(value) ? value : [value];
+            for (const child of children) {
+                const found = findNode(child, predicate);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
     assert.equal(
         parser.detectProgramType('void main() {}'),
         parser.ProgramType.Imperative
@@ -664,22 +694,35 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         () => parser.parseProgram('void main() { break; }'),
         /break is only valid inside a loop or switch/
     );
-    assert.throws(
-        () => parser.parseProgram(`
-            void main() {
-                try {} catch (Exception first) {} catch (Exception second) {}
-            }
-        `),
-        /Multiple catch clauses are not supported/
-    );
-    assert.throws(
-        () => parser.parseProgram('void main() { try {} catch (Exception e) {} finally {} }'),
-        /finally clauses are not supported/
-    );
-    assert.throws(
-        () => parser.parseProgram('void main() { try {} finally {} }'),
-        /finally clauses are not supported/
-    );
+    // ── try with multiple catch clauses and finally (US1, T009) ──
+    const isTry = node => node.type === parser.ASTNodeType.TryStatement;
+    const multiCatchTry = findNode(parses('void main() { try {} catch (A a) {} catch (B b) {} }'), isTry);
+    assert.equal(multiCatchTry.handlers.length, 2);
+    assert.ok(multiCatchTry.handlers.every(handler => handler.type === parser.ASTNodeType.CatchClause));
+    assert.deepEqual(multiCatchTry.handlers.map(handler => handler.paramType), ['A', 'B']);
+    assert.deepEqual(multiCatchTry.handlers.map(handler => handler.paramName), ['a', 'b']);
+    assert.equal(multiCatchTry.finalizer, null);
+    const catchFinallyTry = findNode(parses('void main() { try {} catch (A a) {} finally {} }'), isTry);
+    assert.equal(catchFinallyTry.handlers.length, 1);
+    assert.equal(catchFinallyTry.finalizer.type, parser.ASTNodeType.Block);
+    const finallyOnlyTry = findNode(parses('void main() { try {} finally {} }'), isTry);
+    assert.equal(finallyOnlyTry.handlers.length, 0);
+    assert.equal(finallyOnlyTry.finalizer.type, parser.ASTNodeType.Block);
+    parses('void main() { try {} catch (final A a) {} }');
+    parseFails('void main() { try {} }', /Expected catch or finally after try block/);
+    assert.deepEqual(parser.collectExecutableLines(parses([
+        'void main() {',
+        '    try {',
+        '        vor();',
+        '    } catch (A a) {',
+        '        linksUm();',
+        '    } catch (B b) {',
+        '        nimm();',
+        '    } finally {',
+        '        gib();',
+        '    }',
+        '}',
+    ].join('\n'))), [2, 3, 5, 7, 9]);
 
     const arrayState = runProgram(parser, runner, `
         int[] counts = null;
@@ -759,6 +802,410 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(castState.scopes[0].get('interfaceCast'), true);
     assert.equal(castState.scopes[0].get('nullCast'), true);
     assert.equal(castState.scopes[0].get('castCaught'), 1);
+
+    // ── Generics (US1, T007) ──
+    const genericLocalProgram = parses(`
+        void main() {
+            Speicher<Integer> k = new Speicher<Integer>();
+        }
+    `);
+    const genericLocal = findNode(genericLocalProgram, node => node.type === 'VariableDeclaration' && node.name === 'k');
+    assert.equal(genericLocal.varType, 'Speicher');
+    assert.equal(genericLocal.initializer.callee.name, 'Speicher');
+    const genericClassProgram = parses(`
+        /*class*/
+        class Pair<K, V> {
+            private Array<Pair<K, V>> entries;
+            Pair<K, V> get(Array<? super T> a, Box<?> b, Box<? extends Hamster> c) { return null; }
+            public static <T> void replace(Array<? super T> array, T obj) {}
+            Object convert(Object obj) { return (Speicher<Integer>) obj; }
+            Object make() { return new Box<>(); }
+        }
+        class Box<T extends Hamster> {}
+        class Summe implements Callable<Integer> {}
+    `);
+    const [pairClass, boxClass, summeClass] = genericClassProgram.classes;
+    assert.deepEqual(pairClass.typeParameters, ['K', 'V']);
+    assert.equal(pairClass.fields[0].varType, 'Array');
+    const pairGet = pairClass.methods.find(method => method.name === 'get');
+    assert.equal(pairGet.returnType, 'Pair');
+    assert.deepEqual(pairGet.parameters.map(parameter => parameter.paramType), ['Array', 'Box', 'Box']);
+    assert.deepEqual(pairGet.typeParameters, []);
+    assert.deepEqual(pairClass.methods.find(method => method.name === 'replace').typeParameters, ['T']);
+    assert.equal(findNode(pairClass, node => node.type === 'CastExpression').targetType, 'Speicher');
+    assert.equal(findNode(pairClass, node => node.type === 'NewExpression').callee.name, 'Box');
+    assert.deepEqual(boxClass.typeParameters, ['T']);
+    assert.deepEqual(summeClass.interfaces, ['Callable']);
+    assert.deepEqual(summeClass.typeParameters, []);
+    const genericInterface = parses('/*class*/public interface Callable<V> {}').classes[0];
+    assert.equal(genericInterface.type, parser.ASTNodeType.InterfaceDecl);
+    assert.deepEqual(genericInterface.typeParameters, ['V']);
+    assert.equal(parses('Speicher<Integer> s = null; void main() {}').globals[0].varType, 'Speicher');
+    parseFails('void main() { Speicher<> k = null; }', /Unexpected token in expression/);
+    assert.equal(parser.parseExpression('a < b').type, parser.ASTNodeType.BinaryExpression);
+    assert.equal(parser.parseExpression('i < n && j > m').operator, '&&');
+    assert.equal(parser.parseExpression('x < y == z').operator, '==');
+
+    // ── synchronized (US1, T008) ──
+    const synchronizedProgram = parses([
+        '/*class*/',
+        'class Lager {',
+        '    synchronized static void f() {}',
+        '    public synchronized void g() {}',
+        '    synchronized void put(ErzeugerHamster ham) {}',
+        '    void aufStabWarten() {',
+        '        synchronized (Territorium.getKachel(this.getReihe(),',
+        '                this.getSpalte())) {',
+        '            vor();',
+        '        }',
+        '    }',
+        '}',
+    ].join('\n'));
+    const lagerMethods = synchronizedProgram.classes[0].methods;
+    assert.equal(lagerMethods.length, 4);
+    assert.ok(['synchronized', 'static'].every(modifier => lagerMethods[0].modifiers.includes(modifier)));
+    assert.ok(lagerMethods[1].modifiers.includes('synchronized'));
+    const synchronizedBlock = findNode(lagerMethods[3], node => node.type === parser.ASTNodeType.SynchronizedStatement);
+    assert.ok(synchronizedBlock, 'synchronized block should parse to a SynchronizedStatement');
+    assert.equal(synchronizedBlock.lock.type, parser.ASTNodeType.CallExpression);
+    assert.deepEqual(parser.collectExecutableLines(synchronizedProgram), [7, 9]);
+
+    // ── instanceof (US1, T010) ──
+    const simpleInstanceof = parser.parseExpression('h instanceof BeuteHamster');
+    assert.equal(simpleInstanceof.type, parser.ASTNodeType.InstanceofExpression);
+    assert.equal(simpleInstanceof.targetType, 'BeuteHamster');
+    assert.equal(simpleInstanceof.arrayDimensions, 0);
+    const instanceofAnd = parser.parseExpression('a instanceof B && c');
+    assert.equal(instanceofAnd.operator, '&&');
+    assert.equal(instanceofAnd.left.type, parser.ASTNodeType.InstanceofExpression);
+    assert.equal(parser.parseExpression('!(a instanceof B)').type, parser.ASTNodeType.UnaryExpression);
+    const arrayInstanceof = parser.parseExpression('x instanceof pkg.Foo[]');
+    assert.equal(arrayInstanceof.targetType, 'pkg.Foo');
+    assert.equal(arrayInstanceof.arrayDimensions, 1);
+    assert.equal(parser.parseExpression('x instanceof Box<T>').targetType, 'Box');
+    assert.equal(parser.parseExpression('x instanceof int[]').targetType, 'int');
+    assert.throws(() => parser.parseExpression('x instanceof int'), /instanceof requires a reference type/);
+    parses('void main() { if (hamster[i] instanceof BeuteHamster) { vor(); } }');
+
+    // ── Array initializers (US1, T011) ──
+    const isInitializer = node => node.type === parser.ASTNodeType.ArrayInitializer;
+    const initializerOf = (source, name) =>
+        findNode(parses(source), node => node.name === name && node.initializer).initializer;
+    assert.equal(initializerOf('void main() { int[] a = { 1, 2, 3 }; }', 'a').elements.length, 3);
+    assert.equal(initializerOf('void main() { int[] e = {}; }', 'e').elements.length, 0);
+    assert.equal(initializerOf('void main() { int[] t = { 1, 2, }; }', 't').elements.length, 2);
+    const nestedInitializer = initializerOf('void main() { int[][] m = { { 1, 2 }, { 3 } }; }', 'm');
+    assert.ok(nestedInitializer.elements.every(isInitializer));
+    assert.ok(isInitializer(initializerOf(
+        '/*class*/ class Semaphor { private boolean[] kritisch = { false, false }; }',
+        'kritisch'
+    )));
+    assert.ok(isInitializer(parses('boolean[] g = { true }; void main() {}').globals[0].initializer));
+    assert.ok(isInitializer(initializerOf('void main() { for (int[] r = { 1 }; false;) {} }', 'r')));
+    const newWithInitializer = findNode(parses('void main() { int[] n = new int[] { 1, 2 }; }'),
+        node => node.type === parser.ASTNodeType.NewExpression);
+    assert.deepEqual(newWithInitializer.dimensions, [null]);
+    assert.equal(newWithInitializer.initializer.elements.length, 2);
+    const newNestedInitializer = findNode(parses('void main() { int[][] n = new int[][] { { 1 }, { 2 } }; }'),
+        node => node.type === parser.ASTNodeType.NewExpression);
+    assert.deepEqual(newNestedInitializer.dimensions, [null, null]);
+    assert.ok(newNestedInitializer.initializer.elements.every(isInitializer));
+    assert.equal(findNode(parses('void main() { int[] s = new int[2]; }'),
+        node => node.type === parser.ASTNodeType.NewExpression).initializer, null);
+    parseFails('void main() { int[] a = new int[3] { 1 }; }', /Array initializer not allowed with explicit dimensions/);
+
+    // ── Diagnostics stay precise around the new constructs (US1, T012) ──
+    const errorsAt = lines => parser.collectProgramErrors(lines.join('\n'), { requireMain: false });
+    assert.ok(errorsAt([
+        'void main() {',
+        '    try {',
+        '        vor();',
+        '    } finally {',
+        '        gib();',
+        '}',
+    ]).length > 0, 'missing } after finally block must be reported');
+    for (const brokenLine of ['    Speicher<Integer k;', '    try {} catch () {}', '    synchronized () {}']) {
+        const errors = errorsAt(['void main() {', brokenLine, '}']);
+        assert.ok(errors.some(error => error.token?.line === 2), 'expected an error on line 2 for: ' + brokenLine);
+    }
+
+    // ── Runtime: multiple catch clauses (US2, T021) ──
+    const multiCatchState = runProgram(parser, runner, `
+        int specific = 0;
+        int second = 0;
+        int general = 0;
+        void main() {
+            try { throw new KachelLeerException("x"); }
+            catch (KachelLeerException e) { specific = specific + 1; }
+            catch (HamsterException e) { general = general + 100; }
+            try { throw new MauerDaException("x"); }
+            catch (KachelLeerException e) { specific = specific + 100; }
+            catch (MauerDaException e) { second = second + 1; }
+            try { throw new KachelLeerException("x"); }
+            catch (HamsterException e) { general = general + 1; }
+            catch (KachelLeerException e) { specific = specific + 100; }
+        }
+    `);
+    assert.equal(multiCatchState.scopes[0].get('specific'), 1);
+    assert.equal(multiCatchState.scopes[0].get('second'), 1);
+    assert.equal(multiCatchState.scopes[0].get('general'), 1);
+    assert.throws(
+        () => runProgram(parser, runner, `
+            void main() {
+                try { throw new MauerDaException("w"); }
+                catch (KachelLeerException e) {}
+                catch (MaulLeerException e) {}
+            }
+        `),
+        error => error instanceof runner.HamsterLanguageException && error.name === 'MauerDaException'
+    );
+
+    // ── Runtime: finally on every exit path (US2, T022, T028) ──
+    const finallyState = runProgram(parser, runner, `
+        int count = 0;
+        int caughtAt = 0;
+        int returned = 0;
+        int loops = 0;
+        int overridden = 0;
+        int replaced = 0;
+        String order = "";
+        int returnFromTry() {
+            try { return 7; } finally { count = count + 1; }
+        }
+        int finallyOverrides() {
+            try { return 1; } finally { return 2; }
+        }
+        void main() {
+            try { vor(); } finally { count = count + 1; }
+            try { throw new HamsterException("a"); }
+            catch (HamsterException e) { caughtAt = count; }
+            finally { count = count + 1; }
+            returned = returnFromTry();
+            while (true) {
+                try { loops = loops + 1; break; } finally { count = count + 1; }
+            }
+            overridden = finallyOverrides();
+            try {
+                try { throw new HamsterException("inner"); }
+                finally { throw new MauerDaException("replacement"); }
+            } catch (MauerDaException e) { replaced = replaced + 1; }
+            try {
+                try { count = count + 0; }
+                finally { throw new MauerDaException("after normal"); }
+            } catch (MauerDaException e) { replaced = replaced + 1; }
+            try {} finally { count = count + 1; }
+            try {
+                try { throw new HamsterException("nested"); }
+                finally { order = order + "inner"; }
+            } catch (HamsterException e) { order = order + "-catch"; }
+            finally { order = order + "-outer"; }
+        }
+    `);
+    const finallyGlobals = finallyState.scopes[0];
+    assert.equal(finallyGlobals.get('count'), 5);
+    assert.equal(finallyGlobals.get('caughtAt'), 1);
+    assert.equal(finallyGlobals.get('returned'), 7);
+    assert.equal(finallyGlobals.get('loops'), 1);
+    assert.equal(finallyGlobals.get('overridden'), 2);
+    assert.equal(finallyGlobals.get('replaced'), 2);
+    assert.equal(finallyGlobals.get('order'), 'inner-catch-outer');
+    assert.equal(finallyState.scopes.length, 1);
+    const uncaughtFinallyState = runner.createRunnerState(parses(`
+        int count = 0;
+        void main() {
+            try { throw new MauerDaException("u"); } finally { count = count + 1; }
+        }
+    `), createRuntime());
+    assert.throws(
+        () => { while (runner.executeRunnerStep(uncaughtFinallyState)) {} },
+        error => error instanceof runner.HamsterLanguageException && error.name === 'MauerDaException'
+    );
+    assert.equal(uncaughtFinallyState.scopes[0].get('count'), 1);
+
+    // ── Known gaps: out-of-scope constructs report a targeted, tagged error (US4, T036) ──
+    const knownGapCases = [
+        ['void main() { reversi.ReversiHamster paul = null; }', 'qualified-type-name', /Qualified type names are not supported/],
+        ['/*class*/ class C { java.util.Calendar c; }', 'qualified-type-name', /Qualified type names are not supported/],
+        ['void main() { Hamster a = null, b = null; }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
+        ['void main() { for (int i = 0, j = 0; i < 1; i++) {} }', 'multiple-declarators', /Declaring several variables in one statement is not supported/],
+        ['/*object-oriented program*/enum Richtung { NORD } void main() {}', 'enum', /enum declarations are not supported/],
+        ['/*class*/ class C { enum Farbe { ROT } }', 'enum', /enum declarations are not supported/],
+        ['void main() { Object o = Hamster.class; }', 'class-literal', /Class literals \(Foo\.class\) are not supported/],
+        ['void main() { int x = 0L; }', 'long-literal', /long literals are not supported/],
+        ['void main() { for (Hamster h : alle) {} }', 'enhanced-for', /for-each loops are not supported/],
+        ['/*class*/ class C { void f(int... xs) {} }', 'varargs', /Variable-length parameter lists \(varargs\) are not supported/],
+    ];
+    for (const [source, code, pattern] of knownGapCases) {
+        const error = parseFails(source, pattern);
+        assert.equal(error.unsupportedConstruct, code, 'unsupportedConstruct for: ' + source);
+        const diagnostics = parser.collectProgramErrors(source, { requireMain: false });
+        assert.ok(
+            diagnostics.some(diagnostic => diagnostic.unsupportedConstruct === code &&
+                (diagnostic.token?.line ?? diagnostic.line) === 1 &&
+                (diagnostic.token?.column ?? diagnostic.column) > 0),
+            'expected a located diagnostic for: ' + source
+        );
+    }
+    assert.equal(parser.UnsupportedConstruct.LongLiteral, 'long-literal');
+    assert.equal(parses('/*class*/ class C { int a = 1, b = 2; }').classes[0].fields.length, 2);
+
+    // instanceof is read-only, so debugger hover/watch evaluation allows it (US2, T026).
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('value instanceof Object'), expressionState, 1),
+        true
+    );
+    assert.equal(
+        runner.evaluateExpression(parser.parseExpression('items instanceof int[]'), expressionState, 1),
+        true
+    );
+
+    // ── Runtime: instanceof (US2, T023) ──
+    const instanceofState = runProgram(parser, runner, `
+        interface Marker {}
+        class Base {}
+        class Derived extends Base implements Marker {}
+        class Other {}
+        class MyHamster extends Hamster {}
+        boolean[] results = null;
+        void main() {
+            Base derived = new Derived();
+            Base base = new Base();
+            Base nothing = null;
+            results = new boolean[12];
+            results[0] = derived instanceof Base;
+            results[1] = derived instanceof Derived;
+            results[2] = derived instanceof Marker;
+            results[3] = base instanceof Derived;
+            results[4] = derived instanceof Other;
+            results[5] = nothing instanceof Base;
+            results[6] = "text" instanceof String;
+            results[7] = derived instanceof Object;
+            results[8] = Hamster.getStandardHamster() instanceof Hamster;
+            results[9] = new MyHamster() instanceof Hamster;
+            results[10] = new int[2] instanceof int[];
+            results[11] = new int[2] instanceof Base;
+        }
+    `);
+    assert.deepEqual(instanceofState.scopes[0].get('results'), [
+        true, true, true, false, false, false, true, true, true, true, true, false,
+    ]);
+
+    // ── Runtime: array initializers (US2, T024) ──
+    const initializerState = runProgram(parser, runner, `
+        class Semaphor {
+            boolean[] kritisch = { false, false };
+            boolean[] get() { return kritisch; }
+        }
+        int[] flat = null;
+        int[][] nested = null;
+        int[] empty = null;
+        int[] ordered = null;
+        int[] fromNew = null;
+        int[][] fromNewNested = null;
+        boolean[] fieldValue = null;
+        boolean[] folded = { true, false };
+        int counter = 0;
+        int next() {
+            counter = counter + 1;
+            return counter;
+        }
+        void main() {
+            int[] localFlat = { 1, 2, 3 };
+            int[][] localNested = { { 1, 2 }, { 3 } };
+            int[] localEmpty = {};
+            int[] localOrdered = { next(), next() };
+            flat = localFlat;
+            nested = localNested;
+            empty = localEmpty;
+            ordered = localOrdered;
+            fromNew = new int[] { 4, 5 };
+            fromNewNested = new int[][] { { 1 }, { 2 } };
+            fieldValue = new Semaphor().get();
+        }
+    `);
+    const initializerGlobals = initializerState.scopes[0];
+    assert.deepEqual(initializerGlobals.get('flat'), [1, 2, 3]);
+    assert.deepEqual(initializerGlobals.get('nested'), [[1, 2], [3]]);
+    assert.deepEqual(initializerGlobals.get('empty'), []);
+    assert.deepEqual(initializerGlobals.get('ordered'), [1, 2]);
+    assert.deepEqual(initializerGlobals.get('fromNew'), [4, 5]);
+    assert.deepEqual(initializerGlobals.get('fromNewNested'), [[1], [2]]);
+    assert.deepEqual(initializerGlobals.get('fieldValue'), [false, false]);
+    assert.deepEqual(initializerGlobals.get('folded'), [true, false]);
+
+    // ── Runtime: generics are erased (US3, T030) ──
+    const genericRuntimeSource = `
+        class Box<T> {
+            T value;
+            T empty;
+            Box(T v) { value = v; }
+            T get() { return value; }
+            T getEmpty() { return empty; }
+        }
+        class Util {
+            static <T> T first(Box<T> box) { return box.get(); }
+        }
+        int fromInt = 0;
+        int fromStatic = 0;
+        boolean emptyIsNull = false;
+        void main() {
+            Box<Integer> ints = new Box<Integer>(5);
+            fromInt = ints.get();
+            fromStatic = Util.first(ints);
+            Box<Box<Integer>> boxes = new Box<Box<Integer>>(ints);
+            emptyIsNull = boxes.getEmpty() == null;
+        }
+    `;
+    let erasedRuntimeSource = genericRuntimeSource;
+    while (/<[^<>]*>/.test(erasedRuntimeSource)) {
+        erasedRuntimeSource = erasedRuntimeSource.replace(/<[^<>]*>/g, '');
+    }
+    const genericResults = ['fromInt', 'fromStatic', 'emptyIsNull']
+        .map(name => runProgram(parser, runner, genericRuntimeSource).scopes[0].get(name));
+    const erasedResults = ['fromInt', 'fromStatic', 'emptyIsNull']
+        .map(name => runProgram(parser, runner, erasedRuntimeSource).scopes[0].get(name));
+    assert.deepEqual(genericResults, [5, 5, true]);
+    assert.deepEqual(genericResults, erasedResults);
+
+    // ── Runtime: synchronized (US3, T031) ──
+    const synchronizedState = runProgram(parser, runner, `
+        class Counter {
+            synchronized void inc() { methodCalls = methodCalls + 1; }
+        }
+        int locks = 0;
+        int bodies = 0;
+        int fromReturn = 0;
+        int afterBreak = 0;
+        int methodCalls = 0;
+        Object lock() {
+            locks = locks + 1;
+            return new Object();
+        }
+        int guarded() {
+            synchronized (lock()) { return 42; }
+        }
+        void main() {
+            for (int i = 0; i < 3; i++) {
+                synchronized (lock()) { bodies = bodies + 1; }
+            }
+            fromReturn = guarded();
+            while (true) {
+                synchronized (lock()) { break; }
+            }
+            afterBreak = 1;
+            new Counter().inc();
+        }
+    `);
+    const synchronizedGlobals = synchronizedState.scopes[0];
+    assert.equal(synchronizedGlobals.get('locks'), 5);
+    assert.equal(synchronizedGlobals.get('bodies'), 3);
+    assert.equal(synchronizedGlobals.get('fromReturn'), 42);
+    assert.equal(synchronizedGlobals.get('afterBreak'), 1);
+    assert.equal(synchronizedGlobals.get('methodCalls'), 1);
+    assert.throws(
+        () => runProgram(parser, runner, 'void main() { synchronized (null) {} }'),
+        /Cannot synchronize on null/
+    );
 
     console.log('Language smoke checks passed');
 })().catch(error => {

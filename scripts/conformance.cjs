@@ -103,6 +103,7 @@ async function main() {
     const countsByType = new Map();
     const skippedByType = new Map();
     const failuresByMessage = new Map();
+    const knownGapsByConstruct = new Map();
     for (const file of findHamFiles(corpusDir)) {
         // The reference simulator reads sources with the platform charset, which is Latin-1 compatible for these files.
         const source = fs.readFileSync(file, 'latin1');
@@ -112,66 +113,82 @@ async function main() {
             skippedByType.set(label, (skippedByType.get(label) || 0) + 1);
             continue;
         }
-        const counts = countsByType.get(label) || { passed: 0, failed: 0 };
+        const counts = countsByType.get(label) || { passed: 0, failed: 0, knownGaps: 0 };
         countsByType.set(label, counts);
         try {
             parser.parseProgram(source, { strict: true });
             counts.passed += 1;
         } catch (error) {
+            const example = { relativePath, line: errorLine(error), source };
+            // Recognised-but-unsupported syntax is an accepted, out-of-scope gap, not a regression.
+            if (error?.unsupportedConstruct) {
+                counts.knownGaps += 1;
+                addToGroup(knownGapsByConstruct, error.unsupportedConstruct, example);
+                continue;
+            }
             counts.failed += 1;
-            const message = normalizeFailureMessage(error?.message ?? error);
-            const failures = failuresByMessage.get(message) || [];
-            failures.push({ relativePath, line: errorLine(error), source });
-            failuresByMessage.set(message, failures);
+            addToGroup(failuresByMessage, normalizeFailureMessage(error?.message ?? error), example);
         }
     }
 
-    let totalPassed = 0;
-    let totalEvaluated = 0;
+    const totals = { passed: 0, failed: 0, knownGaps: 0 };
     console.log(`Hamster reference corpus: ${corpusDir}\n`);
-    console.log('Program type        Passed  Failed  Rate');
-    for (const [label, { passed, failed }] of countsByType) {
-        totalPassed += passed;
-        totalEvaluated += passed + failed;
-        console.log(
-            label.padEnd(18),
-            String(passed).padStart(7),
-            String(failed).padStart(7),
-            ' ' + formatPercent(passed, passed + failed)
-        );
+    console.log('Program type        Passed  Failed  Known gaps  Rate');
+    for (const [label, counts] of countsByType) {
+        totals.passed += counts.passed;
+        totals.failed += counts.failed;
+        totals.knownGaps += counts.knownGaps;
+        printCountsRow(label, counts);
     }
-    console.log(
-        'TOTAL'.padEnd(18),
-        String(totalPassed).padStart(7),
-        String(totalEvaluated - totalPassed).padStart(7),
-        ' ' + formatPercent(totalPassed, totalEvaluated)
-    );
+    printCountsRow('TOTAL', totals);
+    console.log('(Rate = passed / (passed + failed); known gaps are excluded.)');
     const skipped = [...skippedByType].map(([label, count]) => `${label}: ${count}`).join(', ');
     if (skipped) {
         console.log(`\nSkipped (not Java-like): ${skipped}`);
     }
 
-    const sortedFailures = [...failuresByMessage].sort((left, right) => right[1].length - left[1].length);
-    if (sortedFailures.length > 0) {
-        console.log('\nFailures by message:');
+    printGroups('Known gaps (out of scope):', knownGapsByConstruct, options.verbose);
+    printGroups('Failures by message:', failuresByMessage, options.verbose);
+
+    const inScopeTotal = totals.passed + totals.failed;
+    const passRate = inScopeTotal === 0 ? 0 : totals.passed / inScopeTotal;
+    if (options.minPassRate !== null && passRate < options.minPassRate) {
+        console.error(
+            `\nParse rate ${formatPercent(totals.passed, inScopeTotal)} is below ` +
+            `--min-pass-rate=${options.minPassRate}`
+        );
+        process.exitCode = EXIT_BELOW_MIN_PASS_RATE;
     }
-    for (const [message, failures] of sortedFailures) {
-        console.log(`\n${String(failures.length).padStart(4)}  ${message}`);
-        const shown = options.verbose ? failures : failures.slice(0, EXAMPLES_PER_FAILURE);
+}
+
+function addToGroup(groups, key, example) {
+    const examples = groups.get(key) || [];
+    examples.push(example);
+    groups.set(key, examples);
+}
+
+function printCountsRow(label, { passed, failed, knownGaps }) {
+    console.log(
+        label.padEnd(18),
+        String(passed).padStart(7),
+        String(failed).padStart(7),
+        String(knownGaps).padStart(11),
+        ' ' + formatPercent(passed, passed + failed)
+    );
+}
+
+function printGroups(title, groups, verbose) {
+    const sortedGroups = [...groups].sort((left, right) => right[1].length - left[1].length);
+    if (sortedGroups.length === 0) return;
+    console.log('\n' + title);
+    for (const [key, examples] of sortedGroups) {
+        console.log(`\n${String(examples.length).padStart(4)}  ${key}`);
+        const shown = verbose ? examples : examples.slice(0, EXAMPLES_PER_FAILURE);
         for (const { relativePath, line, source } of shown) {
             const sourceLine = line ? (source.split(/\r?\n/)[line - 1] || '').trim() : '';
             console.log(`      ${relativePath}${line ? ':' + line : ''}`);
             if (sourceLine) console.log(`        | ${sourceLine.slice(0, 120)}`);
         }
-    }
-
-    const passRate = totalEvaluated === 0 ? 0 : totalPassed / totalEvaluated;
-    if (options.minPassRate !== null && passRate < options.minPassRate) {
-        console.error(
-            `\nParse rate ${formatPercent(totalPassed, totalEvaluated)} is below ` +
-            `--min-pass-rate=${options.minPassRate}`
-        );
-        process.exitCode = EXIT_BELOW_MIN_PASS_RATE;
     }
 }
 

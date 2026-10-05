@@ -1,4 +1,6 @@
-import { HamsterLexer, HamsterLexerError, TokenType } from './hamster-lexer.js';
+import { HamsterLexer, HamsterLexerError, TokenType, UnsupportedConstruct } from './hamster-lexer.js';
+
+export { UnsupportedConstruct };
 
 export const ASTNodeType = Object.freeze({
     Program: 'Program',
@@ -20,7 +22,9 @@ export const ASTNodeType = Object.freeze({
     SwitchCase: 'SwitchCase',
     BreakStatement: 'BreakStatement',
     TryStatement: 'TryStatement',
+    CatchClause: 'CatchClause',
     ThrowStatement: 'ThrowStatement',
+    SynchronizedStatement: 'SynchronizedStatement',
     ReturnStatement: 'ReturnStatement',
     ConditionalExpression: 'ConditionalExpression',
     BinaryExpression: 'BinaryExpression',
@@ -28,6 +32,8 @@ export const ASTNodeType = Object.freeze({
     PrefixExpression: 'PrefixExpression',
     PostfixExpression: 'PostfixExpression',
     CastExpression: 'CastExpression',
+    InstanceofExpression: 'InstanceofExpression',
+    ArrayInitializer: 'ArrayInitializer',
     Literal: 'Literal',
     Identifier: 'Identifier',
     CallExpression: 'CallExpression',
@@ -39,12 +45,30 @@ export const ASTNodeType = Object.freeze({
 });
 
 export class HamsterParserError extends Error {
-    constructor(message, token) {
+    /**
+     * @param {string|null} unsupportedConstruct one of `UnsupportedConstruct`, set only for
+     *   recognised-but-unsupported Java syntax so tools can tell known gaps from real errors.
+     */
+    constructor(message, token, unsupportedConstruct = null) {
         const location = token ? ` (line ${token.line}, column ${token.column})` : '';
         super(message + location);
         this.name = 'HamsterParserError';
         this.token = token;
+        this.unsupportedConstruct = unsupportedConstruct;
     }
+}
+
+const UNSUPPORTED_CONSTRUCT_MESSAGES = Object.freeze({
+    [UnsupportedConstruct.QualifiedTypeName]: 'Qualified type names are not supported',
+    [UnsupportedConstruct.MultipleDeclarators]: 'Declaring several variables in one statement is not supported',
+    [UnsupportedConstruct.Enum]: 'enum declarations are not supported',
+    [UnsupportedConstruct.ClassLiteral]: 'Class literals (Foo.class) are not supported',
+    [UnsupportedConstruct.EnhancedFor]: 'for-each loops are not supported',
+    [UnsupportedConstruct.Varargs]: 'Variable-length parameter lists (varargs) are not supported',
+});
+
+function unsupportedConstructError(construct, token) {
+    return new HamsterParserError(UNSUPPORTED_CONSTRUCT_MESSAGES[construct], token, construct);
 }
 
 export const ProgramType = Object.freeze({
@@ -162,6 +186,7 @@ const EXECUTABLE_STATEMENT_TYPES = new Set([
     ASTNodeType.TryStatement,
     ASTNodeType.ThrowStatement,
     ASTNodeType.ReturnStatement,
+    ASTNodeType.SynchronizedStatement,
 ]);
 
 export function collectExecutableLines(ast) {
@@ -184,6 +209,7 @@ export function collectExecutableLines(ast) {
                 break;
             case ASTNodeType.WhileStatement:
             case ASTNodeType.DoWhileStatement:
+            case ASTNodeType.SynchronizedStatement:
                 collectStatement(node.body);
                 break;
             case ASTNodeType.SwitchStatement:
@@ -195,7 +221,10 @@ export function collectExecutableLines(ast) {
                 break;
             case ASTNodeType.TryStatement:
                 collectStatement(node.block);
-                collectStatement(node.handler?.body);
+                for (const handler of node.handlers || []) {
+                    collectStatement(handler.body);
+                }
+                collectStatement(node.finalizer);
                 break;
         }
     };
@@ -285,6 +314,7 @@ class Parser {
                     functions.push(...collectClassMethods(declaration));
                     continue;
                 }
+                this.rejectUnsupportedDeclarationAt(this.current);
                 const fn = this.tryParseFunction(true);
                 if (fn) {
                     functions.push(fn);
@@ -328,6 +358,7 @@ class Parser {
         const modifiers = leadingModifiers || this.parseModifiers();
         const kindToken = this.advance();
         const nameToken = this.consumeIdentifier(`Expected ${kindToken.value} name`);
+        const typeParameters = this.parseTypeParameters();
         const isInterface = kindToken.value === 'interface';
         let superClass = null;
         const interfaces = [];
@@ -358,6 +389,7 @@ class Parser {
             if (this.matchSymbol(';')) {
                 continue;
             }
+            this.rejectUnsupportedDeclarationAt(this.current);
             const memberModifiers = this.parseModifiers();
             if (this.checkSymbol('{')) {
                 if (memberModifiers.some(modifier => modifier !== 'static')) {
@@ -379,6 +411,7 @@ class Parser {
                 constructors.push(this.parseConstructor(nameToken.value, memberModifiers));
                 continue;
             }
+            const methodTypeParameters = this.parseTypeParameters();
             const typeToken = this.consumeTypeName(true);
             while (this.matchSymbol('[')) {
                 this.consumeSymbol(']', 'Expected ] after [ in member type');
@@ -390,9 +423,13 @@ class Parser {
                     typeToken.value,
                     memberModifiers,
                     nameToken.value,
-                    isInterface
+                    isInterface,
+                    methodTypeParameters
                 ));
                 continue;
+            }
+            if (methodTypeParameters.length > 0) {
+                throw new HamsterParserError('Type parameters are only allowed on methods', memberName);
             }
             if (typeToken.value === 'void') {
                 throw new HamsterParserError('Fields cannot have type void', typeToken);
@@ -408,6 +445,7 @@ class Parser {
         return {
             type: isInterface ? ASTNodeType.InterfaceDecl : ASTNodeType.ClassDecl,
             name: nameToken.value,
+            typeParameters,
             superClass,
             interfaces,
             modifiers,
@@ -435,7 +473,7 @@ class Parser {
         };
     }
 
-    parseMethodRest(nameToken, returnType, modifiers, owner, allowAbstract) {
+    parseMethodRest(nameToken, returnType, modifiers, owner, allowAbstract, typeParameters = []) {
         const parameters = this.parseParameterList();
         this.parseThrowsClause();
         let body = null;
@@ -450,6 +488,7 @@ class Parser {
             type: ASTNodeType.FunctionDecl,
             name: nameToken.value,
             returnType,
+            typeParameters,
             parameters,
             body,
             modifiers,
@@ -467,7 +506,7 @@ class Parser {
             }
             let initializer = null;
             if (this.matchOperator('=')) {
-                initializer = this.parseExpression();
+                initializer = this.parseVariableInitializer();
             }
             fields.push({
                 type: ASTNodeType.FieldDecl,
@@ -509,6 +548,7 @@ class Parser {
 
     parseFunction(requireMain) {
         this.skipModifiers();
+        const typeParameters = this.parseTypeParameters();
         const returnToken = this.consumeTypeName(true);
         const nameToken = this.consumeIdentifier('Expected function name');
         if (requireMain) {
@@ -529,6 +569,7 @@ class Parser {
             type: ASTNodeType.FunctionDecl,
             name: nameToken.value,
             returnType: returnToken.value,
+            typeParameters,
             parameters,
             body,
             loc: locationFrom(nameToken),
@@ -537,11 +578,17 @@ class Parser {
 
     parseParameter() {
         this.skipModifiers();
+        if (this.isQualifiedTypeDeclarationAt(this.current)) {
+            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
+        }
         const typeToken = this.consumeTypeName(false);
 
         // Accept both `Type[] name` and `Type name[]` parameter forms.
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in parameter type');
+        }
+        if (this.checkSymbol('.') && this.checkNextSymbol('.')) {
+            throw unsupportedConstructError(UnsupportedConstruct.Varargs, this.peek());
         }
 
         const nameToken = this.consumeIdentifier('Expected parameter name');
@@ -614,6 +661,12 @@ class Parser {
         }
         if (this.checkKeyword('return')) {
             return this.parseReturnStatement();
+        }
+        if (this.checkKeyword('synchronized') && this.checkNextSymbol('(')) {
+            return this.parseSynchronizedStatement();
+        }
+        if (this.isQualifiedTypeDeclarationAt(this.current)) {
+            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.peek());
         }
         if (this.isTypeKeywordAhead()) {
             return this.parseVariableDeclaration();
@@ -750,31 +803,49 @@ class Parser {
     parseTryStatement() {
         const tryToken = this.consumeKeyword('try', 'Expected try');
         const block = this.parseBlock();
-        if (this.peek().value === 'finally') {
-            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        const handlers = [];
+        while (this.checkKeyword('catch')) {
+            handlers.push(this.parseCatchClause());
         }
-        this.consumeKeyword('catch', 'Expected catch after try block');
-        this.consumeSymbol('(', 'Expected ( after catch');
-        const typeToken = this.consumeTypeName(false);
-        const parameter = this.consumeIdentifier('Expected catch parameter name');
-        this.consumeSymbol(')', 'Expected ) after catch parameter');
-        const handler = this.parseBlock();
-        if (this.checkKeyword('catch')) {
-            throw new HamsterParserError('Multiple catch clauses are not supported', this.peek());
-        }
-        if (this.peek().value === 'finally') {
-            throw new HamsterParserError('finally clauses are not supported', this.peek());
+        const finalizer = this.matchKeyword('finally') ? this.parseBlock() : null;
+        if (handlers.length === 0 && !finalizer) {
+            throw new HamsterParserError('Expected catch or finally after try block', tryToken);
         }
         return {
             type: ASTNodeType.TryStatement,
             block,
-            handler: {
-                paramType: typeToken.value,
-                paramName: parameter.value,
-                body: handler,
-                loc: locationFrom(typeToken),
-            },
+            handlers,
+            finalizer,
             loc: locationFrom(tryToken),
+        };
+    }
+
+    parseCatchClause() {
+        const catchToken = this.consumeKeyword('catch', 'Expected catch');
+        this.consumeSymbol('(', 'Expected ( after catch');
+        this.parseModifiers();
+        const typeToken = this.consumeTypeName(false);
+        const parameter = this.consumeIdentifier('Expected catch parameter name');
+        this.consumeSymbol(')', 'Expected ) after catch parameter');
+        return {
+            type: ASTNodeType.CatchClause,
+            paramType: typeToken.value,
+            paramName: parameter.value,
+            body: this.parseBlock(),
+            loc: locationFrom(catchToken),
+        };
+    }
+
+    parseSynchronizedStatement() {
+        const synchronizedToken = this.consumeKeyword('synchronized', 'Expected synchronized');
+        this.consumeSymbol('(', 'Expected ( after synchronized');
+        const lock = this.parseExpression();
+        this.consumeSymbol(')', 'Expected ) after synchronized lock');
+        return {
+            type: ASTNodeType.SynchronizedStatement,
+            lock,
+            body: this.parseBlock(),
+            loc: locationFrom(synchronizedToken),
         };
     }
 
@@ -902,11 +973,15 @@ class Parser {
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in variable name declarator');
         }
+        if (this.checkSymbol(':')) {
+            throw unsupportedConstructError(UnsupportedConstruct.EnhancedFor, this.peek());
+        }
 
         let initializer = null;
         if (this.matchOperator('=')) {
-            initializer = this.parseExpression();
+            initializer = this.parseVariableInitializer();
         }
+        this.rejectMultipleDeclarators();
 
         return {
             type: ASTNodeType.VariableDecl,
@@ -944,8 +1019,9 @@ class Parser {
         }
         let initializer = null;
         if (this.matchOperator('=')) {
-            initializer = this.parseExpression();
+            initializer = this.parseVariableInitializer();
         }
+        this.rejectMultipleDeclarators();
         this.consumeSymbol(';', 'Expected ; after variable declaration');
         return {
             type: ASTNodeType.VariableDecl,
@@ -1041,13 +1117,45 @@ class Parser {
 
     parseRelational() {
         let expr = this.parseAdditive();
-        while (this.matchOperator('<') || this.matchOperator('>') ||
-               this.matchOperator('<=') || this.matchOperator('>=')) {
-            const operator = this.previous();
-            const right = this.parseAdditive();
-            expr = makeBinary(operator, expr, right);
+        while (true) {
+            if (this.matchKeyword('instanceof')) {
+                expr = this.parseInstanceofRest(expr, this.previous());
+                continue;
+            }
+            if (this.matchOperator('<') || this.matchOperator('>') ||
+                this.matchOperator('<=') || this.matchOperator('>=')) {
+                const operator = this.previous();
+                const right = this.parseAdditive();
+                expr = makeBinary(operator, expr, right);
+                continue;
+            }
+            return expr;
         }
-        return expr;
+    }
+
+    parseInstanceofRest(argument, instanceofToken) {
+        let targetType;
+        if (this.isPrimitiveTypeKeywordAhead()) {
+            const primitiveToken = this.advance();
+            if (!this.checkSymbol('[')) {
+                throw new HamsterParserError('instanceof requires a reference type', primitiveToken);
+            }
+            targetType = primitiveToken.value;
+        } else {
+            targetType = this.consumeQualifiedName('Expected type name after instanceof');
+        }
+        let arrayDimensions = 0;
+        while (this.matchSymbol('[')) {
+            this.consumeSymbol(']', 'Expected ] after [ in instanceof type');
+            arrayDimensions += 1;
+        }
+        return {
+            type: ASTNodeType.InstanceofExpression,
+            argument,
+            targetType,
+            arrayDimensions,
+            loc: locationFrom(instanceofToken),
+        };
     }
 
     parseAdditive() {
@@ -1118,6 +1226,9 @@ class Parser {
                 continue;
             }
             if (this.matchSymbol('.')) {
+                if (this.checkKeyword('class')) {
+                    throw unsupportedConstructError(UnsupportedConstruct.ClassLiteral, this.peek());
+                }
                 const property = this.consumeIdentifier('Expected member name after .');
                 expr = {
                     type: ASTNodeType.MemberExpression,
@@ -1174,12 +1285,40 @@ class Parser {
             dimensions.push(this.checkSymbol(']') ? null : this.parseExpression());
             this.consumeSymbol(']', 'Expected ] after array dimension');
         }
+        let initializer = null;
+        if (this.checkSymbol('{')) {
+            if (dimensions.some(dimension => dimension !== null)) {
+                throw new HamsterParserError('Array initializer not allowed with explicit dimensions', this.peek());
+            }
+            initializer = this.parseArrayInitializer();
+        }
         return {
             type: ASTNodeType.NewExpression,
             callee,
             arguments: [],
             dimensions,
+            initializer,
             loc: locationFrom(newToken),
+        };
+    }
+
+    parseVariableInitializer() {
+        return this.checkSymbol('{') ? this.parseArrayInitializer() : this.parseExpression();
+    }
+
+    /** `{ a, { b, c }, }`: Java allows a trailing comma and an empty initializer. */
+    parseArrayInitializer() {
+        const lbrace = this.consumeSymbol('{', 'Expected { to start array initializer');
+        const elements = [];
+        while (!this.checkSymbol('}') && !this.isAtEnd()) {
+            elements.push(this.parseVariableInitializer());
+            if (!this.matchSymbol(',')) break;
+        }
+        this.consumeSymbol('}', 'Expected } to close array initializer');
+        return {
+            type: ASTNodeType.ArrayInitializer,
+            elements,
+            loc: locationFrom(lbrace),
         };
     }
 
@@ -1202,6 +1341,7 @@ class Parser {
                    this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
                 idx += 2;
             }
+            idx = this.indexAfterTypeArguments(idx);
         } else {
             return false;
         }
@@ -1218,6 +1358,7 @@ class Parser {
         while (this.matchSymbol('.')) {
             targetType += '.' + this.consumeIdentifier('Expected type name after .').value;
         }
+        this.skipTypeArguments();
         let arrayDimensions = 0;
         while (this.matchSymbol('[')) {
             this.consumeSymbol(']', 'Expected ] after [ in cast type');
@@ -1235,6 +1376,66 @@ class Parser {
 
     isPrimitiveTypeKeywordAhead() {
         return isPrimitiveTypeToken(this.peek());
+    }
+
+    /**
+     * Returns the index just past a balanced `<…>` type-argument list starting
+     * at `index`, or -1 if the tokens there are not one. Only type tokens may
+     * appear inside, so a comparison such as `a < b)` is never mistaken for
+     * type arguments. The lexer has no shift operators, so `>>` closing two
+     * levels arrives as two `>` tokens. The empty diamond `<>` is only valid
+     * after `new`.
+     */
+    scanTypeArgumentsEnd(index, allowsDiamond = false) {
+        if (!isOperatorToken(this.tokens[index], '<')) return -1;
+        if (isOperatorToken(this.tokens[index + 1], '>')) {
+            return allowsDiamond ? index + 2 : -1;
+        }
+        let depth = 0;
+        for (let idx = index; idx < this.tokens.length; idx++) {
+            const token = this.tokens[idx];
+            if (isOperatorToken(token, '<')) {
+                if (isOperatorToken(this.tokens[idx + 1], '>')) return -1;
+                depth += 1;
+            } else if (isOperatorToken(token, '>')) {
+                depth -= 1;
+                if (depth === 0) return idx + 1;
+            } else if (!isTypeArgumentToken(token)) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    /** Index after optional type arguments at `index`; `index` itself when there are none. */
+    indexAfterTypeArguments(index) {
+        const end = this.scanTypeArgumentsEnd(index);
+        return end >= 0 ? end : index;
+    }
+
+    /** Consumes type arguments if present; they are erased (research D2). */
+    skipTypeArguments(allowsDiamond = false) {
+        const end = this.scanTypeArgumentsEnd(this.current, allowsDiamond);
+        if (end < 0) return false;
+        this.current = end;
+        return true;
+    }
+
+    /** Parses `<T, U extends Bound>` if present and returns the declared names (empty when not generic). */
+    parseTypeParameters() {
+        if (!this.matchOperator('<')) return [];
+        const names = [];
+        do {
+            names.push(this.consumeIdentifier('Expected type parameter name').value);
+            if (this.matchKeyword('extends')) {
+                this.consumeTypeName(false);
+                while (this.matchSymbol('[')) {
+                    this.consumeSymbol(']', 'Expected ] after [ in type parameter bound');
+                }
+            }
+        } while (this.matchSymbol(','));
+        this.consumeOperator('>', 'Expected > to close type parameters');
+        return names;
     }
 
     ensureAssignableUpdateTarget(argument, operator) {
@@ -1320,6 +1521,7 @@ class Parser {
                     loc: callee.loc,
                 };
             }
+            this.skipTypeArguments(true);
 
             if (this.matchSymbol('(')) {
                 const args = [];
@@ -1334,6 +1536,7 @@ class Parser {
                     callee,
                     arguments: args,
                     dimensions: [],
+                    initializer: null,
                     loc: locationFrom(newToken),
                 };
             }
@@ -1395,7 +1598,7 @@ class Parser {
             return true;
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            let idx = this.current + 1;
+            let idx = this.indexAfterTypeArguments(this.current + 1);
             while (idx < this.tokens.length && this.tokens[idx]?.type === TokenType.SYMBOL && this.tokens[idx].value === '[') {
                 if (this.tokens[idx + 1]?.type !== TokenType.SYMBOL || this.tokens[idx + 1]?.value !== ']') {
                     return false;
@@ -1417,7 +1620,9 @@ class Parser {
             return this.advance();
         }
         if (this.checkToken(TokenType.IDENTIFIER)) {
-            return this.advance();
+            const typeToken = this.advance();
+            this.skipTypeArguments();
+            return typeToken;
         }
         throw new HamsterParserError('Expected type keyword', this.peek());
     }
@@ -1486,10 +1691,7 @@ class Parser {
     }
 
     isModifierToken(token) {
-        return token?.type === TokenType.KEYWORD &&
-            (token.value === 'public' || token.value === 'private' ||
-             token.value === 'protected' || token.value === 'static' ||
-             token.value === 'final' || token.value === 'abstract');
+        return token?.type === TokenType.KEYWORD && MODIFIER_KEYWORDS.has(token.value);
     }
 
     consumeQualifiedName(message) {
@@ -1498,6 +1700,7 @@ class Parser {
         while (this.matchSymbol('.')) {
             name += '.' + this.consumeIdentifier(message).value;
         }
+        this.skipTypeArguments();
         return name;
     }
 
@@ -1529,8 +1732,9 @@ class Parser {
             }
             let initializer = null;
             if (this.matchOperator('=')) {
-                initializer = this.parseExpression();
+                initializer = this.parseVariableInitializer();
             }
+            this.rejectMultipleDeclarators();
             this.consumeSymbol(';', 'Expected ; after variable declaration');
             return {
                 type: ASTNodeType.VariableDecl,
@@ -1540,31 +1744,76 @@ class Parser {
                 loc: locationFrom(nameToken),
             };
         } catch (error) {
+            // Known gaps are definitive answers, not reasons to try another parse.
+            if (error?.unsupportedConstruct) throw error;
             this.current = checkpoint;
             return null;
         }
     }
 
+    /** `a.b.Type name` at `index`: a declaration whose type is a qualified name (a known gap). */
+    isQualifiedTypeDeclarationAt(index) {
+        if (this.tokens[index]?.type !== TokenType.IDENTIFIER) return false;
+        let idx = index + 1;
+        let segments = 1;
+        while (isSymbolToken(this.tokens[idx], '.') && this.tokens[idx + 1]?.type === TokenType.IDENTIFIER) {
+            idx += 2;
+            segments += 1;
+        }
+        if (segments < 2) return false;
+        idx = this.indexAfterTypeArguments(idx);
+        while (isSymbolToken(this.tokens[idx], '[') && isSymbolToken(this.tokens[idx + 1], ']')) {
+            idx += 2;
+        }
+        return this.tokens[idx]?.type === TokenType.IDENTIFIER;
+    }
+
+    /** `[modifiers] enum Name {` at `index` (a known gap); `enum` is not a keyword in this lexer. */
+    isEnumDeclarationAt(index) {
+        let idx = index;
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx += 1;
+        }
+        const keyword = this.tokens[idx];
+        return keyword?.type === TokenType.IDENTIFIER && keyword.value === 'enum' &&
+            this.tokens[idx + 1]?.type === TokenType.IDENTIFIER &&
+            isSymbolToken(this.tokens[idx + 2], '{');
+    }
+
+    /** Throws the known-gap error for declarations this extension does not support. */
+    rejectUnsupportedDeclarationAt(index) {
+        if (this.isEnumDeclarationAt(index)) {
+            throw unsupportedConstructError(UnsupportedConstruct.Enum, this.tokens[index]);
+        }
+        let idx = index;
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx += 1;
+        }
+        if (this.isQualifiedTypeDeclarationAt(idx)) {
+            throw unsupportedConstructError(UnsupportedConstruct.QualifiedTypeName, this.tokens[idx]);
+        }
+    }
+
+    rejectMultipleDeclarators() {
+        if (this.checkSymbol(',')) {
+            throw unsupportedConstructError(UnsupportedConstruct.MultipleDeclarators, this.peek());
+        }
+    }
+
     isFunctionAhead() {
         let idx = this.current;
-        // skip modifiers
-        while (idx < this.tokens.length) {
-            const t = this.tokens[idx];
-            if (t.type === TokenType.KEYWORD && (t.value === 'public' || t.value === 'private' ||
-                t.value === 'protected' || t.value === 'static' || t.value === 'final' ||
-                t.value === 'abstract')) {
-                idx++;
-            } else {
-                break;
-            }
+        while (this.isModifierToken(this.tokens[idx])) {
+            idx++;
         }
+        // skip method type parameters (`<T> void f()`)
+        idx = this.indexAfterTypeArguments(idx);
         // skip return type
         const typeToken = this.tokens[idx];
         if (!typeToken) return false;
         if (typeToken.type === TokenType.KEYWORD && (typeToken.value === 'void' || typeToken.value === 'int' || typeToken.value === 'boolean')) {
             idx++;
         } else if (typeToken.type === TokenType.IDENTIFIER) {
-            idx++;
+            idx = this.indexAfterTypeArguments(idx + 1);
         } else {
             return false;
         }
@@ -1586,6 +1835,7 @@ class Parser {
             if (allowModifiers) {
                 this.skipModifiers();
             }
+            const typeParameters = this.parseTypeParameters();
             const returnType = this.consumeTypeName(true);
             const nameToken = this.consumeIdentifier('Expected function name');
             if (!this.checkSymbol('(')) {
@@ -1605,11 +1855,14 @@ class Parser {
                 type: ASTNodeType.FunctionDecl,
                 name: nameToken.value,
                 returnType: returnType.value,
+                typeParameters,
                 parameters,
                 body,
                 loc: locationFrom(nameToken),
             };
         } catch (error) {
+            // Known gaps are definitive answers, not reasons to try another parse.
+            if (error?.unsupportedConstruct) throw error;
             this.current = checkpoint;
             return null;
         }
@@ -1810,6 +2063,10 @@ function makeBinary(operatorToken, left, right) {
 
 const PRIMITIVE_TYPE_KEYWORDS = new Set(['int', 'boolean']);
 
+const MODIFIER_KEYWORDS = new Set([
+    'public', 'private', 'protected', 'static', 'final', 'abstract', 'synchronized',
+]);
+
 const REFERENCE_CAST_OPERAND_KEYWORDS = new Set(['this', 'super', 'new']);
 
 function isPrimitiveTypeToken(token) {
@@ -1818,6 +2075,28 @@ function isPrimitiveTypeToken(token) {
 
 function isSymbolToken(token, symbol) {
     return token?.type === TokenType.SYMBOL && token.value === symbol;
+}
+
+function isOperatorToken(token, operator) {
+    return token?.type === TokenType.OPERATOR && token.value === operator;
+}
+
+const TYPE_ARGUMENT_SYMBOLS = new Set(['.', ',', '?', '[', ']']);
+
+const TYPE_ARGUMENT_KEYWORDS = new Set(['extends', 'super', 'int', 'boolean']);
+
+/** Tokens that may appear between the angle brackets of a type-argument list (besides nested `<`/`>`). */
+function isTypeArgumentToken(token) {
+    switch (token?.type) {
+        case TokenType.IDENTIFIER:
+            return true;
+        case TokenType.SYMBOL:
+            return TYPE_ARGUMENT_SYMBOLS.has(token.value);
+        case TokenType.KEYWORD:
+            return TYPE_ARGUMENT_KEYWORDS.has(token.value);
+        default:
+            return false;
+    }
 }
 
 function canStartReferenceCastOperand(token) {

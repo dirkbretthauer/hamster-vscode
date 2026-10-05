@@ -202,12 +202,10 @@ export function createRunnerState(ast, runtime, classModules = []) {
     };
 
     // Initialize global variables into the root scope before main runs.
+    // Only constant initializers are evaluated here; others keep the type's default.
     for (const g of ast.globals || []) {
-        let value = defaultValueForType(g.varType);
-        if (g.initializer && g.initializer.type === ASTNodeType.Literal) {
-            value = g.initializer.value;
-        }
-        state.scopes[0].set(g.name, value);
+        const constant = constantInitializerValue(g.initializer);
+        state.scopes[0].set(g.name, constant.isConstant ? constant.value : defaultValueForType(g.varType));
     }
 
     state.generator = programGenerator(state, main);
@@ -537,20 +535,16 @@ function* executeStatementGen(node, state, callDepth) {
             return new BreakSignal();
 
         case ASTNodeType.TryStatement:
-            try {
-                return yield* executeStatementGen(node.block, state, callDepth);
-            } catch (error) {
-                if (!(error instanceof HamsterLanguageException) ||
-                    !exceptionMatchesType(error.value, node.handler.paramType, state)) {
-                    throw error;
-                }
-                state.scopes.push(new Map([[node.handler.paramName, error.value]]));
-                try {
-                    return yield* executeStatementGen(node.handler.body, state, callDepth);
-                } finally {
-                    state.scopes.pop();
-                }
+            return yield* executeTryStatementGen(node, state, callDepth);
+
+        case ASTNodeType.SynchronizedStatement: {
+            // The runner is single-threaded, so mutual exclusion holds without a real lock.
+            const lock = yield* evalExpressionGen(node.lock, state, callDepth);
+            if (lock == null) {
+                throw new Error('Cannot synchronize on null');
             }
+            return yield* executeStatementGen(node.body, state, callDepth);
+        }
 
         case ASTNodeType.ThrowStatement: {
             const value = yield* evalExpressionGen(node.argument, state, callDepth);
@@ -590,6 +584,53 @@ function* executeStatementGen(node, state, callDepth) {
 
         default:
             throw new Error('Unsupported statement type: ' + node.type);
+    }
+}
+
+/**
+ * Java `try`/`catch`/`finally`. Outcomes are captured explicitly rather than
+ * with a JavaScript `finally` around `yield*`: closing a suspended generator
+ * (e.g. when the debugger cleans up an evaluation) would otherwise run the
+ * program's own finally blocks.
+ */
+function* executeTryStatementGen(node, state, callDepth) {
+    let outcome = yield* captureOutcomeGen(executeStatementGen(node.block, state, callDepth));
+    if (outcome.threw && outcome.error instanceof HamsterLanguageException) {
+        const handler = node.handlers.find(candidate =>
+            exceptionMatchesType(outcome.error.value, candidate.paramType, state)
+        );
+        if (handler) {
+            outcome = yield* captureOutcomeGen(
+                executeCatchClauseGen(handler, outcome.error.value, state, callDepth)
+            );
+        }
+    }
+    if (node.finalizer) {
+        // A finally block that completes abruptly replaces the try/catch outcome.
+        const finalizerOutcome = yield* captureOutcomeGen(
+            executeStatementGen(node.finalizer, state, callDepth)
+        );
+        if (finalizerOutcome.threw) throw finalizerOutcome.error;
+        if (isControlSignal(finalizerOutcome.value)) return finalizerOutcome.value;
+    }
+    if (outcome.threw) throw outcome.error;
+    return outcome.value;
+}
+
+function* captureOutcomeGen(generator) {
+    try {
+        return { threw: false, value: yield* generator };
+    } catch (error) {
+        return { threw: true, error };
+    }
+}
+
+function* executeCatchClauseGen(handler, exceptionValue, state, callDepth) {
+    state.scopes.push(new Map([[handler.paramName, exceptionValue]]));
+    try {
+        return yield* executeStatementGen(handler.body, state, callDepth);
+    } finally {
+        state.scopes.pop();
     }
 }
 
@@ -648,6 +689,17 @@ function* evalExpressionGen(node, state, callDepth) {
             const delta = node.operator === '++' ? 1 : -1;
             reference.set(current + delta);
             return current;
+        }
+
+        case ASTNodeType.InstanceofExpression:
+            return isInstanceOf(yield* evalExpressionGen(node.argument, state, callDepth), node, state);
+
+        case ASTNodeType.ArrayInitializer: {
+            const elements = [];
+            for (const element of node.elements) {
+                elements.push(yield* evalExpressionGen(element, state, callDepth));
+            }
+            return elements;
         }
 
         case ASTNodeType.CastExpression:
@@ -1036,6 +1088,9 @@ function* evalNewExpressionGen(node, state, callDepth) {
  * left unsized: then the innermost sized level holds null sub-array slots.
  */
 function* evalArrayCreationGen(node, state, callDepth) {
+    if (node.initializer) {
+        return yield* evalExpressionGen(node.initializer, state, callDepth);
+    }
     const lengths = [];
     for (const dimension of node.dimensions) {
         if (dimension == null) break;
@@ -1058,6 +1113,36 @@ function createNestedArray(lengths, leafValue) {
         return new Array(length).fill(leafValue);
     }
     return Array.from({ length }, () => createNestedArray(innerLengths, leafValue));
+}
+
+/**
+ * Literal globals and array initializers built only from literals, which can be
+ * evaluated before `main` runs without executing any program code.
+ */
+function constantInitializerValue(initializer) {
+    if (initializer?.type === ASTNodeType.Literal) {
+        return { isConstant: true, value: initializer.value };
+    }
+    if (initializer?.type !== ASTNodeType.ArrayInitializer) {
+        return { isConstant: false };
+    }
+    const values = [];
+    for (const element of initializer.elements) {
+        const constant = constantInitializerValue(element);
+        if (!constant.isConstant) return { isConstant: false };
+        values.push(constant.value);
+    }
+    return { isConstant: true, value: values };
+}
+
+function isInstanceOf(value, node, state) {
+    if (value == null) return false;
+    if (node.arrayDimensions > 0) return Array.isArray(value);
+    const targetType = simpleTypeName(node.targetType);
+    if (targetType === 'Object') return true;
+    if (typeof value === 'string') return targetType === 'String';
+    const valueType = runtimeTypeName(value);
+    return valueType !== null && isAssignableToType(state, valueType, targetType);
 }
 
 function castValue(value, node, state) {

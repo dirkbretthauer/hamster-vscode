@@ -22,6 +22,11 @@ conformance**: the custom JS lexer/parser/runner in `lang/` covers most of Band 
 small fraction of Band 2 (the full Java-like OO/exception/concurrency model documented in
 `hamster-language.md`).
 
+**Update 2026-10-05 (feature `specs/001-full-sample-parsing`):** all 904 in-scope Java-like sample programs of
+the reference simulator now parse (`node scripts/conformance.cjs --min-pass-rate=1`). The other 16 use
+one of seven explicitly unsupported constructs and are reported as known gaps (see section 2).
+Concurrency and the Java class library remain runtime gaps.
+
 | Area | Spec doc(s) | Status |
 | --- | --- | --- |
 | Editor & syntax highlighting | `editor.md` | 🟢 Appropriate simplification via native VS Code + TextMate grammar |
@@ -31,14 +36,14 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 | Compiler pipeline | `compiler-pipeline.md` | 🟡 "Compile" is parse-validate only; no program-type marker handling |
 | Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement); 🟡 step-in/out not distinct |
 | Hamster language — Band 1 | `hamster-language.md` | 🟡 ~70–75% complete |
-| Hamster language — Band 2 (OO) | `hamster-language.md` | 🟡 Core class model implemented; exceptions/concurrency remain |
+| Hamster language — Band 2 (OO) | `hamster-language.md` | 🟢 Class model, generics (erased), exceptions incl. `finally`, `instanceof`; 🟡 concurrency remains |
 | Alternate frontends / 3D / i18n | `alternate-frontends.md`, `platform-concerns.md` | 🟢 Correctly out of scope, no confusing remnants |
 
 ## Detailed Findings
 
 ### 1. Language: Lexer (`lang/hamster-lexer.js`)
-- 🟢 Control-flow keywords `switch`, `case`, `default`, `break`, `try`, `catch`, and `throw` are recognized.
-- 🔴 Missing keyword: `instanceof`.
+- 🟢 Control-flow keywords `switch`, `case`, `default`, `break`, `try`, `catch`, `finally`, and `throw` are recognized, as are `instanceof` and `synchronized`.
+- 🟡 `long` literals (`0L`) are rejected with a tagged "not supported" error (known gap `long-literal`).
 - 🟢 Compound-assignment operators `+=`, `-=` are recognized.
 - 🟡 Identifier grammar excludes `$` (spec allows `[A-Za-z_$][A-Za-z0-9_$]*`).
 - 🟡 Unknown string escapes are silently accepted (drops backslash) instead of raising a lexical error.
@@ -47,8 +52,12 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 ### 2. Language: Parser (`lang/hamster-parser.js`)
 - 🟢 Full Band 1 statement/expression grammar: `if/else`, `while`, `do/while`, `for` (desugared), `return`, blocks, calls, member access, indexing, postfix `++`/`--`.
 - 🟢 Compatibility mode retains classes and interfaces with modifiers, inheritance, implemented interfaces, fields, constructors, and methods.
-- 🟢 `switch/case/default/break` and `try/catch/throw` parse to dedicated AST nodes.
-- 🔴 No `instanceof`.
+- 🟢 `switch/case/default/break` and `try/catch/finally/throw` (several `catch` clauses, optional `finally`) parse to dedicated AST nodes.
+- 🟢 `instanceof` parses at relational precedence, including qualified, generic, and array types.
+- 🟢 Generics: type arguments (nested, wildcards, diamond after `new`) and type parameters on classes, interfaces, and methods parse and are erased in the AST.
+- 🟢 `synchronized` parses as a method modifier and as a `synchronized (lock) { … }` statement.
+- 🟢 Array initializers (`{ … }`, nested, trailing comma) parse in declarations and after `new T[]`.
+- 🟡 Known gaps, each rejected with a tagged error (`unsupportedConstruct`): qualified type names in declarations, several variables in one local/global declaration, `enum`, class literals `Foo.class`, for-each loops, varargs, and `long` literals.
 - 🟢 Casts `(int) expr` / `(Type) expr` parse; `(int)` truncates like Java, and reference casts to known classes/interfaces throw a catchable `ClassCastException` on mismatch.
 - 🟢 Prefix and postfix `++`/`--` are parsed.
 - 🟢 Array creation (`new int[n]`, `new boolean[r][c]`, `new Type[n][]`) supports primitive element types and multiple dimensions, with Java default element values.
@@ -62,7 +71,10 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 - 🟢 `switch` uses Java-style matching and fall-through; `break` exits the nearest loop or switch.
 - 🟢 German and English Hamster API names dispatch consistently for top-level and object calls, including console input/output and property getters.
 - 🟢 `Territorium`/`Territory` static queries and German/English direction and color constants are available.
-- 🟡 No `start()`/`run()` concurrency — single hamster, single generator, single synthetic DAP thread.
+- 🟢 Multiple `catch` clauses match in order. `finally` runs on every exit path, and a `return`/`throw` inside it overrides the earlier outcome. `instanceof` uses the same class/interface hierarchy as casts and `catch` and is `false` for `null`.
+- 🟢 Array initializers evaluate their elements left to right; literal-only global initializers are constant-folded.
+- ⚪ Deviation: `synchronized` evaluates its lock (null is a runtime error) and runs its body once, but performs no locking, because the runner is single-threaded.
+- 🟡 No `start()`/`run()` concurrency — single hamster, single generator, single synthetic DAP thread. Thread methods (`start`, `join`, `wait`, `notify`, `Thread.sleep`, …) and Java library classes (`ArrayList`, …) fail with a message naming the unsupported feature or class.
 - 🟢 Program-type markers select imperative, object-oriented, or reusable-class parsing semantics; unmarked files default to imperative as in the reference implementation.
 - ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users.
 

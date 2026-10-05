@@ -36,6 +36,18 @@ function normalizeHamsterMethodName(name) {
 /** Sentinel returned by `callHamsterInstanceMethod` when `methodName` isn't a known built-in. */
 const HAMSTER_METHOD_NOT_HANDLED = Symbol('hamsterMethodNotHandled');
 
+/** `Thread`/`Object` concurrency methods: the runner executes a single hamster thread only. */
+const THREAD_METHOD_NAMES = new Set(['start', 'join', 'wait', 'notify', 'notifyAll', 'interrupt', 'sleep']);
+
+function unsupportedThreadError(methodName) {
+    return new Error(`Hamster threads (${methodName}) are not supported by this extension`);
+}
+
+/** Runtime-created placeholder objects stand in for Java library classes the simulator doesn't provide. */
+function unprovidedClassError(className, methodName) {
+    return new Error(`${className}.${methodName}: class ${className} is not provided by the Hamster simulator`);
+}
+
 function defaultHamsterId(args) {
     if (!args || args.length === 0) return -1;
     const first = args[0];
@@ -169,6 +181,10 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 if (methodName === 'equalsIgnoreCase') return receiver.toLowerCase() === String(args?.[0] ?? '').toLowerCase();
                 if (methodName === 'length') return receiver.length;
             }
+            if (THREAD_METHOD_NAMES.has(methodName)) throw unsupportedThreadError(methodName);
+            if (receiver && receiver.__kind === 'object' && !receiver.__className) {
+                throw unprovidedClassError(receiver.className, methodName);
+            }
             throw new Error('Unsupported method call: ' + methodName);
         },
         callBuiltin(name, args) {
@@ -176,6 +192,7 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             const separator = name.lastIndexOf('.');
             const receiverName = separator >= 0 ? name.slice(0, separator) : '';
             const rawMethodName = separator >= 0 ? name.slice(separator + 1) : name;
+            if (receiverName === 'Thread') throw unsupportedThreadError(rawMethodName);
             if (receiverName === 'Territorium' || receiverName === 'Territory') {
                 return callTerritoryBuiltin(rawMethodName, args);
             }

@@ -138,18 +138,27 @@ Usually no changes needed. The diagnostics system uses the parser's static ES-mo
 These features exist in the spec but are **not yet implemented**. Use this as a backlog reference:
 
 ### Lexer gaps
-- `instanceof` – not a keyword
 - `$` not allowed in identifiers
+- `long` literals (`0L`) – rejected as a known gap (`long-literal`)
 
-### Parser gaps
-- `instanceof` expression
-- Generics (`List<T>`, `class Box<T>`), `synchronized`, `enum`, enhanced `for`, `Foo.class`,
-  array initializers (`{ 1, 2 }`), multiple declarators (`A a = null, b = null;`), `finally`,
-  multiple `catch` clauses — the most frequent remaining failures in `npm run conformance`
+### Parser gaps (known gaps)
+These are recognised and rejected with a `HamsterParserError` whose `unsupportedConstruct` field holds
+the code in parentheses (see `UnsupportedConstruct`). `npm run conformance` reports them separately
+from real failures:
+- Qualified type names in declarations, e.g. `java.util.Calendar c;` (`qualified-type-name`)
+- Several variables in one local/global/`for` declaration, e.g. `A a = null, b = null;`
+  (`multiple-declarators`); multiple *field* declarators are supported
+- `enum` declarations (`enum`)
+- Class literals `Foo.class` (`class-literal`)
+- for-each loops `for (T x : xs)` (`enhanced-for`)
+- Varargs parameters `T... xs` (`varargs`)
+- Not tagged, plain syntax errors (no sample uses them): explicit generic call type arguments
+  (`obj.<T>m()`), `&` type-parameter bounds, multi-catch unions (`catch (A | B e)`), try-with-resources
 
 ### Runner gaps
-- `instanceof` – not handled
-- No concurrency (`start()`/`run()`)
+- No concurrency (`start()`/`run()`); `synchronized` runs without locking (single thread)
+- No Java library classes (`ArrayList`, `HashMap`, `Thread`, …): calls fail with a message naming the class
+- Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
 
 ## Conventions
 
@@ -164,11 +173,13 @@ These features exist in the spec but are **not yet implemented**. Use this as a 
 
 `npm test` runs `scripts/language-smoke.cjs` (lexer/parser/runner smoke coverage) and
 `node --test` (unit suites under `test/`, covering terrain parse/serialize round trips,
-terrain-file resolution, host/webview message guards, and executable-line collection).
+terrain-file resolution, host/webview message guards, executable-line collection, and the
+simulator runtime adapter's error messages).
 There is no automated webview/DAP integration suite yet. For a broader parser check, run
-`npm run conformance` (optionally `-- <referenceDir> --verbose --min-pass-rate=0.85`), which parses
-all ~950 sample programs under the reference simulator's `Programme/` folder and groups the failures;
-it is not part of `npm test` because the corpus lives outside the repo. After making a language change:
+`node scripts/conformance.cjs --min-pass-rate=1` (also `npm run conformance`; in PowerShell `npm`
+may drop the `--` flags), which parses all ~950 sample programs under the reference simulator's
+`Programme/` folder. Every in-scope program must parse; known gaps are listed separately by code.
+It is not part of `npm test` because the corpus lives outside the repo. After making a language change:
 1. Build: `npm run compile`
 2. Run `npm test` for fast regression coverage of the lexer/parser/runner and the above helpers.
 3. Launch the extension in VS Code (F5) and open a `.ham` file.

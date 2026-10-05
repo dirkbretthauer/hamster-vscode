@@ -20,6 +20,7 @@ const KEYWORDS = new Set([
     'break',
     'try',
     'catch',
+    'finally',
     'throw',
     'return',
     'new',
@@ -32,6 +33,8 @@ const KEYWORDS = new Set([
     'static',
     'final',
     'abstract',
+    'synchronized',
+    'instanceof',
     'throws',
     'package',
     'import',
@@ -102,13 +105,28 @@ export class Token {
     }
 }
 
+/**
+ * Java syntax the extension recognises but deliberately does not support.
+ * Errors carrying one of these codes are known gaps rather than parse bugs.
+ */
+export const UnsupportedConstruct = Object.freeze({
+    QualifiedTypeName: 'qualified-type-name',
+    MultipleDeclarators: 'multiple-declarators',
+    Enum: 'enum',
+    ClassLiteral: 'class-literal',
+    LongLiteral: 'long-literal',
+    EnhancedFor: 'enhanced-for',
+    Varargs: 'varargs',
+});
+
 export class HamsterLexerError extends Error {
-    constructor(message, line, column, length = 1) {
+    constructor(message, line, column, length = 1, unsupportedConstruct = null) {
         super(`Line ${line}, column ${column}: ${message}`);
         this.name = 'HamsterLexerError';
         this.line = line;
         this.column = column;
         this.length = length;
+        this.unsupportedConstruct = unsupportedConstruct;
     }
 }
 
@@ -154,6 +172,16 @@ export class HamsterLexer {
 
         if (isDigit(ch)) {
             const value = this.readNumber(ch);
+            if (this.peek() === 'L' || this.peek() === 'l') {
+                this.advance();
+                throw new HamsterLexerError(
+                    'long literals are not supported',
+                    startLine,
+                    startColumn,
+                    this.index - startIndex,
+                    UnsupportedConstruct.LongLiteral
+                );
+            }
             return new Token(TokenType.INTEGER, value, startLine, startColumn, this.index - startIndex);
         }
 
