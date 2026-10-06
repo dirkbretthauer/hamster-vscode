@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — Cooperative Hamster Threads
+## 0.5.0
+
+### Cooperative Hamster Threads
 
 - Several hamsters can now act at the same time: `start()` runs a hamster's `run()` method
   concurrently, over one shared terrain, the way the reference simulator does
@@ -27,7 +29,7 @@
 - Interleaving is deliberately varied, so a program with unprotected shared data can genuinely go
   wrong; two runs of the same concurrent program may differ
 
-## Unreleased — Full Sample-Program Parsing
+### Full Sample-Program Parsing
 
 - All 920 Java-like sample programs of the reference Hamster Simulator now parse without false errors
 - Formerly unsupported constructs now work:
