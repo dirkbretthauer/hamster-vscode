@@ -41,6 +41,7 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['HamsterNichtInitialisiertException', 'HamsterException'],
     ['HamsterException', 'RuntimeException'],
     ['ClassCastException', 'RuntimeException'],
+    ['InterruptedException', 'Exception'],
     ['RuntimeException', 'Exception'],
     ['Exception', 'Throwable'],
     ['Throwable', 'Object'],
@@ -67,6 +68,26 @@ const HAMSTER_INSTRUCTIONS = new Set([
 ]);
 
 const DEBUG_EVALUATION_STEP_LIMIT = 10000;
+
+/**
+ * Loop iterations a thread may run without making observable progress before it
+ * is treated as runaway. A hamster thread is allowed to loop forever as long as
+ * it keeps acting — `while (true) { … vor(); }` is the normal shape of a
+ * concurrent hamster — so the counter resets on every hamster instruction and
+ * every blocking operation (see `markThreadProgress`).
+ */
+const LOOP_PROGRESS_LIMIT = 100000;
+
+function consumeLoopProgress(state) {
+    state.loopProgress = (state.loopProgress || 0) + 1;
+    if (state.loopProgress > LOOP_PROGRESS_LIMIT) {
+        throw new Error('Loop iteration limit exceeded');
+    }
+}
+
+function markThreadProgress(state) {
+    state.loopProgress = 0;
+}
 
 const JAVA_INT_MIN = -2147483648;
 const JAVA_INT_MAX = 2147483647;
@@ -123,7 +144,7 @@ function isKnownBuiltinName(name) {
 // Public API – createRunnerState / executeRunnerStep
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function createRunnerState(ast, runtime, classModules = []) {
+export function createProgramState(ast, runtime, classModules = []) {
     const functions = new Map();
     for (const fn of ast.functions || []) {
         if (!functions.has(fn.name)) {
@@ -188,7 +209,7 @@ export function createRunnerState(ast, runtime, classModules = []) {
         throw new Error('Runner runtime must provide callBuiltin(name, args, functions)');
     }
 
-    const state = {
+    const programState = {
         ast,
         functions,
         classes,
@@ -197,29 +218,104 @@ export function createRunnerState(ast, runtime, classModules = []) {
         staticInitializersByClass,
         classInitialization,
         runtime,
-        finished: false,
-        scopes: [new Map()],
-        // Legacy stack field kept for backward-compatible state inspection.
-        stack: [],
-        // Call frames for debugger integration. Each entry:
-        //   { name, loc, scopeIndex, callerLoc }
-        // The root frame (main) is pushed by programGenerator.
-        frames: [],
         // One canonical value per class name, so `Foo.class == Foo.class` holds.
+        // Doubles as the lock identity for class-level `synchronized`.
         classLiterals: new Map(),
         // Enum name → its constants in declaration order.
         enumConstants,
-        generator: null,
+        // The single globals scope; every thread's `scopes[0]` is this same Map.
+        globalScope: new Map(),
+        // Lock object → monitor record. A plain Map, not a WeakMap, so the
+        // deadlock reporter can enumerate who holds what.
+        monitors: new Map(),
+        scheduler: null,
     };
 
-    // Initialize global variables into the root scope before main runs.
+    // Initialize global variables into the shared root scope before main runs.
     // Only constant initializers are evaluated here; others keep the type's default.
     for (const g of ast.globals || []) {
         const constant = constantInitializerValue(g.initializer);
-        state.scopes[0].set(g.name, constant.isConstant ? constant.value : defaultValueForType(g.varType));
+        programState.globalScope.set(g.name, constant.isConstant ? constant.value : defaultValueForType(g.varType));
     }
 
+    return { programState, main };
+}
+
+/** Fields every thread reads from the one shared program state. */
+const SHARED_STATE_FIELDS = [
+    'ast', 'functions', 'classes', 'staticFields', 'staticInitializers',
+    'staticInitializersByClass', 'classInitialization', 'runtime',
+    'classLiterals', 'enumConstants', 'globalScope', 'monitors', 'scheduler',
+];
+
+/**
+ * Build the per-thread half of the runner state: the shared program fields by
+ * reference, plus this thread's own registers. Because the runner threads
+ * `state` through every generator as an explicit parameter, a thread with its
+ * own state object needs no changes to any generator body.
+ *
+ * `scopes[0]` is the *same* Map as `programState.globalScope` — copying it
+ * would silently fork the globals.
+ */
+function makeThreadState(programState) {
+    const state = {};
+    for (const field of SHARED_STATE_FIELDS) {
+        Object.defineProperty(state, field, {
+            get: () => programState[field],
+            enumerable: true,
+            configurable: true,
+        });
+    }
+    state.programState = programState;
+    state.scopes = [programState.globalScope];
+    state.frames = [];
+    state.finished = false;
+    state.lastInstruction = null;
+    state.generator = null;
+    state.thread = null;
+    state.loopProgress = 0;
+    return state;
+}
+
+/**
+ * Create the thread state for a started hamster. `runMethod` may be null, in
+ * which case the thread finishes immediately without error.
+ */
+export function createThreadState(programState, runMethod, receiver) {
+    const state = makeThreadState(programState);
+    state.generator = threadBodyGenerator(state, runMethod, receiver);
+    return state;
+}
+
+function* threadBodyGenerator(state, runMethod, receiver) {
+    try {
+        if (runMethod) {
+            yield* invokeUserFunctionGen(
+                runMethod, [], state, 1, receiver, runMethod.owner || receiver?.__className || null
+            );
+        }
+    } finally {
+        state.finished = true;
+    }
+}
+
+/**
+ * Backward-compatible entry point: builds the program state and returns the
+ * main thread's state, which is what every existing caller expects.
+ *
+ * `options.createScheduler` is injected by the caller (the webview bundle or a
+ * test) so the runner never has to import the scheduler, keeping the module
+ * dependency one-directional.
+ */
+export function createRunnerState(ast, runtime, classModules = [], options = {}) {
+    const { programState, main } = createProgramState(ast, runtime, classModules);
+    const state = makeThreadState(programState);
     state.generator = programGenerator(state, main);
+    const factory = options.createScheduler ||
+        (typeof globalThis !== 'undefined' ? globalThis.createScheduler : null);
+    if (typeof factory === 'function') {
+        factory(programState, options.schedulerOptions).registerMain(state);
+    }
     return state;
 }
 
@@ -248,13 +344,25 @@ export function executeRunnerStep(state, opts) {
 
         const yielded = result.value;
         if (yielded && yielded.kind === 'needsInput') {
+            markThreadProgress(state);
             throw new RunnerPause(yielded.message || 'Waiting for input');
+        }
+
+        // A parked thread is making progress in the scheduler's sense, but it
+        // is not executing an instruction, so `lastInstruction` must survive.
+        if (yielded && yielded.kind === 'blocked') {
+            markThreadProgress(state);
+            return true;
         }
 
         // In coarse 'instruction' mode, swallow statement-level yields so
         // visible stepping stays at one-hamster-instruction-per-step.
         if (granularity === 'instruction' && yielded && yielded.kind === 'statement') {
             continue;
+        }
+
+        if (yielded && yielded.kind === 'instruction') {
+            markThreadProgress(state);
         }
 
         state.lastInstruction = yielded || null;
@@ -486,9 +594,8 @@ function* executeStatementGen(node, state, callDepth) {
         }
 
         case ASTNodeType.WhileStatement: {
-            let guard = 0;
             while (truthy(yield* evalExpressionGen(node.test, state, callDepth))) {
-                if (++guard > 100000) throw new Error('Loop iteration limit exceeded');
+                consumeLoopProgress(state);
                 const result = yield* executeStatementGen(node.body, state, callDepth);
                 if (result instanceof BreakSignal) return undefined;
                 if (result instanceof ReturnSignal) return result;
@@ -497,9 +604,8 @@ function* executeStatementGen(node, state, callDepth) {
         }
 
         case ASTNodeType.DoWhileStatement: {
-            let guard = 0;
             do {
-                if (++guard > 100000) throw new Error('Loop iteration limit exceeded');
+                consumeLoopProgress(state);
                 const result = yield* executeStatementGen(node.body, state, callDepth);
                 if (result instanceof BreakSignal) return undefined;
                 if (result instanceof ReturnSignal) return result;
@@ -569,12 +675,22 @@ function* executeStatementGen(node, state, callDepth) {
             return yield* executeTryStatementGen(node, state, callDepth);
 
         case ASTNodeType.SynchronizedStatement: {
-            // The runner is single-threaded, so mutual exclusion holds without a real lock.
             const lock = yield* evalExpressionGen(node.lock, state, callDepth);
             if (lock == null) {
                 throw new Error('Cannot synchronize on null');
             }
-            return yield* executeStatementGen(node.body, state, callDepth);
+            if (!state.scheduler) {
+                // No scheduler attached (debugger evaluation): nothing to exclude.
+                return yield* executeStatementGen(node.body, state, callDepth);
+            }
+            yield* state.scheduler.enterMonitor(lock);
+            try {
+                return yield* executeStatementGen(node.body, state, callDepth);
+            } finally {
+                // Released on every exit path, including an exception unwinding
+                // out of the section or the thread being terminated.
+                state.scheduler.exitMonitor(lock);
+            }
         }
 
         case ASTNodeType.ThrowStatement: {
@@ -828,6 +944,16 @@ function* evalCallExpressionGen(node, state, callDepth) {
             return classLiteralFor(state, runtimeTypeName(receiver));
         }
 
+        if (receiver?.__kind === 'class' && receiver.name === 'Thread') {
+            const staticResult = yield* tryThreadStaticGen(methodName, args, state);
+            if (staticResult !== THREAD_OPERATION_NOT_HANDLED) return staticResult;
+        }
+
+        const memberThreadResult = yield* tryThreadOperationGen(
+            receiver, methodName, args, state, node.loc
+        );
+        if (memberThreadResult !== THREAD_OPERATION_NOT_HANDLED) return memberThreadResult;
+
         if (receiver?.__kind === 'enum') {
             return invokeEnumMethod(receiver, methodName, args);
         }
@@ -974,6 +1100,11 @@ function* invokeUserFunctionGen(fn, args, state, callDepth, receiver = null, cla
         className: className || fn.owner || null,
     });
     state.scopes.push(functionScope);
+    // A `synchronized` method locks `this` for an instance method and the
+    // class literal for a static one. `classLiteralFor` returns one canonical
+    // object per class, so class-level locking needs no special case.
+    const lock = synchronizedMethodLock(fn, state, receiver, className);
+    if (lock) yield* state.scheduler.enterMonitor(lock);
     try {
         if (!fn.body) {
             throw new Error('Cannot invoke abstract method ' + fn.name);
@@ -984,9 +1115,18 @@ function* invokeUserFunctionGen(fn, args, state, callDepth, receiver = null, cla
         }
         return fn.returnType === 'void' ? undefined : defaultValueForType(fn.returnType);
     } finally {
+        if (lock) state.scheduler.exitMonitor(lock);
         state.scopes.pop();
         state.frames.pop();
     }
+}
+
+function synchronizedMethodLock(fn, state, receiver, className) {
+    if (!state.scheduler) return null;
+    if (!(fn.modifiers || []).includes('synchronized')) return null;
+    if (receiver != null) return receiver;
+    const owner = className || fn.owner;
+    return owner ? classLiteralFor(state, owner) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1967,6 +2107,130 @@ function classHasNativeHamsterBase(state, className) {
     return false;
 }
 
+/** Returned by `tryThreadOperationGen` when the call is not a thread/monitor operation. */
+const THREAD_OPERATION_NOT_HANDLED = Symbol('threadOperationNotHandled');
+
+/** Members that act on the thread behind a hamster or `Runnable` object. */
+const THREAD_INSTANCE_OPERATIONS = new Set([
+    'start', 'join', 'interrupt', 'isInterrupted', 'isAlive', 'stop',
+    'setDaemon', 'isDaemon', 'setPriority', 'getPriority', 'setName', 'getName',
+]);
+
+/** Monitor members, legal on any object. */
+const MONITOR_OPERATIONS = new Set(['wait', 'notify', 'notifyAll']);
+
+function requireThreadPriority(value) {
+    const priority = Number(value);
+    if (!Number.isInteger(priority) || priority < 1 || priority > 10) {
+        throw new Error('Thread priority must be between 1 and 10');
+    }
+    return priority;
+}
+
+/**
+ * Intercept thread and monitor operations before they reach the runtime
+ * adapter. They must be able to block, which means yielding to the scheduler —
+ * something the synchronous adapter cannot do.
+ */
+function* tryThreadOperationGen(receiver, methodName, args, state, loc) {
+    const scheduler = state.scheduler;
+    if (!scheduler) return THREAD_OPERATION_NOT_HANDLED;
+    if (!receiver || typeof receiver !== 'object') return THREAD_OPERATION_NOT_HANDLED;
+
+    if (MONITOR_OPERATIONS.has(methodName)) {
+        try {
+            if (methodName === 'wait') {
+                yield* scheduler.monitorWait(receiver, args.length > 0 ? Number(args[0]) : 0);
+                return undefined;
+            }
+            scheduler.monitorNotify(receiver, methodName === 'notifyAll');
+            return undefined;
+        } catch (error) {
+            throw normalizeBuiltinFailure(error);
+        }
+    }
+
+    if (!THREAD_INSTANCE_OPERATIONS.has(methodName)) return THREAD_OPERATION_NOT_HANDLED;
+
+    const className = receiver.__className || receiver.className || null;
+    let thread = scheduler.threadFor(receiver);
+
+    try {
+        switch (methodName) {
+            case 'start': {
+                if (thread) {
+                    throw new Error('Hamster ' + thread.name + ' has already been started');
+                }
+                const runMethod = className
+                    ? findMethod(state, className, 'run', 0, false)
+                    : null;
+                thread = scheduler.spawn(receiver, runMethod, className || 'Hamster');
+                scheduler.start(thread);
+                return undefined;
+            }
+            case 'join':
+                yield* scheduler.join(thread, args.length > 0 ? Number(args[0]) : 0);
+                return undefined;
+            case 'interrupt':
+                scheduler.interrupt(thread);
+                return undefined;
+            case 'isInterrupted':
+                return scheduler.isInterrupted(thread);
+            case 'isAlive':
+                return Boolean(thread) && thread.status !== scheduler.ThreadStatus.TERMINATED &&
+                    thread.status !== scheduler.ThreadStatus.NEW;
+            case 'stop':
+                scheduler.stopThread(thread);
+                return undefined;
+            case 'setDaemon': {
+                if (thread) throw new Error('setDaemon must be called before start()');
+                scheduler.setPendingDaemon(receiver, truthy(args[0]));
+                return undefined;
+            }
+            case 'isDaemon':
+                return thread ? thread.daemon : scheduler.pendingDaemon(receiver);
+            case 'setPriority':
+                scheduler.setPendingPriority(receiver, requireThreadPriority(args[0]), thread);
+                return undefined;
+            case 'getPriority':
+                return thread ? thread.priority : scheduler.pendingPriority(receiver);
+            case 'setName':
+                scheduler.setThreadName(receiver, String(args[0] ?? ''), thread);
+                return undefined;
+            case 'getName':
+                return thread ? thread.name : scheduler.pendingName(receiver, className);
+            default:
+                return THREAD_OPERATION_NOT_HANDLED;
+        }
+    } catch (error) {
+        throw normalizeBuiltinFailure(error);
+    }
+}
+
+/** `Thread.sleep` / `Thread.currentThread` / `Thread.yield` / `Thread.interrupted`. */
+function* tryThreadStaticGen(methodName, args, state) {
+    const scheduler = state.scheduler;
+    if (!scheduler) return THREAD_OPERATION_NOT_HANDLED;
+    try {
+        switch (methodName) {
+            case 'sleep':
+                yield* scheduler.sleep(args.length > 0 ? Number(args[0]) : 0);
+                return undefined;
+            case 'yield':
+                yield* scheduler.yieldNow();
+                return undefined;
+            case 'currentThread':
+                return scheduler.currentThreadHandle();
+            case 'interrupted':
+                return scheduler.consumeInterrupted();
+            default:
+                return THREAD_OPERATION_NOT_HANDLED;
+        }
+    } catch (error) {
+        throw normalizeBuiltinFailure(error);
+    }
+}
+
 function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, startClass, loc) {
     const method = findMethod(state, startClass, methodName, args.length, false);
     if (method) {
@@ -1975,6 +2239,9 @@ function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, 
             method, args, state, callDepth + 1, receiver, method.owner
         );
     }
+    const threadResult = yield* tryThreadOperationGen(receiver, methodName, args, state, loc);
+    if (threadResult !== THREAD_OPERATION_NOT_HANDLED) return threadResult;
+
     if (isHamsterInstruction(methodName)) {
         yield { kind: 'instruction', name: methodName, loc: loc || null };
     }

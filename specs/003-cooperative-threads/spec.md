@@ -231,7 +231,10 @@ inspected separately, and that resuming continues the interleaving.
 - **FR-011**: The system MUST let a hamster voluntarily offer a switch to the other hamsters.
 - **FR-012**: Hamster priorities MUST influence how often a hamster is chosen: a higher-priority
   hamster is selected more often than a lower-priority one, without a lower-priority hamster ever
-  being starved entirely.
+  being starved entirely. *Note: this is a knowing deviation from the reference, whose formula
+  (`random() * (2 + MAX_PRIORITY - getPriority())`) gives higher-priority threads more no-op yield
+  points — the opposite of the intuitive meaning adopted here. It must be written up under
+  FR-038.*
 - **FR-013**: Execution speed, stepping, and pausing in the simulator MUST apply to the program as
   a whole, so that lowering the speed slows all hamsters equally.
 - **FR-014**: The existing runaway-loop safeguards MUST remain effective against genuinely stuck
@@ -326,10 +329,14 @@ inspected separately, and that resuming continues the interleaving.
 
 ### Measurable Outcomes
 
-- **SC-001**: All concurrency-using programs in the reference course material (159 of the ~950
-  reference sample programs, Band 3 chapters 10-12) run in the simulator and reach their intended
-  outcome or their intended blocking state, with none failing because a concurrency feature is
-  unsupported.
+- **SC-001**: Of the **158** concurrency-using programs in the reference course material (Band 3
+  chapters 10-12, out of ~950 reference sample programs), the **95 that need nothing beyond
+  threads and monitors** run in the simulator and reach their intended outcome or their intended
+  blocking state, with none failing because a concurrency feature is unsupported. The remaining 63
+  are reported by category rather than counted as concurrency failures: 49 additionally need
+  `util.AllroundHamster` (a pre-existing import gap, not concurrency — up to 144 become reachable
+  once that is handled separately), 9 need `java.util.concurrent` or `java.util.Timer`, and 5 need
+  collection classes. The last two groups are out of scope per the Assumptions below.
 - **SC-002**: A teacher can demonstrate the difference between an unprotected and a protected
   version of the same shared-counter program: across 20 consecutive runs the protected version
   produces the correct total every time, while the unprotected version produces a wrong total at
@@ -339,9 +346,8 @@ inspected separately, and that resuming continues the interleaving.
 - **SC-003**: The classic coordination exercises - semaphore, bounded producer/consumer, dining
   philosophers, readers/writers - complete without losing or duplicating grain and without the
   simulator freezing.
-- **SC-004**: A program with ten concurrently acting hamsters runs without the user perceiving the
-  simulation as slower per action than the same program with one hamster at the same speed
-  setting.
+- **SC-004**: Ten concurrently acting hamsters complete a fixed workload within 110% of the
+  wall-clock time the same workload takes with one hamster at the same speed setting.
 - **SC-005**: A program in which every hamster is permanently blocked tells the user it is stuck
   within 2 seconds, instead of appearing to hang.
 - **SC-006**: A student watching the simulator can tell, at every step, which hamster just acted.

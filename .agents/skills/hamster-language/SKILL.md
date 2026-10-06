@@ -151,10 +151,32 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   (`obj.<T>m()`), `&` type-parameter bounds, multi-catch unions (`catch (A | B e)`), try-with-resources
 
 ### Runner gaps
-- No concurrency (`start()`/`run()`); `synchronized` runs without locking (single thread)
-- No Java library classes (`ArrayList`, `HashMap`, `Thread`, …): calls fail with a message naming the class
+- No Java library classes (`ArrayList`, `HashMap`, `java.util.concurrent.*`, `java.util.Timer`, …):
+  calls fail with a message naming the class. Note `Thread`'s *own* members are supported (see below);
+  it is the library classes around it that are not.
 - for-each iterates arrays only; collections fail with a message naming the type
 - Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
+
+### Concurrency (supported since `specs/003-cooperative-threads`)
+A started hamster is its own cooperatively-scheduled thread, matching the reference where
+`IHamster extends Thread` and every hamster command is a scheduling point.
+- `lang/hamster-scheduler.js` owns threads, monitors, and the simulation clock. Imports flow one
+  way: the scheduler imports the runner; the runner reaches it at runtime via `programState.scheduler`.
+- Runner state is split: `createProgramState` holds the nine shared fields, `createThreadState`
+  adds the five per-thread registers (`scopes`, `frames`, `generator`, `finished`,
+  `lastInstruction`). **`scopes[0]` must be the same Map as `programState.globalScope`** or globals
+  fork silently. `createRunnerState` stays as the backward-compatible wrapper.
+- Thread and monitor operations are intercepted *in the runner* (`tryThreadOperationGen` /
+  `tryThreadStaticGen`) before reaching the runtime adapter, because they must block, which means
+  yielding — the adapter is synchronous and cannot.
+- The loop guard is a per-thread progress budget that resets on hamster instructions and blocking
+  operations, so `while (true) { … vor(); }` is legal.
+- Scheduling is deliberately varied (so unprotected programs can go wrong); tests must assert
+  interleaving-independent invariants and inject `random` rather than pin an exact order.
+- Deviations are tabulated in `spec/vscode-port-status.md` (2026-10-06 update).
+
+### Removed
+- The dead `state.stack` field is gone — it was declared but never read or written.
 
 ## Conventions
 

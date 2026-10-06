@@ -13,5 +13,6 @@ import * as lexer from '../../lang/hamster-lexer.js';
 import * as parser from '../../lang/hamster-parser.js';
 import * as runner from '../../lang/hamster-runner.js';
 import * as terrain from '../../lang/hamster-terrain.js';
+import * as scheduler from '../../lang/hamster-scheduler.js';
 
-Object.assign(window, lexer, parser, runner, terrain);
+Object.assign(window, lexer, parser, runner, terrain, scheduler);

@@ -7,7 +7,13 @@ import {
 import { HamsterPanel } from './hamsterPanel';
 import { resolveTerrain } from './terrainResolver';
 import { resolveHamsterClassSources } from './hamsterClassResolver';
-import { DebugHostToPanelMessage, DebugPanelToHostMessage } from './webviewProtocol';
+import { DebugHostToPanelMessage, DebugPanelToHostMessage, DebugThreadInfo } from './webviewProtocol';
+
+/** The DAP thread a request targets; thread 1 (main) when the client omits it. */
+function threadIdOf(request: { arguments?: { threadId?: number } }): number {
+    const threadId = request.arguments?.threadId;
+    return typeof threadId === 'number' && threadId > 0 ? threadId : 1;
+}
 
 interface PendingRequest {
     resolve: (value: any) => void;
@@ -138,10 +144,18 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
             case 'dbg:stopped':
                 this.sendEvent('stopped', {
                     reason: msg.reason || 'step',
-                    threadId: 1,
+                    threadId: msg.threadId,
+                    // Execution is cooperative: only one hamster is ever
+                    // mid-action, so stopping really does stop them all.
                     allThreadsStopped: true,
                     text: msg.text,
                 });
+                return;
+            case 'dbg:threadStarted':
+                this.sendEvent('thread', { reason: 'started', threadId: msg.threadId });
+                return;
+            case 'dbg:threadExited':
+                this.sendEvent('thread', { reason: 'exited', threadId: msg.threadId });
                 return;
             case 'dbg:terminated':
                 if (!this._terminated) {
@@ -198,7 +212,7 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
                 return;
 
             case 'threads':
-                this.sendResponse(request, { threads: [{ id: 1, name: 'Hamster' }] });
+                await this.handleThreads(request);
                 return;
 
             case 'stackTrace':
@@ -220,17 +234,17 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
 
             case 'next':
                 this.sendResponse(request);
-                this.toPanel({ type: 'dbg:next' });
+                this.toPanel({ type: 'dbg:next', threadId: threadIdOf(request) });
                 return;
 
             case 'stepIn':
                 this.sendResponse(request);
-                this.toPanel({ type: 'dbg:stepIn' });
+                this.toPanel({ type: 'dbg:stepIn', threadId: threadIdOf(request) });
                 return;
 
             case 'stepOut':
                 this.sendResponse(request);
-                this.toPanel({ type: 'dbg:stepOut' });
+                this.toPanel({ type: 'dbg:stepOut', threadId: threadIdOf(request) });
                 return;
 
             case 'pause':
@@ -434,9 +448,28 @@ export class HamsterDebugSession implements vscode.DebugAdapter {
         return new TextDecoder('utf-8').decode(data);
     }
 
+    private async handleThreads(request: any): Promise<void> {
+        try {
+            const res: any = await this.requestFromPanel({ type: 'dbg:threads' });
+            const threads = (res.threads || []).map((thread: DebugThreadInfo) => ({
+                id: thread.id,
+                // Surfacing why a hamster is stopped is the whole point of
+                // listing blocked threads, so it goes in the visible name.
+                name: thread.detail ? `${thread.name} (${thread.detail})` : thread.name,
+            }));
+            this.sendResponse(request, {
+                threads: threads.length > 0 ? threads : [{ id: 1, name: 'main' }],
+            });
+        } catch (e: any) {
+            this.sendErrorResponse(request, e?.message ?? String(e));
+        }
+    }
+
     private async handleStackTrace(request: any): Promise<void> {
         try {
-            const res: any = await this.requestFromPanel({ type: 'dbg:stackTrace' });
+            const res: any = await this.requestFromPanel({
+                type: 'dbg:stackTrace', threadId: threadIdOf(request),
+            });
             const sourcePath = this._programPath;
             const frames = (res.frames || []).map((f: any) => ({
                 id: f.id,

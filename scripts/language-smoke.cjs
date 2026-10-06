@@ -1520,6 +1520,35 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     while (runner.executeRunnerStep(enumModuleState)) {}
     assert.equal(enumModuleState.scopes[0].get('position'), 1);
 
+    // ── program/thread state split (003-cooperative-threads, T016) ──────────
+    // The split must be invisible to single-threaded programs: `createRunnerState`
+    // still returns a usable thread state, globals still live in `scopes[0]`, and
+    // that Map is the one shared globals scope on the program state.
+    const splitState = runner.createRunnerState(
+        parses('int total = 0; void main() { total = 7; }'),
+        createRuntime()
+    );
+    while (runner.executeRunnerStep(splitState)) {}
+    assert.equal(splitState.scopes[0].get('total'), 7);
+    assert.equal(splitState.scopes[0], splitState.programState.globalScope,
+        'scopes[0] must be the shared globals Map, not a copy');
+    assert.equal(splitState.staticFields, splitState.programState.staticFields);
+    assert.equal(splitState.programState.scheduler, null,
+        'no scheduler is attached unless the caller injects one');
+
+    // A program that starts no hamster behaves exactly as before, including the
+    // runaway-loop guard, which is now a per-thread progress budget.
+    assert.throws(
+        () => {
+            const spinState = runner.createRunnerState(
+                parses('void main() { int i = 0; while (true) { i = i + 1; } }'),
+                createRuntime()
+            );
+            while (runner.executeRunnerStep(spinState)) {}
+        },
+        /Loop iteration limit exceeded/
+    );
+
     console.log('Language smoke checks passed');
 })().catch(error => {
     console.error(error);

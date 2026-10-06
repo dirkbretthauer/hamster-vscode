@@ -25,10 +25,30 @@ small fraction of Band 2 (the full Java-like OO/exception/concurrency model docu
 **Update 2026-10-05 (feature `specs/001-full-sample-parsing`):** all 904 in-scope Java-like sample programs of
 the reference simulator now parse (`node scripts/conformance.cjs --min-pass-rate=1`). The other 16 use
 one of seven explicitly unsupported constructs and are reported as known gaps (see section 2).
-Concurrency and the Java class library remain runtime gaps.
+The Java class library remains a runtime gap; cooperative concurrency is now supported (see the
+2026-10-06 update below).
 
 **Update 2026-10-05 (feature `specs/002-known-gap-constructs`):** the seven known-gap constructs are now
 supported, so all 920 Java-like sample programs parse, with 0 known gaps.
+
+**Update 2026-10-06 (feature `specs/003-cooperative-threads`):** a started hamster is now its own
+cooperatively-scheduled thread, so the Band 3 chapter 10–12 teaching programs run. Of the 158
+concurrency-using sample programs, **99 need nothing beyond threads and monitors** and are in scope
+(`npm run concurrency-corpus`); 48 additionally need `util.AllroundHamster` (a pre-existing import
+gap), 6 need `java.util.concurrent`/`Timer`, and 5 need collection classes. No syntax changed, so
+the parse rate is unaffected.
+
+Deviations from the reference, required by the constitution's reference-fidelity rule:
+
+| Deviation | Reference behaviour | What this port does, and why |
+| --- | --- | --- |
+| Scheduling is cooperative, not pre-emptive | Real JVM threads, pre-empted anywhere | One hamster acts at a time, switching at hamster commands and blocking operations — exactly the points `IHamster._intern_sleep_200405()` marks. Keeps the webview responsive and the debugger coherent. |
+| Interleaving is varied but not reproducible | Varied, via real thread scheduling | Weighted random choice among runnable threads. Deliberate: a fixed order would make unprotected programs always produce the right answer and hide the race the chapter 11 exercises teach. A consequence is that a failed run cannot be replayed by re-running it. |
+| Priority means "picked more often" | `random() * (2 + MAX_PRIORITY - getPriority())` gives *higher*-priority threads more no-op yield points (`IHamster.java:76-85`) | Selection weight is the priority itself, so priority 10 is picked ten times as often as priority 1 and nobody is starved. The reference formula inverts the intuitive meaning and is an artefact of its Swing instruction pipeline. |
+| `sleep`/timed `wait` use a simulation clock | Wall-clock milliseconds | Durations convert to scheduler steps (`STEPS_PER_MILLISECOND`). Wall-clock would make `Thread.sleep(2000)` expire instantly while single-stepping, making chapter 10.1's `stop.ham` undebuggable. |
+| No `$_dibo_p_intern$` marker instruction | Pushes an invisible no-op through the processor to create extra preemption points | Dropped: it is an artefact of the Java UI pipeline (swallowed by `LogPanel.java:57` and `DialogTerminal.java:123`) with no counterpart here, and it would pollute the instruction log. |
+| A breakpoint stops every thread | JDI can stop one thread | Cooperative execution means only one hamster is ever mid-action, so a stop-the-world snapshot is consistent. Stepping still advances the selected thread. |
+| Thread count is capped | Unbounded | A documented limit keeps the editor responsive; it is far above anything the course material uses. |
 
 | Area | Spec doc(s) | Status |
 | --- | --- | --- |
@@ -39,7 +59,8 @@ supported, so all 920 Java-like sample programs parse, with 0 known gaps.
 | Compiler pipeline | `compiler-pipeline.md` | 🟡 "Compile" is parse-validate only; no program-type marker handling |
 | Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement); 🟡 step-in/out not distinct |
 | Hamster language — Band 1 | `hamster-language.md` | 🟡 ~70–75% complete |
-| Hamster language — Band 2 (OO) | `hamster-language.md` | 🟢 Class model, generics (erased), exceptions incl. `finally`, `instanceof`; 🟡 concurrency remains |
+| Hamster language — Band 2 (OO) | `hamster-language.md` | 🟢 Class model, generics (erased), exceptions incl. `finally`, `instanceof` |
+| Hamster language — Band 3 (concurrency) | `hamster-language.md` | 🟢 Cooperative threads, monitors, `wait`/`notify`; ⚪ scheduling deviations documented below |
 | Alternate frontends / 3D / i18n | `alternate-frontends.md`, `platform-concerns.md` | 🟢 Correctly out of scope, no confusing remnants |
 
 ## Detailed Findings
@@ -81,10 +102,11 @@ supported, so all 920 Java-like sample programs parse, with 0 known gaps.
 - 🟢 `Territorium`/`Territory` static queries and German/English direction and color constants are available.
 - 🟢 Multiple `catch` clauses match in order. `finally` runs on every exit path, and a `return`/`throw` inside it overrides the earlier outcome. `instanceof` uses the same class/interface hierarchy as casts and `catch` and is `false` for `null`.
 - 🟢 Array initializers evaluate their elements left to right; literal-only global initializers are constant-folded.
-- ⚪ Deviation: `synchronized` evaluates its lock (null is a runtime error) and runs its body once, but performs no locking, because the runner is single-threaded.
-- 🟡 No `start()`/`run()` concurrency — single hamster, single generator, single synthetic DAP thread. Thread methods (`start`, `join`, `wait`, `notify`, `Thread.sleep`, …) and Java library classes (`ArrayList`, …) fail with a message naming the unsupported feature or class.
+- 🟢 `synchronized` performs real mutual exclusion, per object and per class literal, re-entrant, and released on every exit path including an exception unwinding out of the section.
+- 🟢 Cooperative concurrency: a started hamster becomes its own thread, matching the reference, where `IHamster extends Thread` and every hamster command is a scheduling point (`IHamster.java:33, 87-142`). Supported: `start`, `run`, `join`, `sleep`, `interrupt`, `isInterrupted`, `Thread.interrupted`, `isAlive`, `setDaemon`/`isDaemon`, `setPriority`/`getPriority`, `setName`/`getName`, `stop`, `Thread.currentThread`, `Thread.yield`, `wait`/`notify`/`notifyAll`, and `InterruptedException`.
+- 🟡 Java library classes (`ArrayList`, `java.util.concurrent.*`, `java.util.Timer`, …) still fail with a message naming the class. The course material has students build a `Semaphor` from `wait`/`notify`, so the library versions are a convenience rather than the lesson.
 - 🟢 Program-type markers select imperative, object-oriented, or reusable-class parsing semantics; unmarked files default to imperative as in the reference implementation.
-- ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users.
+- ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users. The loop guard is now a *per-thread progress budget*: it resets on every hamster instruction and every blocking operation, so `while (true) { … vor(); }` — the normal shape of a concurrent hamster — runs until the user stops it, while a loop that makes no observable progress is still caught.
 
 ### 4. Simulation Rendering (`hamsterPanel.ts` webview)
 - 🟢 Simulation zoom controls use the original 32px default, ±4px steps, and 4px minimum.
@@ -116,6 +138,8 @@ supported, so all 920 Java-like sample programs parse, with 0 known gaps.
 - 🟢 Breakpoints are validated against parsed executable statement locations, moved to the next valid line, and honored during both continue and single-step operations.
 - 🟢 `evaluate` (DAP hover/watch/debug console) parses and evaluates expressions in the selected stack frame.
 - 🟡 No object/array expansion in the variables view (`variablesReference` always 0).
+- 🟢 Each live hamster is its own DAP thread with its own call stack, scopes, and variables; `thread` started/exited events track hamsters as they start and finish, and a blocked hamster reports what it is waiting for. Frame ids and variable references are namespaced by thread id.
+- ⚪ Deviation: a breakpoint stops *every* thread (`allThreadsStopped`), and `supportsSingleThreadExecutionRequests` is deliberately not advertised. Because execution is cooperative only one hamster is ever mid-action, so stopping everything yields a consistent snapshot. Stepping still advances the thread the user selected.
 
 ### 9. Explicitly Out of Scope (confirmed clean)
 No confusing partial/stub remnants found for: Scheme/JavaScript/Python/Ruby/Prolog consoles, Scratch/FSM/Flowchart visual editors, LEGO integration, 3D/OpenGL view, or Java-style multi-locale i18n bundles. Per `alternate-frontends.md`/`platform-concerns.md`, these are reasonable scope cuts for this port.
