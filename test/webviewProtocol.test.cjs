@@ -28,14 +28,50 @@ test('isPanelToHostMessage accepts well-formed simulator-webview messages', () =
     assert.equal(isPanelToHostMessage({ type: 'commandRequest', command: 'step' }), true);
     assert.equal(isPanelToHostMessage({ type: 'highlightLine', line: 3 }), true);
     assert.equal(isPanelToHostMessage({ type: 'clearHighlight' }), true);
-    assert.equal(isPanelToHostMessage({ type: 'dbg:stopped', reason: 'breakpoint', line: 2 }), true);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:stopped', reason: 'breakpoint', threadId: 1, line: 2 }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:terminated' }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:output', output: 'hi' }), true);
-    assert.equal(isPanelToHostMessage({ type: 'dbg:stackTrace', requestId: 1, frames: [] }), true);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:output', output: 'hi', threadId: 3 }), true);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:stackTrace', requestId: 1, threadId: 1, frames: [] }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:scopes', requestId: 1, scopes: [] }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:variables', requestId: 1, variables: [] }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:evaluate', requestId: 1, result: '42' }), true);
     assert.equal(isPanelToHostMessage({ type: 'dbg:evaluate', requestId: 1, error: 'bad expr' }), true);
+    // Multi-threaded debugging messages (003-cooperative-threads).
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threadStarted', threadId: 2, name: 'FrissHamster' }), true);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threadExited', threadId: 2 }), true);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threads', requestId: 1, threads: [] }), true);
+    assert.equal(isPanelToHostMessage({
+        type: 'dbg:threads',
+        requestId: 1,
+        threads: [{ id: 1, name: 'main', status: 'runnable' }],
+    }), true);
+    assert.equal(isPanelToHostMessage({
+        type: 'dbg:threads',
+        requestId: 1,
+        threads: [{ id: 2, name: 'Paul', status: 'waiting', detail: 'suspended in wait()' }],
+    }), true);
+});
+
+test('isPanelToHostMessage rejects thread messages missing or mistyping a threadId', () => {
+    assert.equal(isPanelToHostMessage({ type: 'dbg:stopped', reason: 'step' }), false, 'threadId required');
+    assert.equal(isPanelToHostMessage({ type: 'dbg:stopped', reason: 'step', threadId: '1' }), false);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:stackTrace', requestId: 1, frames: [] }), false, 'threadId required');
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threadStarted', threadId: 2 }), false, 'name required');
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threadStarted', name: 'Paul' }), false, 'threadId required');
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threadExited' }), false);
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threads', requestId: 1 }), false, 'threads array required');
+    assert.equal(isPanelToHostMessage({ type: 'dbg:threads', requestId: 1, threads: 'nope' }), false);
+    assert.equal(isPanelToHostMessage({
+        type: 'dbg:threads', requestId: 1, threads: [{ id: 1, name: 'main' }],
+    }), false, 'status required on each thread');
+    assert.equal(isPanelToHostMessage({
+        type: 'dbg:threads', requestId: 1, threads: [{ id: '1', name: 'main', status: 'runnable' }],
+    }), false, 'id must be a number');
+    assert.equal(isPanelToHostMessage({
+        type: 'dbg:threads', requestId: 1, threads: [{ id: 1, name: 'main', status: 'runnable', detail: 7 }],
+    }), false, 'detail must be a string when present');
+    assert.equal(isPanelToHostMessage({ type: 'dbg:output', output: 'hi', threadId: 'x' }), false);
 });
 
 test('isPanelToHostMessage rejects malformed or unknown simulator-webview messages', () => {

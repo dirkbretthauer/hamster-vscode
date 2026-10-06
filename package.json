@@ -152,6 +152,7 @@
     "compile": "webpack",
     "smoke:language": "node scripts/language-smoke.cjs",
     "conformance": "node scripts/conformance.cjs",
+    "concurrency-corpus": "node scripts/concurrency-corpus.cjs",
     "test:unit": "node --test",
     "test": "npm run smoke:language && npm run test:unit",
     "watch": "webpack --watch",

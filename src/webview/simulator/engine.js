@@ -27,7 +27,9 @@ export function createSimulatorEngine(renderCallback) {
     let engineState = null;
     let snapshot = null;
     let nextId = 0;
-    let pendingInput = null;
+    /** Hamster id → value typed for it. Per hamster, so only the asking one blocks. */
+    const pendingInput = new Map();
+    let askingHamsterId = null;
 
     function inside(x, y) {
         return insideTerrain(engineState.terrain, x, y);
@@ -54,6 +56,8 @@ export function createSimulatorEngine(renderCallback) {
         };
         snapshot = null;
         nextId = 0;
+        pendingInput.clear();
+        askingHamsterId = null;
         render();
         return engineState;
     }
@@ -120,28 +124,34 @@ export function createSimulatorEngine(renderCallback) {
         },
         getState() { return cloneState(engineState); },
         provideInput(val) {
-            pendingInput = String(val);
+            // Hand the value to whichever hamster asked for it. `askingHamsterId`
+            // is null only when nothing is waiting, in which case the value is
+            // parked under the default hamster.
+            pendingInput.set(askingHamsterId ?? -1, String(val));
+            askingHamsterId = null;
             engineState.terminal.needsInput = false;
             engineState.terminal.prompt = '';
             engineState.terminal.output.push(String(val));
         },
-        readInt(_hid = -1, prompt = '') {
-            if (pendingInput != null) {
-                const v = pendingInput;
-                pendingInput = null;
+        readInt(hid = -1, prompt = '') {
+            if (pendingInput.has(hid)) {
+                const v = pendingInput.get(hid);
+                pendingInput.delete(hid);
                 const n = parseInt(v, 10);
                 return Number.isNaN(n) ? 0 : n;
             }
+            askingHamsterId = hid;
             engineState.terminal.needsInput = true;
             engineState.terminal.prompt = String(prompt || 'Enter number:');
             return 0;
         },
-        readString(_hid = -1, prompt = '') {
-            if (pendingInput != null) {
-                const v = pendingInput;
-                pendingInput = null;
+        readString(hid = -1, prompt = '') {
+            if (pendingInput.has(hid)) {
+                const v = pendingInput.get(hid);
+                pendingInput.delete(hid);
                 return v;
             }
+            askingHamsterId = hid;
             engineState.terminal.needsInput = true;
             engineState.terminal.prompt = String(prompt || 'Enter text:');
             return '';

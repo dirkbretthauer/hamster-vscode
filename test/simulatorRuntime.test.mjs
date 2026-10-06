@@ -42,8 +42,6 @@ async function loadSimulatorRuntime() {
     });
 }
 
-const THREAD_UNSUPPORTED = /threads.*not supported/i;
-
 test('calling a method on an unprovided library class names the class', async () => {
     const runtime = await loadSimulatorRuntime();
     const list = runtime.createObject('ArrayList', []);
@@ -53,19 +51,43 @@ test('calling a method on an unprovided library class names the class', async ()
     );
 });
 
-test('thread methods on hamsters and objects report that threads are unsupported', async () => {
+// Thread and monitor operations are intercepted by the runner before they ever
+// reach this adapter, because they must be able to block and the adapter is
+// synchronous. These replace the assertions that used to pin the old
+// "threads are not supported" errors.
+
+test('the runtime adapter no longer rejects thread methods itself', async () => {
     const runtime = await loadSimulatorRuntime();
     const standardHamster = runtime.callBuiltin('Hamster.getStandardHamster', []);
-    assert.throws(() => runtime.callMethod(standardHamster, 'start', []), THREAD_UNSUPPORTED);
-    assert.throws(() => runtime.callMethod(standardHamster, 'join', []), THREAD_UNSUPPORTED);
-    const nest = runtime.createObject('Object', []);
-    assert.throws(() => runtime.callMethod(nest, 'wait', [1000]), THREAD_UNSUPPORTED);
-    assert.throws(() => runtime.callMethod(nest, 'notifyAll', []), THREAD_UNSUPPORTED);
+    for (const method of ['start', 'join', 'interrupt']) {
+        assert.doesNotThrow(
+            () => { try { runtime.callMethod(standardHamster, method, []); } catch (error) {
+                assert.doesNotMatch(error.message, /threads.*not supported/i);
+            } },
+            'the adapter must not raise the old thread-unsupported error for ' + method
+        );
+    }
 });
 
-test('static Thread calls report that threads are unsupported', async () => {
+test('monitor methods on a plain object are not rejected as unsupported threads', async () => {
     const runtime = await loadSimulatorRuntime();
-    assert.throws(() => runtime.callBuiltin('Thread.sleep', [10]), THREAD_UNSUPPORTED);
+    const nest = runtime.createObject('Object', []);
+    for (const method of ['wait', 'notify', 'notifyAll']) {
+        try {
+            runtime.callMethod(nest, method, []);
+        } catch (error) {
+            assert.doesNotMatch(error.message, /threads.*not supported/i);
+        }
+    }
+});
+
+test('static Thread calls are not rejected by the adapter', async () => {
+    const runtime = await loadSimulatorRuntime();
+    try {
+        runtime.callBuiltin('Thread.sleep', [10]);
+    } catch (error) {
+        assert.doesNotMatch(error.message, /threads.*not supported/i);
+    }
 });
 
 test('hamster built-ins still work through the runtime adapter', async () => {

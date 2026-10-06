@@ -18,15 +18,27 @@ export type DebugHostToPanelMessage =
     | { type: 'dbg:launch'; source: string; classSources: string[]; stopOnEntry: boolean; breakpoints: number[] }
     | { type: 'dbg:setBreakpoints'; lines: number[] }
     | { type: 'dbg:continue' }
-    | { type: 'dbg:next' }
-    | { type: 'dbg:stepIn' }
-    | { type: 'dbg:stepOut' }
+    // Stepping advances the thread the user has selected; `frameId` and
+    // `variablesReference` already encode their thread, so those need no id.
+    | { type: 'dbg:next'; threadId: number }
+    | { type: 'dbg:stepIn'; threadId: number }
+    | { type: 'dbg:stepOut'; threadId: number }
     | { type: 'dbg:pause' }
-    | { type: 'dbg:stackTrace'; requestId: number }
+    | { type: 'dbg:stackTrace'; requestId: number; threadId: number }
+    | { type: 'dbg:threads'; requestId: number }
     | { type: 'dbg:scopes'; requestId: number; frameId: number }
     | { type: 'dbg:variables'; requestId: number; variablesReference: number }
     | { type: 'dbg:evaluate'; requestId: number; expression: string; frameId: number | undefined }
     | { type: 'dbg:disconnect' };
+
+/** One live hamster thread, as reported to the debugger's thread list. */
+export interface DebugThreadInfo {
+    id: number;
+    name: string;
+    status: string;
+    /** What the thread is waiting for, when it is not runnable. */
+    detail?: string;
+}
 
 export type HostToPanelMessage =
     | { type: 'loadProgram'; source: string; classSources: string[] }
@@ -38,10 +50,14 @@ export type HostToPanelMessage =
 // ── Simulator webview → extension host ──────────────────────────────────────
 
 export type DebugPanelToHostMessage =
-    | { type: 'dbg:stopped'; reason: string; line?: number; column?: number; text?: string }
+    | { type: 'dbg:stopped'; reason: string; threadId: number; line?: number; column?: number; text?: string }
+    /** The whole program ended — never a single thread. */
     | { type: 'dbg:terminated' }
-    | { type: 'dbg:output'; category?: string; output: string }
-    | { type: 'dbg:stackTrace'; requestId: number; frames: unknown[] }
+    | { type: 'dbg:threadStarted'; threadId: number; name: string }
+    | { type: 'dbg:threadExited'; threadId: number }
+    | { type: 'dbg:threads'; requestId: number; threads: DebugThreadInfo[] }
+    | { type: 'dbg:output'; category?: string; output: string; threadId?: number }
+    | { type: 'dbg:stackTrace'; requestId: number; threadId: number; frames: unknown[] }
     | { type: 'dbg:scopes'; requestId: number; scopes: unknown[] }
     | { type: 'dbg:variables'; requestId: number; variables: unknown[] }
     | { type: 'dbg:evaluate'; requestId: number; result?: string; error?: string };
@@ -66,6 +82,14 @@ export function isDebugMessage(value: unknown): value is { type: string } & Reco
 }
 
 /** Validates a message posted by the simulator webview to the extension host. */
+function isDebugThreadInfo(value: unknown): value is DebugThreadInfo {
+    return isRecord(value) &&
+        typeof value.id === 'number' &&
+        typeof value.name === 'string' &&
+        typeof value.status === 'string' &&
+        (value.detail === undefined || typeof value.detail === 'string');
+}
+
 export function isPanelToHostMessage(value: unknown): value is PanelToHostMessage {
     if (!isRecord(value) || typeof value.type !== 'string') return false;
     switch (value.type) {
@@ -79,13 +103,22 @@ export function isPanelToHostMessage(value: unknown): value is PanelToHostMessag
         case 'clearHighlight':
             return true;
         case 'dbg:stopped':
-            return typeof value.reason === 'string';
+            return typeof value.reason === 'string' && typeof value.threadId === 'number';
         case 'dbg:terminated':
             return true;
+        case 'dbg:threadStarted':
+            return typeof value.threadId === 'number' && typeof value.name === 'string';
+        case 'dbg:threadExited':
+            return typeof value.threadId === 'number';
+        case 'dbg:threads':
+            return typeof value.requestId === 'number' && Array.isArray(value.threads) &&
+                value.threads.every(isDebugThreadInfo);
         case 'dbg:output':
-            return typeof value.output === 'string';
+            return typeof value.output === 'string' &&
+                (value.threadId === undefined || typeof value.threadId === 'number');
         case 'dbg:stackTrace':
-            return typeof value.requestId === 'number' && Array.isArray(value.frames);
+            return typeof value.requestId === 'number' && typeof value.threadId === 'number' &&
+                Array.isArray(value.frames);
         case 'dbg:scopes':
             return typeof value.requestId === 'number' && Array.isArray(value.scopes);
         case 'dbg:variables':

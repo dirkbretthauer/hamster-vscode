@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — Cooperative Hamster Threads
+
+- Several hamsters can now act at the same time: `start()` runs a hamster's `run()` method
+  concurrently, over one shared terrain, the way the reference simulator does
+- The program keeps running until every started hamster has finished; hamsters marked with
+  `setDaemon(true)` do not keep it alive
+- An uncaught error in one hamster reports that hamster and leaves the others running
+- Real mutual exclusion for `synchronized` blocks and methods: per object and per class, re-entrant,
+  and released even when an exception unwinds out of the section
+- `wait()`, `notify()` and `notifyAll()` let hamsters suspend and signal each other, so the course's
+  semaphore, producer/consumer, readers/writers and dining-philosophers exercises work
+- Thread lifetime control: `join()`, `Thread.sleep()`, `interrupt()`, `isInterrupted()`,
+  `Thread.interrupted()`, `isAlive()`, `setDaemon`/`isDaemon`, `setPriority`/`getPriority`,
+  `setName`/`getName`, `stop()`, `Thread.currentThread()` and `Thread.yield()`
+- `InterruptedException` can be caught like any other exception
+- A program in which every hamster is permanently blocked now reports the deadlock, naming each
+  hamster and what it is waiting for, instead of appearing to hang
+- The simulator marks the hamster that performed the most recent action
+- The debugger shows every live hamster as its own thread with its own call stack, scopes and
+  variables; threads appear and disappear as hamsters start and finish, and a blocked hamster
+  reports what it is waiting for. Stepping advances the hamster you selected
+- Reading from the terminal now blocks only the hamster that asked; the others keep running
+- A hamster may loop forever as long as it keeps acting — `while (true) { … vor(); }` is no longer
+  cut off by the runaway-loop guard, which now measures progress per hamster
+- Interleaving is deliberately varied, so a program with unprotected shared data can genuinely go
+  wrong; two runs of the same concurrent program may differ
+
 ## Unreleased — Full Sample-Program Parsing
 
 - All 920 Java-like sample programs of the reference Hamster Simulator now parse without false errors

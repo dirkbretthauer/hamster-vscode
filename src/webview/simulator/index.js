@@ -36,9 +36,12 @@ export function bootstrap() {
     } catch {}
 
     let runnerState = null;
+    let scheduler = null;
     let currentSource = '';
     let currentClassSources = Array.isArray(initialClassSources) ? initialClassSources : [];
     let resumeAfterInput = null;
+    /** The thread parked on terminal input, so only it blocks while others run. */
+    let inputThread = null;
     let runTimerId = null;
 
     function appendLog(text, isError) {
@@ -53,6 +56,11 @@ export function bootstrap() {
     const { engine, initEngine, getEngineState } = createSimulatorEngine(() => renderer.render());
     const renderer = createSimulatorRenderer({
         canvas, ctx, assetsUri, getEngineState,
+        getActiveHamsterId: () => {
+            const thread = scheduler?.current();
+            const id = thread?.hamster?.id;
+            return typeof id === 'number' ? id : null;
+        },
         zoomValueEl: zoomValue, zoomOutButton, zoomInButton,
     });
 
@@ -80,6 +88,8 @@ export function bootstrap() {
 
     function cancelTerminalInput() {
         resumeAfterInput = null;
+        if (scheduler) scheduler.provideInput(inputThread);
+        inputThread = null;
         terminalForm.classList.remove('visible');
         const engineState = getEngineState();
         if (engineState) {
@@ -112,13 +122,17 @@ export function bootstrap() {
             return false;
         }
         runnerState = null;
+        scheduler = null;
         clearLog();
         try {
             const ast = window.parseProgram(currentSource);
             if (ast.programType === 'class') {
                 throw new Error('Class programs cannot be run directly.');
             }
-            runnerState = window.createRunnerState(ast, runtime, parseClassModules());
+            runnerState = window.createRunnerState(ast, runtime, parseClassModules(), {
+                createScheduler: window.createScheduler,
+            });
+            scheduler = runnerState.programState.scheduler;
             return true;
         } catch (e) {
             appendLog('Compile error: ' + (e.message || e), true);
@@ -146,31 +160,47 @@ export function bootstrap() {
     });
 
     function doStepInternal(resumeOnInput) {
-        if (!runnerState || runnerState.finished) return false;
+        if (!runnerState || !scheduler || scheduler.isFinished()) return false;
         try {
-            const progressed = window.executeRunnerStep(runnerState);
+            const result = scheduler.step();
+
+            // An uncaught error kills only its own hamster; the rest keep going.
+            for (const event of result.events) {
+                if (event.kind === 'error') {
+                    appendLog('Runtime error in ' + event.name + ': ' +
+                        (event.error?.message || event.error), true);
+                }
+            }
+
             renderer.render();
             const engineState = getEngineState();
             if (engineState.log.length > 0) {
                 appendLog(engineState.log[engineState.log.length - 1]);
             }
             // Send current line to extension for editor highlighting
-            const loc = runnerState.lastInstruction?.loc;
+            const loc = result.instruction?.loc;
             if (loc && loc.line) {
                 vscodeApi.postMessage({ type: 'highlightLine', line: loc.line });
             }
-            if (!progressed) {
+
+            if (result.status === 'needsInput') {
+                inputThread = result.thread;
+                requestTerminalInput(result.message, resumeOnInput);
+                return true;
+            }
+            if (result.status === 'deadlocked') {
+                appendLog(result.report || 'All hamsters are blocked', true);
+                statusEl.textContent = 'Deadlocked';
+                vscodeApi.postMessage({ type: 'clearHighlight' });
+                return false;
+            }
+            if (result.status === 'finished') {
                 runnerState.finished = true;
                 vscodeApi.postMessage({ type: 'clearHighlight' });
                 return false;
             }
-            return !runnerState.finished;
+            return true;
         } catch (e) {
-            if (window.RunnerPause && e instanceof window.RunnerPause) {
-                renderer.render();
-                requestTerminalInput(e.message, resumeOnInput);
-                return true;
-            }
             appendLog('Runtime error: ' + (e.message || e), true);
             runnerState.finished = true;
             vscodeApi.postMessage({ type: 'clearHighlight' });
@@ -182,6 +212,7 @@ export function bootstrap() {
     function doCompile() {
         doStop();
         runnerState = null;
+        scheduler = null;
         if (!currentSource) {
             statusEl.textContent = 'No program loaded';
             vscodeApi.postMessage({ type: 'error', message: 'No program loaded. Open a .ham file first.' });
@@ -212,7 +243,7 @@ export function bootstrap() {
 
     function doRun() {
         if (runTimerId !== null) return;
-        if (!runnerState || runnerState.finished) {
+        if (!runnerState || !scheduler || scheduler.isFinished()) {
             if (!compileProgram()) return;
         }
         engine.start();
@@ -237,7 +268,7 @@ export function bootstrap() {
     }
 
     function doStep() {
-        if (!runnerState || runnerState.finished) {
+        if (!runnerState || !scheduler || scheduler.isFinished()) {
             if (!compileProgram()) return;
             engine.start();
         }
@@ -256,6 +287,7 @@ export function bootstrap() {
     function doReset() {
         doStop();
         runnerState = null;
+        scheduler = null;
         engine.reset();
         clearLog();
         vscodeApi.postMessage({ type: 'clearHighlight' });
@@ -277,6 +309,9 @@ export function bootstrap() {
         if (!resumeAfterInput) return;
         const resume = resumeAfterInput;
         engine.provideInput(terminalValue.value);
+        // Unpark only the hamster that asked; the others were never blocked.
+        if (scheduler) scheduler.provideInput(inputThread);
+        inputThread = null;
         resumeAfterInput = null;
         terminalForm.classList.remove('visible');
         resume();
@@ -319,6 +354,7 @@ export function bootstrap() {
         initEngine(w, h);
         clearLog();
         runnerState = null;
+        scheduler = null;
         statusEl.textContent = 'New terrain ' + w + '\u00d7' + h;
     });
 
@@ -375,6 +411,7 @@ export function bootstrap() {
                 stopRunLoop();
                 cancelTerminalInput();
                 runnerState = null;
+                scheduler = null;
                 currentSource = msg.source;
                 currentClassSources = Array.isArray(msg.classSources) ? msg.classSources : [];
                 statusEl.textContent = 'Program loaded';
@@ -403,11 +440,12 @@ export function bootstrap() {
                 break;
             case 'dbg:setBreakpoints': dbg.setBreakpoints(msg.lines || []); break;
             case 'dbg:continue': dbg.continueRun(); break;
-            case 'dbg:next': dbg.next(); break;
-            case 'dbg:stepIn': dbg.stepIn(); break;
-            case 'dbg:stepOut': dbg.stepOut(); break;
+            case 'dbg:next': dbg.next(msg.threadId); break;
+            case 'dbg:stepIn': dbg.stepIn('step', msg.threadId); break;
+            case 'dbg:stepOut': dbg.stepOut(msg.threadId); break;
             case 'dbg:pause': dbg.pause(); break;
-            case 'dbg:stackTrace': dbg.sendStackTrace(msg.requestId); break;
+            case 'dbg:threads': dbg.sendThreads(msg.requestId); break;
+            case 'dbg:stackTrace': dbg.sendStackTrace(msg.requestId, msg.threadId); break;
             case 'dbg:scopes': dbg.sendScopes(msg.requestId, msg.frameId); break;
             case 'dbg:variables': dbg.sendVariables(msg.requestId, msg.variablesReference); break;
             case 'dbg:evaluate': dbg.evaluate(msg.requestId, msg.expression, msg.frameId); break;

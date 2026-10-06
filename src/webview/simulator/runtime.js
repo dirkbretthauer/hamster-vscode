@@ -36,13 +36,6 @@ function normalizeHamsterMethodName(name) {
 /** Sentinel returned by `callHamsterInstanceMethod` when `methodName` isn't a known built-in. */
 const HAMSTER_METHOD_NOT_HANDLED = Symbol('hamsterMethodNotHandled');
 
-/** `Thread`/`Object` concurrency methods: the runner executes a single hamster thread only. */
-const THREAD_METHOD_NAMES = new Set(['start', 'join', 'wait', 'notify', 'notifyAll', 'interrupt', 'sleep']);
-
-function unsupportedThreadError(methodName) {
-    return new Error(`Hamster threads (${methodName}) are not supported by this extension`);
-}
-
 /** Runtime-created placeholder objects stand in for Java library classes the simulator doesn't provide. */
 function unprovidedClassError(className, methodName) {
     return new Error(`${className}.${methodName}: class ${className} is not provided by the Hamster simulator`);
@@ -181,7 +174,6 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 if (methodName === 'equalsIgnoreCase') return receiver.toLowerCase() === String(args?.[0] ?? '').toLowerCase();
                 if (methodName === 'length') return receiver.length;
             }
-            if (THREAD_METHOD_NAMES.has(methodName)) throw unsupportedThreadError(methodName);
             if (receiver && receiver.__kind === 'object' && !receiver.__className) {
                 throw unprovidedClassError(receiver.className, methodName);
             }
@@ -192,7 +184,8 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             const separator = name.lastIndexOf('.');
             const receiverName = separator >= 0 ? name.slice(0, separator) : '';
             const rawMethodName = separator >= 0 ? name.slice(separator + 1) : name;
-            if (receiverName === 'Thread') throw unsupportedThreadError(rawMethodName);
+            // `Thread.*` statics never reach here: the runner intercepts them,
+            // because they must be able to block and this adapter is synchronous.
             if (receiverName === 'Territorium' || receiverName === 'Territory') {
                 return callTerritoryBuiltin(rawMethodName, args);
             }

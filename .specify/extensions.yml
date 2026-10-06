@@ -1,0 +1,27 @@
+# Spec Kit extension hooks for hamster-vscode.
+#
+# Hook command ids are written with dots and invoked with hyphens:
+# `speckit.git.branch` is dispatched as `/speckit-git-branch`.
+#
+# Per-machine overrides belong in `.specify/extensions/<id>/local-config.yml`,
+# which is git-ignored. This file is shared.
+
+schema_version: "1.0"
+
+extensions:
+  git-branch:
+    name: "Feature branch"
+    description: "Creates and switches to the feature branch for a new spec."
+    enabled: true
+    priority: 10
+
+hooks:
+  before_specify:
+    - extension: git-branch
+      command: speckit.git.branch
+      description: "Create and switch to the feature branch before the spec is written"
+      optional: false
+      enabled: true
+      prompt: >-
+        Create the git feature branch for this spec so the work never starts on
+        main, as the project constitution requires.

@@ -41,7 +41,7 @@ function getHamsterColorIndex(color) {
  * @param {HTMLButtonElement} deps.zoomOutButton
  * @param {HTMLButtonElement} deps.zoomInButton
  */
-export function createSimulatorRenderer({ canvas, ctx, assetsUri, getEngineState, zoomValueEl, zoomOutButton, zoomInButton }) {
+export function createSimulatorRenderer({ canvas, ctx, assetsUri, getEngineState, getActiveHamsterId, zoomValueEl, zoomOutButton, zoomInButton }) {
     let cellSize = DEFAULT_CELL_SIZE;
     const tintedSprites = new Map();
     const spriteNames = ['hamsternorth.png', 'hamstereast.png', 'hamstersouth.png', 'hamsterwest.png'];
@@ -88,6 +88,21 @@ export function createSimulatorRenderer({ canvas, ctx, assetsUri, getEngineState
         }
     }
 
+    /**
+     * Ring around the hamster that performed the most recent action, so a
+     * student watching several hamsters can tell which one just acted.
+     */
+    function drawActiveMarker(h) {
+        const x = h.x * cellSize, y = h.y * cellSize;
+        const inset = Math.max(1, Math.floor(cellSize * 0.04));
+        ctx.save();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(2, Math.floor(cellSize * 0.06));
+        ctx.setLineDash([Math.max(3, cellSize * 0.18), Math.max(2, cellSize * 0.1)]);
+        ctx.strokeRect(x + inset, y + inset, cellSize - inset * 2, cellSize - inset * 2);
+        ctx.restore();
+    }
+
     function drawHamster(h) {
         const dir = ((h.dir % 4) + 4) % 4;
         const sprite = sprites[dir];
@@ -108,7 +123,11 @@ export function createSimulatorRenderer({ canvas, ctx, assetsUri, getEngineState
         const state = getEngineState();
         if (!state) return;
         drawTerrainBase(ctx, canvas, state.terrain, cellSize);
-        for (const h of state.terrain.hamsters) drawHamster(h);
+        const activeId = typeof getActiveHamsterId === 'function' ? getActiveHamsterId() : null;
+        for (const h of state.terrain.hamsters) {
+            drawHamster(h);
+            if (activeId != null && h.id === activeId) drawActiveMarker(h);
+        }
     }
 
     function setZoom(nextCellSize) {
