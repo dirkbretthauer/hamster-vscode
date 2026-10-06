@@ -1,0 +1,9 @@
+/*object-oriented program*/
+// Two hamsters clear one row each, concurrently, over the same terrain.
+// `Collector` is picked up automatically from the folder as a class module.
+void main() {
+    Collector oben = new Collector(0);
+    Collector unten = new Collector(1);
+    oben.start();
+    unten.start();
+}

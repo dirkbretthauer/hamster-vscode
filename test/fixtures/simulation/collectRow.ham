@@ -1,0 +1,9 @@
+// Collects every grain in the hamster's row.
+void main() {
+    while (vornFrei()) {
+        vor();
+        while (kornDa()) {
+            nimm();
+        }
+    }
+}

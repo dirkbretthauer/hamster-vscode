@@ -1,0 +1,15 @@
+/*class*/class Collector extends Hamster {
+
+    Collector(int reihe) {
+        super(reihe, 0, Hamster.OST, 0);
+    }
+
+    public void run() {
+        while (this.vornFrei()) {
+            this.vor();
+            while (this.kornDa()) {
+                this.nimm();
+            }
+        }
+    }
+}
