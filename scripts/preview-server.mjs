@@ -19,8 +19,10 @@ const THEME = `
   --vscode-button-hoverBackground: #1177bb; --vscode-input-background: #3c3c3c; --vscode-input-foreground: #ccc; }`;
 
 // Host stand-in: toolbar buttons post `commandRequest`, which the real host turns into a `command` message.
-const SHIM = `window.acquireVsCodeApi = () => ({
+const SHIM = `window.__hostMessages = [];
+window.acquireVsCodeApi = () => ({
   postMessage(msg) {
+    window.__hostMessages.push(msg);
     if (msg.type === 'commandRequest') window.postMessage({ type: 'command', command: msg.command }, '*');
     else console.log('[host]', msg);
   },

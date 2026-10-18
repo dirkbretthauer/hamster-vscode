@@ -25,6 +25,8 @@ const FRAME_ID_STRIDE = 1000;
 const LOCALS_BASE = 1000000;
 const GLOBALS_VARIABLES_REFERENCE = 1;
 const MAIN_THREAD_ID = 1;
+/** Child references (array elements, object fields) start above every frame-derived reference. */
+const CHILD_REFERENCE_BASE = 100000000;
 
 function encodeFrameId(threadId, frameIndex) {
     return threadId * FRAME_ID_STRIDE + frameIndex + 1;
@@ -35,9 +37,18 @@ function decodeFrameId(frameId) {
     return { threadId: Math.floor(id / FRAME_ID_STRIDE), frameIndex: (id % FRAME_ID_STRIDE) - 1 };
 }
 
+/** Name/value pairs shown when a variable is expanded; null when the value has no children. */
+function dbgChildEntries(v) {
+    if (Array.isArray(v)) return v.map((element, index) => [String(index), element]);
+    if (v && typeof v === 'object' && v.__kind === 'object' && v.fields) return Object.entries(v.fields);
+    return null;
+}
+
 function dbgFormatValue(v) {
     if (v === null || v === undefined) return String(v);
+    if (Array.isArray(v)) return 'Array(' + v.length + ')';
     if (typeof v === 'object') {
+        if (v.__kind === 'object') return v.__className || 'Object';
         if (v.__kind === 'hamster') return 'Hamster #' + v.id;
         if (v.__kind === 'class' || v.__kind === 'classLiteral') return 'class ' + (v.name || '');
         if (v.__kind === 'enum') return v.__className + '.' + v.name;
@@ -73,6 +84,8 @@ export function createDebuggerController({
     let dbgOperationId = 0;
     /** Thread ids already announced to the host, so each is reported once. */
     let announcedThreads = new Set();
+    /** Expandable values handed out as `variablesReference`s; valid only until the program resumes (DAP). */
+    let childReferences = new Map();
 
     function scheduler() {
         const runnerState = getRunnerState();
@@ -140,6 +153,7 @@ export function createDebuggerController({
     }
 
     function dbgStartOperation() {
+        childReferences = new Map();
         dbgOperationId++;
         dbgClearTimer();
         cancelTerminalInput();
@@ -472,12 +486,26 @@ export function createDebuggerController({
         vscodeApi.postMessage({ type: 'dbg:scopes', requestId, scopes });
     }
 
+    /** Allocates a reference for an expandable value, or 0 for a leaf. */
+    function referenceFor(value) {
+        if (!dbgChildEntries(value)) return 0;
+        for (const [reference, known] of childReferences) {
+            if (known === value) return reference;
+        }
+        const reference = CHILD_REFERENCE_BASE + childReferences.size;
+        childReferences.set(reference, value);
+        return reference;
+    }
+
     function sendVariables(requestId, variablesReference) {
         const vars = [];
         const push = (name, value) =>
-            vars.push({ name, value: dbgFormatValue(value), variablesReference: 0 });
+            vars.push({ name, value: dbgFormatValue(value), variablesReference: referenceFor(value) });
 
-        if (variablesReference === GLOBALS_VARIABLES_REFERENCE) {
+        if (variablesReference >= CHILD_REFERENCE_BASE) {
+            const children = dbgChildEntries(childReferences.get(variablesReference));
+            for (const [name, value] of children || []) push(name, value);
+        } else if (variablesReference === GLOBALS_VARIABLES_REFERENCE) {
             // One globals scope, shared by every thread.
             const root = getRunnerState()?.scopes?.[0];
             if (root && typeof root.forEach === 'function') root.forEach((v, k) => push(k, v));

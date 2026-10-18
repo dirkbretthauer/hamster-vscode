@@ -137,7 +137,7 @@ Deviations from the reference, required by the constitution's reference-fidelity
 - 🟢 `next`, `stepIn`, and `stepOut` are call-depth-aware: step-over finishes calls on the current line, step-in enters them, and step-out runs until the frame returns (continuing when already at a thread's root frame).
 - 🟢 Breakpoints are validated against parsed executable statement locations, moved to the next valid line, and honored during both continue and single-step operations.
 - 🟢 `evaluate` (DAP hover/watch/debug console) parses and evaluates expressions in the selected stack frame.
-- 🟡 No object/array expansion in the variables view (`variablesReference` always 0; tracked in [#59](https://github.com/dirkbretthauer/hamster-vscode/issues/59)).
+- 🟢 Arrays and objects expand in the variables view (element indices / fields); references are reset whenever the program resumes.
 - 🟢 Each live hamster is its own DAP thread with its own call stack, scopes, and variables; `thread` started/exited events track hamsters as they start and finish, and a blocked hamster reports what it is waiting for. Frame ids and variable references are namespaced by thread id.
 - ⚪ Deviation: a breakpoint stops *every* thread (`allThreadsStopped`), and `supportsSingleThreadExecutionRequests` is deliberately not advertised. Because execution is cooperative only one hamster is ever mid-action, so stopping everything yields a consistent snapshot. Stepping still advances the thread the user selected.
 
