@@ -57,7 +57,7 @@ Deviations from the reference, required by the constitution's reference-fidelity
 | Simulation rendering | `simulation-ui.md` | 🟡 Functional, missing per-hamster color sprites |
 | Console/Terminal I/O | `console.md` | 🟢 Reasonably simplified (log panel + cooperative input) |
 | Compiler pipeline | `compiler-pipeline.md` | 🟡 "Compile" is parse-validate only; no program-type marker handling |
-| Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement); 🟡 step-in/out not distinct |
+| Debugger | `step-mechanism.md`, `debugger-ui.md` | 🟢 Real breakpoints (improvement) and distinct step-in/over/out |
 | Hamster language — Band 1 | `hamster-language.md` | 🟡 ~70–75% complete |
 | Hamster language — Band 2 (OO) | `hamster-language.md` | 🟢 Class model, generics (erased), exceptions incl. `finally`, `instanceof` |
 | Hamster language — Band 3 (concurrency) | `hamster-language.md` | 🟢 Cooperative threads, monitors, `wait`/`notify`; ⚪ scheduling deviations documented below |
@@ -134,10 +134,10 @@ Deviations from the reference, required by the constitution's reference-fidelity
 ### 8. Debugger (`hamsterDebugSession.ts` + debug bridge in `hamsterPanel.ts`)
 - 🟢 **Real, persistent, user-settable breakpoints** — a genuine improvement over the original app, which had none (`debugger-ui.md`).
 - 🟢 Stack trace / scopes / variables implemented via interpreter-maintained frames — functions even without a JDI equivalent.
-- 🟡 `next`, `stepIn`, and `stepOut` all currently perform the *same* single AST-statement advance — no call-depth-aware step-out/step-over distinction.
+- 🟢 `next`, `stepIn`, and `stepOut` are call-depth-aware: step-over finishes calls on the current line, step-in enters them, and step-out runs until the frame returns (continuing when already at a thread's root frame).
 - 🟢 Breakpoints are validated against parsed executable statement locations, moved to the next valid line, and honored during both continue and single-step operations.
 - 🟢 `evaluate` (DAP hover/watch/debug console) parses and evaluates expressions in the selected stack frame.
-- 🟡 No object/array expansion in the variables view (`variablesReference` always 0).
+- 🟡 No object/array expansion in the variables view (`variablesReference` always 0; tracked in [#59](https://github.com/dirkbretthauer/hamster-vscode/issues/59)).
 - 🟢 Each live hamster is its own DAP thread with its own call stack, scopes, and variables; `thread` started/exited events track hamsters as they start and finish, and a blocked hamster reports what it is waiting for. Frame ids and variable references are namespaced by thread id.
 - ⚪ Deviation: a breakpoint stops *every* thread (`allThreadsStopped`), and `supportsSingleThreadExecutionRequests` is deliberately not advertised. Because execution is cooperative only one hamster is ever mid-action, so stopping everything yields a consistent snapshot. Stepping still advances the thread the user selected.
 
@@ -175,3 +175,4 @@ labeled `spec-conformance` plus a priority label (`P0`–`P3`).
 | [#15](https://github.com/dirkbretthauer/hamster-vscode/issues/15) | Diagnostics only report the first parse error, with an inaccurate fixed-width range | P3 |
 | [#16](https://github.com/dirkbretthauer/hamster-vscode/issues/16) | Debugger breakpoints always reported as verified without executable-line validation | P3 |
 | [#17](https://github.com/dirkbretthauer/hamster-vscode/issues/17) | Debugger `evaluate` only supports bare identifiers, not expressions | P3 |
+| [#59](https://github.com/dirkbretthauer/hamster-vscode/issues/59) | Debugger variables view cannot expand objects or arrays | P3 |
