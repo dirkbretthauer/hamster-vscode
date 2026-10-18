@@ -154,6 +154,7 @@
     "conformance": "node scripts/conformance.cjs",
     "concurrency-corpus": "node scripts/concurrency-corpus.cjs",
     "test:unit": "node --test",
+    "preview": "node scripts/preview-server.mjs",
     "test": "npm run smoke:language && npm run test:unit",
     "watch": "webpack --watch",
     "vscode:prepublish": "webpack --mode production --devtool hidden-source-map",
