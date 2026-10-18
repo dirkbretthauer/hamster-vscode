@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> npm ci"
+start=$SECONDS
+npm ci --no-audit --no-fund
+echo "==> npm ci done in $((SECONDS - start))s"
+
+echo "==> compile"
+npm run compile
