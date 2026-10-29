@@ -18,6 +18,8 @@ class ReturnSignal {
 
 class BreakSignal {}
 
+const COLLECTION_METHOD_NOT_HANDLED = Symbol('collectionMethodNotHandled');
+
 export class HamsterLanguageException extends Error {
     constructor(value) {
         const typeName = exceptionTypeName(value);
@@ -614,7 +616,7 @@ function* executeStatementGen(node, state, callDepth) {
         }
 
         case ASTNodeType.ForEachStatement: {
-            const elements = forEachArray(yield* evalExpressionGen(node.iterable, state, callDepth));
+            const elements = forEachElements(yield* evalExpressionGen(node.iterable, state, callDepth));
             for (let i = 0; i < elements.length; i++) {
                 state.scopes.push(new Map([[node.name, elements[i]]]));
                 let result;
@@ -953,6 +955,11 @@ function* evalCallExpressionGen(node, state, callDepth) {
             receiver, methodName, args, state, node.loc
         );
         if (memberThreadResult !== THREAD_OPERATION_NOT_HANDLED) return memberThreadResult;
+
+        const collectionResult = yield* tryCollectionMethodGen(
+            receiver, methodName, args, state, callDepth, node.loc
+        );
+        if (collectionResult !== COLLECTION_METHOD_NOT_HANDLED) return collectionResult;
 
         if (receiver?.__kind === 'enum') {
             return invokeEnumMethod(receiver, methodName, args);
@@ -1368,16 +1375,55 @@ function invokeEnumStaticMethod(state, enumName, methodName, args) {
     }
 }
 
-/** Only arrays are iterable until Java collections are provided by the runtime. */
-function forEachArray(value) {
+function* tryCollectionMethodGen(receiver, methodName, args, state, callDepth, loc) {
+    if (receiver?.__kind !== 'collection' || receiver.collectionType !== 'set' ||
+        !['add', 'contains', 'remove'].includes(methodName)) {
+        return COLLECTION_METHOD_NOT_HANDLED;
+    }
+    if (args.length !== 1) {
+        throw new Error(`${receiver.className}.${methodName} expects exactly one argument`);
+    }
+
+    const values = receiver.values;
+    let index = -1;
+    for (let candidateIndex = 0; candidateIndex < values.length; candidateIndex++) {
+        if (yield* collectionValuesEqualGen(args[0], values[candidateIndex], state, callDepth, loc)) {
+            index = candidateIndex;
+            break;
+        }
+    }
+    if (methodName === 'contains') return index >= 0;
+    if (methodName === 'remove') {
+        if (index < 0) return false;
+        values.splice(index, 1);
+        return true;
+    }
+    if (index >= 0) return false;
+    values.push(args[0]);
+    return true;
+}
+
+function* collectionValuesEqualGen(candidate, existing, state, callDepth, loc) {
+    if (Object.is(candidate, existing)) return true;
+    if (candidate == null || existing == null || typeof candidate !== 'object') return false;
+
+    const candidateType = runtimeTypeName(candidate);
+    if (!candidateType || !findMethod(state, candidateType, 'equals', 1, false)) return false;
+    return Boolean(yield* invokeInstanceMethodGen(
+        candidate, 'equals', [existing], state, callDepth, candidateType, loc
+    ));
+}
+
+function forEachElements(value) {
     if (value == null) {
         throw new Error('Cannot iterate over null');
     }
-    if (!Array.isArray(value)) {
-        const typeName = runtimeTypeName(value) ?? value.className ?? typeof value;
-        throw new Error(`for-each over ${typeName} is not supported (only arrays)`);
+    if (Array.isArray(value)) return value;
+    if (value.__kind === 'collection' && value.collectionType !== 'map') {
+        return value.values;
     }
-    return value;
+    const typeName = runtimeTypeName(value) ?? value.className ?? typeof value;
+    throw new Error(`for-each over ${typeName} is not supported (arrays and collections only)`);
 }
 
 function classLiteralFor(state, name) {

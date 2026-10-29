@@ -1307,7 +1307,7 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
     assert.equal(classLiteralGlobals.get('locked'), 1);
     parseFails('void main() { Object o = (a + b).class; }', /Expected type name before \.class/);
 
-    // ── for-each loops over arrays (002, T014) ──
+    // ── for-each loops over arrays and runtime collections (002, T014) ──
     const forEachNode = findNode(parses('/*class*/ class C { Belegung[] belegungen; void f() { for (Belegung b : this.belegungen) {} } }'),
         node => node.type === parser.ASTNodeType.ForEachStatement);
     assert.equal(forEachNode.varType, 'Belegung');
@@ -1346,8 +1346,8 @@ function runProgram(parser, runner, source, runtime = createRuntime()) {
         /Cannot iterate over null/
     );
     assert.throws(
-        () => runProgram(parser, runner, 'void main() { for (Kachel k : new HashSet()) {} }'),
-        /for-each over HashSet is not supported \(only arrays\)/
+        () => runProgram(parser, runner, 'void main() { for (Object value : new HashMap()) {} }'),
+        /for-each over HashMap is not supported \(arrays and collections only\)/
     );
     assert.deepEqual(parser.collectExecutableLines(parses([
         'void main() {',

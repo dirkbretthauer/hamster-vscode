@@ -93,6 +93,155 @@ function callJavaRandomMethod(receiver, methodName, args) {
     return value;
 }
 
+function collectionClassType(className) {
+    switch (className.slice(className.lastIndexOf('.') + 1)) {
+        case 'ArrayList':
+        case 'Vector': return 'list';
+        case 'LinkedList': return 'queue';
+        case 'HashSet': return 'set';
+        case 'HashMap': return 'map';
+        default: return null;
+    }
+}
+
+function requireCollectionArguments(className, methodName, args, expectedCount) {
+    if (args.length !== expectedCount) {
+        throw new Error(`${className}.${methodName} expects ${expectedCount} argument${expectedCount === 1 ? '' : 's'}`);
+    }
+}
+
+function collectionError(receiver, methodName) {
+    return new Error(`${receiver.className}.${methodName}: unsupported collection method`);
+}
+
+function collectionKeyIndex(entries, key) {
+    return entries.findIndex(entry => Object.is(entry.key, key));
+}
+
+function callCollectionMethod(receiver, methodName, args) {
+    const values = receiver.values;
+    const entries = receiver.entries;
+    const className = receiver.className;
+
+    if (receiver.__kind === 'collectionIterator') {
+        requireCollectionArguments(className, methodName, args, 0);
+        if (methodName === 'hasNext') return receiver.index < values.length;
+        if (methodName === 'next') {
+            if (receiver.index >= values.length) {
+                const error = new Error('Iterator has no more elements');
+                error.name = 'NoSuchElementException';
+                throw error;
+            }
+            return values[receiver.index++];
+        }
+        throw collectionError(receiver, methodName);
+    }
+
+    if (methodName === 'size' || methodName === 'isEmpty' || methodName === 'clear' ||
+        methodName === 'iterator') {
+        requireCollectionArguments(className, methodName, args, 0);
+        if (methodName === 'size') return receiver.collectionType === 'map' ? entries.length : values.length;
+        if (methodName === 'isEmpty') return receiver.collectionType === 'map' ? entries.length === 0 : values.length === 0;
+        if (methodName === 'clear') {
+            if (receiver.collectionType === 'map') entries.length = 0;
+            else values.length = 0;
+            return undefined;
+        }
+        if (receiver.collectionType === 'map') throw collectionError(receiver, methodName);
+        return { __kind: 'collectionIterator', className: 'Iterator', values: [...values], index: 0 };
+    }
+
+    switch (receiver.collectionType) {
+        case 'list':
+            if (methodName === 'add' && args.length === 1) {
+                values.push(args[0]);
+                return true;
+            }
+            if (methodName === 'add' && args.length === 2) {
+                const [index, value] = args;
+                if (!Number.isInteger(index) || index < 0 || index > values.length) {
+                    throw new Error(`${className}.add index out of bounds`);
+                }
+                values.splice(index, 0, value);
+                return undefined;
+            }
+            if (methodName === 'get' && args.length === 1) {
+                const [index] = args;
+                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
+                    throw new Error(`${className}.get index out of bounds`);
+                }
+                return values[index];
+            }
+            if (methodName === 'remove' && args.length === 1) {
+                const [index] = args;
+                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
+                    throw new Error(`${className}.remove index out of bounds`);
+                }
+                return values.splice(index, 1)[0];
+            }
+            break;
+        case 'queue':
+            if ((methodName === 'add' || methodName === 'offer') && args.length === 1) {
+                values.push(args[0]);
+                return true;
+            }
+            if (methodName === 'poll' && args.length === 0) return values.shift() ?? null;
+            if (methodName === 'peek' && args.length === 0) return values[0] ?? null;
+            if (methodName === 'get' && args.length === 1) {
+                const [index] = args;
+                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
+                    throw new Error(`${className}.get index out of bounds`);
+                }
+                return values[index];
+            }
+            if (methodName === 'remove' && args.length === 1) {
+                const [index] = args;
+                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
+                    throw new Error(`${className}.remove index out of bounds`);
+                }
+                return values.splice(index, 1)[0];
+            }
+            break;
+        case 'set':
+            if (methodName === 'add' && args.length === 1) {
+                if (values.some(value => Object.is(value, args[0]))) return false;
+                values.push(args[0]);
+                return true;
+            }
+            if ((methodName === 'contains' || methodName === 'remove') && args.length === 1) {
+                const index = values.findIndex(value => Object.is(value, args[0]));
+                if (methodName === 'contains') return index >= 0;
+                return index < 0 ? false : (values.splice(index, 1), true);
+            }
+            break;
+        case 'map':
+            if (methodName === 'put' && args.length === 2) {
+                const [key, value] = args;
+                const index = collectionKeyIndex(entries, key);
+                if (index >= 0) {
+                    const previous = entries[index].value;
+                    entries[index].value = value;
+                    return previous;
+                }
+                entries.push({ key, value });
+                return null;
+            }
+            if (methodName === 'get' && args.length === 1) {
+                const index = collectionKeyIndex(entries, args[0]);
+                return index >= 0 ? entries[index].value : null;
+            }
+            if (methodName === 'containsKey' && args.length === 1) {
+                return collectionKeyIndex(entries, args[0]) >= 0;
+            }
+            if (methodName === 'remove' && args.length === 1) {
+                const index = collectionKeyIndex(entries, args[0]);
+                return index < 0 ? null : entries.splice(index, 1)[0].value;
+            }
+            break;
+    }
+    throw collectionError(receiver, methodName);
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.engine the simulator engine's built-in API (vor/nimm/...)
@@ -184,6 +333,17 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 );
                 return { __kind: 'hamster', id, className };
             }
+            const collectionType = collectionClassType(className);
+            if (collectionType) {
+                return {
+                    __kind: 'collection',
+                    className,
+                    collectionType,
+                    values: [],
+                    entries: [],
+                    fields: Object.create(null),
+                };
+            }
             return { __kind: 'object', className, fields: Object.create(null) };
         },
         getMember(receiver, property) {
@@ -196,14 +356,22 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 };
                 if (Object.prototype.hasOwnProperty.call(constants, property)) return constants[property];
             }
-            if (receiver && receiver.__kind === 'object') return receiver.fields[property];
+            if (receiver && (receiver.__kind === 'object' || receiver.__kind === 'collection')) {
+                return receiver.fields[property];
+            }
             return undefined;
         },
         setMember(receiver, property, value) {
-            if (receiver && receiver.__kind === 'object') { receiver.fields[property] = value; return true; }
+            if (receiver && (receiver.__kind === 'object' || receiver.__kind === 'collection')) {
+                receiver.fields[property] = value;
+                return true;
+            }
             return false;
         },
         callMethod(receiver, methodName, args) {
+            if (receiver && (receiver.__kind === 'collection' || receiver.__kind === 'collectionIterator')) {
+                return callCollectionMethod(receiver, methodName, args);
+            }
             if (receiver && receiver.__kind === 'object' && receiver.className === 'Random') {
                 const result = callJavaRandomMethod(receiver, methodName, args);
                 if (result !== RANDOM_METHOD_NOT_HANDLED) return result;
