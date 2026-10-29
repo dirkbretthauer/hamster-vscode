@@ -35,6 +35,10 @@ function normalizeHamsterMethodName(name) {
 
 /** Sentinel returned by `callHamsterInstanceMethod` when `methodName` isn't a known built-in. */
 const HAMSTER_METHOD_NOT_HANDLED = Symbol('hamsterMethodNotHandled');
+const RANDOM_METHOD_NOT_HANDLED = Symbol('randomMethodNotHandled');
+const JAVA_RANDOM_MULTIPLIER = 0x5DEECE66Dn;
+const JAVA_RANDOM_ADDEND = 0xBn;
+const JAVA_RANDOM_MASK = (1n << 48n) - 1n;
 
 /** Runtime-created placeholder objects stand in for Java library classes the simulator doesn't provide. */
 function unprovidedClassError(className, methodName) {
@@ -46,6 +50,47 @@ function defaultHamsterId(args) {
     const first = args[0];
     if (first && typeof first === 'object' && first.__kind === 'hamster') return Number(first.id);
     return Number(first);
+}
+
+function createJavaRandom(seed) {
+    let numericSeed = Number(seed);
+    if (!Number.isFinite(numericSeed) || !Number.isInteger(numericSeed)) {
+        throw new Error('Random constructor seed must be an integer');
+    }
+    let state = (BigInt(numericSeed) ^ JAVA_RANDOM_MULTIPLIER) & JAVA_RANDOM_MASK;
+    return {
+        __kind: 'object',
+        className: 'Random',
+        fields: Object.create(null),
+        nextRandomBits(bitCount) {
+            state = (state * JAVA_RANDOM_MULTIPLIER + JAVA_RANDOM_ADDEND) & JAVA_RANDOM_MASK;
+            return Number(state >> BigInt(48 - bitCount));
+        },
+    };
+}
+
+function callJavaRandomMethod(receiver, methodName, args) {
+    if (methodName !== 'nextInt') return RANDOM_METHOD_NOT_HANDLED;
+    if (args.length !== 1) throw new Error('Random.nextInt expects exactly one bound');
+
+    const bound = Number(args[0]);
+    if (!Number.isInteger(bound) || bound <= 0 || bound > 0x7fffffff) {
+        const error = new Error('bound must be positive');
+        error.name = 'IllegalArgumentException';
+        throw error;
+    }
+
+    if ((bound & -bound) === bound) {
+        return Number((BigInt(bound) * BigInt(receiver.nextRandomBits(31))) >> 31n);
+    }
+
+    let bits;
+    let value;
+    do {
+        bits = receiver.nextRandomBits(31);
+        value = bits % bound;
+    } while (((bits - value + (bound - 1)) | 0) < 0);
+    return value;
 }
 
 /**
@@ -121,6 +166,13 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             return undefined;
         },
         createObject(className, args) {
+            if (className === 'Random' || className === 'java.util.Random') {
+                if (args.length > 1) throw new Error('Random constructor expects zero or one seed argument');
+                const seed = args.length === 0
+                    ? Math.floor(Math.random() * 2 ** 48)
+                    : args[0];
+                return createJavaRandom(seed);
+            }
             if (className.endsWith('Hamster')) {
                 if (args.length === 0) {
                     return { __kind: 'hamster', id: null, className };
@@ -152,6 +204,10 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             return false;
         },
         callMethod(receiver, methodName, args) {
+            if (receiver && receiver.__kind === 'object' && receiver.className === 'Random') {
+                const result = callJavaRandomMethod(receiver, methodName, args);
+                if (result !== RANDOM_METHOD_NOT_HANDLED) return result;
+            }
             if (receiver && receiver.__kind === 'hamster') {
                 methodName = normalizeHamsterMethodName(methodName);
                 if (methodName === 'init' || methodName === 'initialisiere') {
