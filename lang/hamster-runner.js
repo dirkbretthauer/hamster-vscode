@@ -43,6 +43,10 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['HamsterNichtInitialisiertException', 'HamsterException'],
     ['HamsterException', 'RuntimeException'],
     ['ClassCastException', 'RuntimeException'],
+    ['ArrayIndexOutOfBoundsException', 'IndexOutOfBoundsException'],
+    ['IndexOutOfBoundsException', 'RuntimeException'],
+    ['IllegalArgumentException', 'RuntimeException'],
+    ['NoSuchElementException', 'RuntimeException'],
     ['InterruptedException', 'Exception'],
     ['RuntimeException', 'Exception'],
     ['Exception', 'Throwable'],
@@ -1375,42 +1379,110 @@ function invokeEnumStaticMethod(state, enumName, methodName, args) {
     }
 }
 
+/**
+ * Collection operations that compare elements or keys run here rather than in
+ * the runtime adapter, because Java compares them with user-defined
+ * `equals`/`hashCode`, which only the runner can invoke.
+ */
 function* tryCollectionMethodGen(receiver, methodName, args, state, callDepth, loc) {
-    if (receiver?.__kind !== 'collection' || receiver.collectionType !== 'set' ||
-        !['add', 'contains', 'remove'].includes(methodName)) {
+    if (receiver?.__kind !== 'collection') return COLLECTION_METHOD_NOT_HANDLED;
+    const context = { state, callDepth, loc };
+    switch (receiver.collectionType) {
+        case 'set': return yield* trySetMethodGen(receiver.values, methodName, args, context);
+        case 'map': return yield* tryMapMethodGen(receiver.entries, methodName, args, context);
+        case 'list':
+        case 'queue': return yield* tryListMethodGen(receiver.values, methodName, args, context);
+        default: return COLLECTION_METHOD_NOT_HANDLED;
+    }
+}
+
+function* trySetMethodGen(values, methodName, args, context) {
+    if (args.length !== 1 || !['add', 'contains', 'remove'].includes(methodName)) {
         return COLLECTION_METHOD_NOT_HANDLED;
     }
-    if (args.length !== 1) {
-        throw new Error(`${receiver.className}.${methodName} expects exactly one argument`);
-    }
-
-    const values = receiver.values;
-    let index = -1;
-    for (let candidateIndex = 0; candidateIndex < values.length; candidateIndex++) {
-        if (yield* collectionValuesEqualGen(args[0], values[candidateIndex], state, callDepth, loc)) {
-            index = candidateIndex;
-            break;
-        }
-    }
-    if (methodName === 'contains') return index >= 0;
-    if (methodName === 'remove') {
-        if (index < 0) return false;
-        values.splice(index, 1);
-        return true;
-    }
-    if (index >= 0) return false;
+    const match = yield* findCollectionMatchGen(values, value => value, args[0], true, context);
+    if (methodName === 'contains') return match.found;
+    if (methodName === 'remove') return removeCollectionItem(values, match);
+    if (match.found) return false;
     values.push(args[0]);
     return true;
 }
 
-function* collectionValuesEqualGen(candidate, existing, state, callDepth, loc) {
-    if (Object.is(candidate, existing)) return true;
-    if (candidate == null || existing == null || typeof candidate !== 'object') return false;
+function* tryMapMethodGen(entries, methodName, args, context) {
+    const isKeyLookup = args.length === 1 && ['get', 'containsKey', 'remove'].includes(methodName);
+    const isPut = args.length === 2 && methodName === 'put';
+    if (!isKeyLookup && !isPut) return COLLECTION_METHOD_NOT_HANDLED;
 
-    const candidateType = runtimeTypeName(candidate);
-    if (!candidateType || !findMethod(state, candidateType, 'equals', 1, false)) return false;
+    const match = yield* findCollectionMatchGen(entries, entry => entry.key, args[0], true, context);
+    if (methodName === 'containsKey') return match.found;
+    if (methodName === 'get') return match.found ? match.item.value : null;
+    if (methodName === 'remove') return removeCollectionItem(entries, match) ? match.item.value : null;
+    if (!match.found) {
+        entries.push({ key: args[0], value: args[1] });
+        return null;
+    }
+    const previous = match.item.value;
+    match.item.value = args[1];
+    return previous;
+}
+
+/** `remove(int)` keeps going to the runtime by index; a non-int argument means `remove(Object)`, as Java's overloads resolve it. */
+function* tryListMethodGen(values, methodName, args, context) {
+    const isValueMethod = args.length === 1 && (methodName === 'indexOf' || methodName === 'contains' ||
+        (methodName === 'remove' && typeof args[0] !== 'number'));
+    if (!isValueMethod) return COLLECTION_METHOD_NOT_HANDLED;
+
+    const match = yield* findCollectionMatchGen(values, value => value, args[0], false, context);
+    if (methodName === 'contains') return match.found;
+    if (methodName === 'remove') return removeCollectionItem(values, match);
+    return match.found ? values.indexOf(match.item) : -1;
+}
+
+function* findCollectionMatchGen(items, keyOf, wanted, isHashBased, context) {
+    for (const item of items) {
+        if (yield* javaValuesEqualGen(wanted, keyOf(item), isHashBased, context)) {
+            return { found: true, item };
+        }
+    }
+    return { found: false, item: undefined };
+}
+
+/** Re-locates the match by identity: a user `equals` may yield to other threads that change the collection. */
+function removeCollectionItem(items, match) {
+    const index = match.found ? items.indexOf(match.item) : -1;
+    if (index < 0) return false;
+    items.splice(index, 1);
+    return true;
+}
+
+/**
+ * Java's `wanted.equals(existing)` for collection lookups. Hash-based
+ * collections only consult `equals` when both sides define `hashCode` and the
+ * hashes agree; without a user `hashCode`, Java uses identity hashes, so
+ * distinct instances never match.
+ */
+function* javaValuesEqualGen(wanted, existing, isHashBased, { state, callDepth, loc }) {
+    if (Object.is(wanted, existing)) return true;
+    if (wanted == null || existing == null || typeof wanted !== 'object') return false;
+
+    const wantedType = runtimeTypeName(wanted);
+    if (!wantedType || !findMethod(state, wantedType, 'equals', 1, false)) return false;
+    if (isHashBased) {
+        const existingType = runtimeTypeName(existing);
+        if (!existingType || !findMethod(state, wantedType, 'hashCode', 0, false) ||
+            !findMethod(state, existingType, 'hashCode', 0, false)) {
+            return false;
+        }
+        const wantedHash = yield* invokeInstanceMethodGen(
+            wanted, 'hashCode', [], state, callDepth, wantedType, loc
+        );
+        const existingHash = yield* invokeInstanceMethodGen(
+            existing, 'hashCode', [], state, callDepth, existingType, loc
+        );
+        if (wantedHash !== existingHash) return false;
+    }
     return Boolean(yield* invokeInstanceMethodGen(
-        candidate, 'equals', [existing], state, callDepth, candidateType, loc
+        wanted, 'equals', [existing], state, callDepth, wantedType, loc
     ));
 }
 
@@ -2287,6 +2359,10 @@ function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, 
     }
     const threadResult = yield* tryThreadOperationGen(receiver, methodName, args, state, loc);
     if (threadResult !== THREAD_OPERATION_NOT_HANDLED) return threadResult;
+
+    // `super.add(x)` in a user subclass of a library collection lands here.
+    const collectionResult = yield* tryCollectionMethodGen(receiver, methodName, args, state, callDepth, loc);
+    if (collectionResult !== COLLECTION_METHOD_NOT_HANDLED) return collectionResult;
 
     if (isHamsterInstruction(methodName)) {
         yield { kind: 'instruction', name: methodName, loc: loc || null };
