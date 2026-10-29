@@ -115,6 +115,7 @@ test('sets use user-defined equals and collections support enhanced-for', async 
                 Kachel candidate = (Kachel) other;
                 return this.row == candidate.row;
             }
+            int hashCode() { return this.row; }
         }
         class ActionStore extends java.util.Vector<Kachel> {}
         int visited;
@@ -143,6 +144,150 @@ test('sets use user-defined equals and collections support enhanced-for', async 
     assert.equal(state.scopes[0].get('found'), true);
     assert.equal(state.scopes[0].get('remaining'), 0);
     assert.equal(state.scopes[0].get('vectorSize'), 1);
+});
+
+async function runCollectionProgram(body) {
+    const { parser, runner } = await loadLanguageRunner();
+    const runtime = await loadSimulatorRuntime();
+    const source = `/*object-oriented program*/
+        import java.util.*;
+        class Kachel {
+            int row;
+            Kachel(int row) { this.row = row; }
+            boolean equals(Object other) { return this.row == ((Kachel) other).row; }
+            int hashCode() { return this.row; }
+        }
+        class EqualsOnly {
+            int row;
+            EqualsOnly(int row) { this.row = row; }
+            boolean equals(Object other) { return this.row == ((EqualsOnly) other).row; }
+        }
+        ${body}`;
+    const ast = parser.parseProgram(source, { compatibility: true, strict: true });
+    const state = runner.createRunnerState(ast, runtime);
+    while (runner.executeRunnerStep(state)) {}
+    return state.scopes[0];
+}
+
+test('collection and Random failures are catchable Java exceptions', async () => {
+    const globals = await runCollectionProgram(`
+        class AktionsSpeicher extends java.util.Vector<String> {
+            String naechste() {
+                try { return this.remove(0); } catch (ArrayIndexOutOfBoundsException exc) { return null; }
+            }
+        }
+        boolean vectorReturnedNull;
+        boolean listCaught;
+        boolean randomCaught;
+        boolean iteratorCaught;
+        boolean vectorCaughtAsRuntime;
+        void main() {
+            vectorReturnedNull = new AktionsSpeicher().naechste() == null;
+            try { new ArrayList<String>().get(0); } catch (IndexOutOfBoundsException e) { listCaught = true; }
+            try { new Random(1).nextInt(0); } catch (IllegalArgumentException e) { randomCaught = true; }
+            try { new HashSet<String>().iterator().next(); } catch (NoSuchElementException e) { iteratorCaught = true; }
+            try { new Vector<String>().get(3); } catch (RuntimeException e) { vectorCaughtAsRuntime = true; }
+        }`);
+
+    assert.equal(globals.get('vectorReturnedNull'), true);
+    assert.equal(globals.get('listCaught'), true);
+    assert.equal(globals.get('randomCaught'), true);
+    assert.equal(globals.get('iteratorCaught'), true);
+    assert.equal(globals.get('vectorCaughtAsRuntime'), true);
+});
+
+test('List.remove(Object), indexOf and contains use equals while remove(int) stays positional', async () => {
+    const globals = await runCollectionProgram(`
+        int foundAt;
+        int missingAt;
+        boolean contained;
+        boolean removedByObject;
+        boolean removedMissing;
+        int removedByIndex;
+        int remainingSize;
+        void main() {
+            Vector<Kachel> warteliste = new Vector<Kachel>();
+            warteliste.add(new Kachel(1));
+            warteliste.add(new Kachel(2));
+            warteliste.add(new Kachel(3));
+            foundAt = warteliste.indexOf(new Kachel(2));
+            missingAt = warteliste.indexOf(new Kachel(9));
+            contained = warteliste.contains(new Kachel(3));
+            removedByObject = warteliste.remove(new Kachel(1));
+            removedMissing = warteliste.remove(new Kachel(9));
+            removedByIndex = warteliste.remove(1).row;
+            remainingSize = warteliste.size();
+        }`);
+
+    assert.equal(globals.get('foundAt'), 1);
+    assert.equal(globals.get('missingAt'), -1);
+    assert.equal(globals.get('contained'), true);
+    assert.equal(globals.get('removedByObject'), true);
+    assert.equal(globals.get('removedMissing'), false);
+    assert.equal(globals.get('removedByIndex'), 3);
+    assert.equal(globals.get('remainingSize'), 1);
+});
+
+test('HashMap keys match through user-defined equals and hashCode', async () => {
+    const globals = await runCollectionProgram(`
+        int previous;
+        int size;
+        boolean hasKey;
+        int value;
+        int removed;
+        int sizeAfterRemove;
+        void main() {
+            HashMap<Kachel, Integer> map = new HashMap<Kachel, Integer>();
+            map.put(new Kachel(1), 5);
+            previous = map.put(new Kachel(1), 6);
+            size = map.size();
+            hasKey = map.containsKey(new Kachel(1));
+            value = map.get(new Kachel(1));
+            removed = map.remove(new Kachel(1));
+            sizeAfterRemove = map.size();
+        }`);
+
+    assert.equal(globals.get('previous'), 5);
+    assert.equal(globals.get('size'), 1);
+    assert.equal(globals.get('hasKey'), true);
+    assert.equal(globals.get('value'), 6);
+    assert.equal(globals.get('removed'), 6);
+    assert.equal(globals.get('sizeAfterRemove'), 0);
+});
+
+test('HashSet needs hashCode as well as equals, including through super.add', async () => {
+    const globals = await runCollectionProgram(`
+        class KachelSet extends HashSet<Kachel> {
+            int additions;
+            boolean add(Kachel kachel) {
+                this.additions++;
+                return super.add(kachel);
+            }
+        }
+        int equalsOnlySize;
+        boolean equalsOnlyContains;
+        int subclassSize;
+        int subclassAdditions;
+        boolean secondAddResult;
+        void main() {
+            HashSet<EqualsOnly> equalsOnly = new HashSet<EqualsOnly>();
+            equalsOnly.add(new EqualsOnly(1));
+            equalsOnly.add(new EqualsOnly(1));
+            equalsOnlySize = equalsOnly.size();
+            equalsOnlyContains = equalsOnly.contains(new EqualsOnly(1));
+
+            KachelSet cells = new KachelSet();
+            cells.add(new Kachel(1));
+            secondAddResult = cells.add(new Kachel(1));
+            subclassSize = cells.size();
+            subclassAdditions = cells.additions;
+        }`);
+
+    assert.equal(globals.get('equalsOnlySize'), 2);
+    assert.equal(globals.get('equalsOnlyContains'), false);
+    assert.equal(globals.get('secondAddResult'), false);
+    assert.equal(globals.get('subclassSize'), 1);
+    assert.equal(globals.get('subclassAdditions'), 2);
 });
 
 // Thread and monitor operations are intercepted by the runner before they ever

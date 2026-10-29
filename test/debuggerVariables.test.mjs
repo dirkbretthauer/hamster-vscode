@@ -65,3 +65,23 @@ test('an unknown child reference yields no variables instead of throwing', async
     const { variables } = await createController(new Map());
     assert.deepEqual(variables(123456789), []);
 });
+
+test('library collections and user subclasses of them expand into fields and elements', async () => {
+    const store = {
+        __kind: 'collection', __className: 'AktionsSpeicher', className: 'java.util.Vector',
+        collectionType: 'list', values: ['links', 'vor'], entries: [],
+        fields: Object.assign(Object.create(null), { maxAktionen: 5 }),
+    };
+    const map = {
+        __kind: 'collection', className: 'HashMap', collectionType: 'map', values: [],
+        entries: [{ key: 7, value: 'seven' }], fields: Object.create(null),
+    };
+    const { variables } = await createController(new Map([['store', store], ['map', map]]));
+
+    const [storeVar, mapVar] = variables(GLOBALS_REFERENCE);
+    assert.deepEqual([storeVar.value, mapVar.value], ['AktionsSpeicher(size=2)', 'HashMap(size=1)']);
+    assert.deepEqual(variables(storeVar.variablesReference).map(child => [child.name, child.value]),
+        [['maxAktionen', '5'], ['[0]', '"links"'], ['[1]', '"vor"']]);
+    assert.deepEqual(variables(mapVar.variablesReference).map(child => [child.name, child.value]),
+        [['7', '"seven"']]);
+});

@@ -45,6 +45,14 @@ function unprovidedClassError(className, methodName) {
     return new Error(`${className}.${methodName}: class ${className} is not provided by the Hamster simulator`);
 }
 
+/** An error the runner turns into a catchable Java exception of `typeName` (see `normalizeBuiltinFailure`). */
+function javaRuntimeException(typeName, message) {
+    const error = new Error(message);
+    error.name = typeName;
+    error.hamsterExceptionType = typeName;
+    return error;
+}
+
 function defaultHamsterId(args) {
     if (!args || args.length === 0) return -1;
     const first = args[0];
@@ -75,9 +83,7 @@ function callJavaRandomMethod(receiver, methodName, args) {
 
     const bound = Number(args[0]);
     if (!Number.isInteger(bound) || bound <= 0 || bound > 0x7fffffff) {
-        const error = new Error('bound must be positive');
-        error.name = 'IllegalArgumentException';
-        throw error;
+        throw javaRuntimeException('IllegalArgumentException', 'bound must be positive');
     }
 
     if ((bound & -bound) === bound) {
@@ -118,6 +124,42 @@ function collectionKeyIndex(entries, key) {
     return entries.findIndex(entry => Object.is(entry.key, key));
 }
 
+/** Vector reports bad indices as `ArrayIndexOutOfBoundsException`, the other lists as `IndexOutOfBoundsException`. */
+function indexOutOfBoundsTypeFor(className) {
+    return className.slice(className.lastIndexOf('.') + 1) === 'Vector'
+        ? 'ArrayIndexOutOfBoundsException'
+        : 'IndexOutOfBoundsException';
+}
+
+function requireCollectionIndex(receiver, index, isEndAllowed) {
+    const limit = isEndAllowed ? receiver.values.length : receiver.values.length - 1;
+    if (Number.isInteger(index) && index >= 0 && index <= limit) return;
+    throw javaRuntimeException(
+        indexOutOfBoundsTypeFor(receiver.className),
+        `Index ${index} out of bounds for length ${receiver.values.length}`
+    );
+}
+
+/**
+ * Index-free `remove`/`indexOf`/`contains` on lists. The runner answers these
+ * itself with Java `equals` semantics; this identity-based version only serves
+ * callers that use the runtime directly.
+ */
+function callListValueMethod(values, methodName, value) {
+    const index = values.findIndex(candidate => Object.is(candidate, value));
+    if (methodName === 'indexOf') return index;
+    if (methodName === 'contains') return index >= 0;
+    if (index < 0) return false;
+    values.splice(index, 1);
+    return true;
+}
+
+function isListValueMethod(methodName, args) {
+    if (args.length !== 1) return false;
+    if (methodName === 'indexOf' || methodName === 'contains') return true;
+    return methodName === 'remove' && typeof args[0] !== 'number';
+}
+
 function callCollectionMethod(receiver, methodName, args) {
     const values = receiver.values;
     const entries = receiver.entries;
@@ -128,9 +170,7 @@ function callCollectionMethod(receiver, methodName, args) {
         if (methodName === 'hasNext') return receiver.index < values.length;
         if (methodName === 'next') {
             if (receiver.index >= values.length) {
-                const error = new Error('Iterator has no more elements');
-                error.name = 'NoSuchElementException';
-                throw error;
+                throw javaRuntimeException('NoSuchElementException', 'Iterator has no more elements');
             }
             return values[receiver.index++];
         }
@@ -153,53 +193,32 @@ function callCollectionMethod(receiver, methodName, args) {
 
     switch (receiver.collectionType) {
         case 'list':
-            if (methodName === 'add' && args.length === 1) {
+        case 'queue':
+            if ((methodName === 'add' || (receiver.collectionType === 'queue' && methodName === 'offer')) &&
+                args.length === 1) {
                 values.push(args[0]);
                 return true;
             }
-            if (methodName === 'add' && args.length === 2) {
+            if (receiver.collectionType === 'list' && methodName === 'add' && args.length === 2) {
                 const [index, value] = args;
-                if (!Number.isInteger(index) || index < 0 || index > values.length) {
-                    throw new Error(`${className}.add index out of bounds`);
-                }
+                requireCollectionIndex(receiver, index, true);
                 values.splice(index, 0, value);
                 return undefined;
             }
+            if (receiver.collectionType === 'queue' && args.length === 0) {
+                if (methodName === 'poll') return values.shift() ?? null;
+                if (methodName === 'peek') return values[0] ?? null;
+            }
+            if (isListValueMethod(methodName, args)) {
+                return callListValueMethod(values, methodName, args[0]);
+            }
             if (methodName === 'get' && args.length === 1) {
-                const [index] = args;
-                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
-                    throw new Error(`${className}.get index out of bounds`);
-                }
-                return values[index];
+                requireCollectionIndex(receiver, args[0], false);
+                return values[args[0]];
             }
             if (methodName === 'remove' && args.length === 1) {
-                const [index] = args;
-                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
-                    throw new Error(`${className}.remove index out of bounds`);
-                }
-                return values.splice(index, 1)[0];
-            }
-            break;
-        case 'queue':
-            if ((methodName === 'add' || methodName === 'offer') && args.length === 1) {
-                values.push(args[0]);
-                return true;
-            }
-            if (methodName === 'poll' && args.length === 0) return values.shift() ?? null;
-            if (methodName === 'peek' && args.length === 0) return values[0] ?? null;
-            if (methodName === 'get' && args.length === 1) {
-                const [index] = args;
-                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
-                    throw new Error(`${className}.get index out of bounds`);
-                }
-                return values[index];
-            }
-            if (methodName === 'remove' && args.length === 1) {
-                const [index] = args;
-                if (!Number.isInteger(index) || index < 0 || index >= values.length) {
-                    throw new Error(`${className}.remove index out of bounds`);
-                }
-                return values.splice(index, 1)[0];
+                requireCollectionIndex(receiver, args[0], false);
+                return values.splice(args[0], 1)[0];
             }
             break;
         case 'set':

@@ -40,15 +40,34 @@ function decodeFrameId(frameId) {
 /** Name/value pairs shown when a variable is expanded; null when the value has no children. */
 function dbgChildEntries(v) {
     if (Array.isArray(v)) return v.map((element, index) => [String(index), element]);
-    if (v && typeof v === 'object' && v.__kind === 'object' && v.fields) return Object.entries(v.fields);
+    if (!v || typeof v !== 'object') return null;
+    if (v.__kind === 'collection') return dbgCollectionEntries(v);
+    if (v.__kind === 'object' && v.fields) return Object.entries(v.fields);
     return null;
+}
+
+/** A library collection, or a user subclass of one: its own fields, then its elements or map entries. */
+function dbgCollectionEntries(collection) {
+    const fieldEntries = Object.entries(collection.fields || {});
+    const elementEntries = collection.collectionType === 'map'
+        ? collection.entries.map(entry => [dbgFormatValue(entry.key), entry.value])
+        : collection.values.map((value, index) => ['[' + index + ']', value]);
+    return [...fieldEntries, ...elementEntries];
+}
+
+function dbgCollectionSize(collection) {
+    return collection.collectionType === 'map' ? collection.entries.length : collection.values.length;
 }
 
 function dbgFormatValue(v) {
     if (v === null || v === undefined) return String(v);
     if (Array.isArray(v)) return 'Array(' + v.length + ')';
     if (typeof v === 'object') {
-        if (v.__kind === 'object') return v.__className || 'Object';
+        if (v.__kind === 'object') return v.__className || v.className || 'Object';
+        if (v.__kind === 'collection') {
+            return (v.__className || v.className) + '(size=' + dbgCollectionSize(v) + ')';
+        }
+        if (v.__kind === 'collectionIterator') return 'Iterator';
         if (v.__kind === 'hamster') return 'Hamster #' + v.id;
         if (v.__kind === 'class' || v.__kind === 'classLiteral') return 'class ' + (v.name || '');
         if (v.__kind === 'enum') return v.__className + '.' + v.name;
