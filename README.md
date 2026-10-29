@@ -41,3 +41,18 @@ To build a `.vsix` package:
 ```bash
 npm run package
 ```
+
+### Pull request checks
+
+GitHub Actions runs `Build (no warnings)` and `Tests` on every push and on pull
+requests targeting `main`. The build runs `npm run compile -- --fail-on-warnings`,
+so webpack warnings fail the check rather than producing a successful build.
+The test check runs the full `npm test` command (language smoke tests and all
+Node.js test suites). The optional reference-corpus scripts require files outside
+this repository and are not part of this test suite.
+
+Both checks are required by `main` branch protection, including for administrators,
+and branches must be up to date before merging. No review approvals are required.
+Protection is configured in GitHub's branch settings, not by this workflow file;
+keep the required check names in sync if renaming these jobs. "No warnings" applies
+to webpack build diagnostics, not npm dependency deprecation or audit notices.
