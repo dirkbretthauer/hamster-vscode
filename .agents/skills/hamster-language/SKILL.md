@@ -151,9 +151,10 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   (`obj.<T>m()`), `&` type-parameter bounds, multi-catch unions (`catch (A | B e)`), try-with-resources
 
 ### Runner gaps
-- No Java library classes (`ArrayList`, `HashMap`, `java.util.concurrent.*`, `java.util.Timer`, …):
-  calls fail with a message naming the class. Note `Thread`'s *own* members are supported (see below);
-  it is the library classes around it that are not.
+- Java library support is limited to `java.util.Random`'s no-argument/seeded constructors and
+  `nextInt(bound)`. Other classes (`ArrayList`, `HashMap`, `java.util.concurrent.*`,
+  `java.util.Timer`, …) still fail with a message naming the class. Note `Thread`'s *own* members
+  are supported (see below); it is the library classes around it that are not.
 - for-each iterates arrays only; collections fail with a message naming the type
 - Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
 

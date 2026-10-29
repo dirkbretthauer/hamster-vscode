@@ -95,3 +95,41 @@ test('hamster built-ins still work through the runtime adapter', async () => {
     const standardHamster = runtime.callBuiltin('Hamster.getStandardHamster', []);
     assert.equal(runtime.callMethod(standardHamster, 'getReihe', []), 0);
 });
+
+test('java.util.Random supports Java-compatible seeded nextInt(bound)', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const first = runtime.createObject('Random', [1000]);
+    const second = runtime.createObject('java.util.Random', [1000]);
+
+    for (const expected of [7, 5, 6, 4, 2]) {
+        assert.equal(runtime.callMethod(first, 'nextInt', [10]), expected);
+        assert.equal(runtime.callMethod(second, 'nextInt', [10]), expected);
+    }
+});
+
+test('Random.nextInt(bound) respects bounds and rejects non-positive bounds', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const random = runtime.createObject('Random', [42]);
+
+    assert.equal(runtime.callMethod(random, 'nextInt', [1]), 0);
+    for (const bound of [2, 17, 2147483647]) {
+        const value = runtime.callMethod(random, 'nextInt', [bound]);
+        assert.ok(Number.isInteger(value));
+        assert.ok(value >= 0 && value < bound, `expected ${value} to be in [0, ${bound})`);
+    }
+    for (const bound of [0, -1]) {
+        assert.throws(
+            () => runtime.callMethod(random, 'nextInt', [bound]),
+            error => error.name === 'IllegalArgumentException' && error.message === 'bound must be positive'
+        );
+    }
+});
+
+test('the no-argument Random constructor and nextInt(bound) are available', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const random = runtime.createObject('Random', []);
+
+    const value = runtime.callMethod(random, 'nextInt', [37]);
+    assert.ok(Number.isInteger(value));
+    assert.ok(value >= 0 && value < 37);
+});

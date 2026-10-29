@@ -211,6 +211,23 @@ test('liesZahl consumes a supplied answer and the program uses it', async () => 
     assert.equal(run.hamster().x, 3);
 });
 
+test('java.util.Random seeded construction and nextInt run through the language runtime', async () => {
+    const run = await runSimulation({
+        terrain: terrainFile(['>  ', '   '], [0], 0),
+        program: `
+            /*object-oriented program*/
+            import java.util.Random;
+            void main() {
+                Random random = new Random(1000);
+                schreib(random.nextInt(10));
+            }
+        `,
+    });
+
+    assert.equal(run.status, 'finished');
+    assert.deepEqual(run.output, ['7']);
+});
+
 test('a program waiting for input that never arrives reports the prompt', async () => {
     const run = await runSimulation({
         terrain: terrainFile(['>  ', '   '], [0], 0),
