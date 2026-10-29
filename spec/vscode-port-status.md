@@ -84,7 +84,7 @@ Deviations from the reference, required by the constitution's reference-fidelity
 - 🟢 Qualified type names (`java.util.Calendar c`, `new pkg.Type()`) resolve by simple name, since packages are not modelled.
 - 🟢 Several variables in one local, global, or `for` declaration.
 - 🟢 Class literals `Foo.class` (one canonical value per class) and `getClass()`.
-- 🟢 for-each loops over arrays. 🟡 Collections are not iterable until Java collections exist; the error names the type.
+- 🟢 for-each loops over arrays and the supported list, queue, and set collections; maps are not iterable.
 - 🟢 Varargs parameters, with Java's exact-arity-first overload choice and array pass-through.
 - 🟢 Constant-only enums: `values()`, `valueOf()`, `name()`, `ordinal()`, `compareTo()`, unqualified `switch` labels. 🟡 Enums with constructors, constant bodies, or members are a tagged known gap (`enum-body`); no sample uses them.
 - 🟢 Casts `(int) expr` / `(Type) expr` parse; `(int)` truncates like Java, and reference casts to known classes/interfaces throw a catchable `ClassCastException` on mismatch.
@@ -105,7 +105,8 @@ Deviations from the reference, required by the constitution's reference-fidelity
 - 🟢 `synchronized` performs real mutual exclusion, per object and per class literal, re-entrant, and released on every exit path including an exception unwinding out of the section.
 - 🟢 Cooperative concurrency: a started hamster becomes its own thread, matching the reference, where `IHamster extends Thread` and every hamster command is a scheduling point (`IHamster.java:33, 87-142`). Supported: `start`, `run`, `join`, `sleep`, `interrupt`, `isInterrupted`, `Thread.interrupted`, `isAlive`, `setDaemon`/`isDaemon`, `setPriority`/`getPriority`, `setName`/`getName`, `stop`, `Thread.currentThread`, `Thread.yield`, `wait`/`notify`/`notifyAll`, and `InterruptedException`.
 - 🟢 `java.util.Random` supports the corpus-used no-argument and seeded constructors plus Java-compatible `nextInt(bound)`.
-- 🟡 Other Java library classes (`ArrayList`, `java.util.concurrent.*`, `java.util.Timer`, …) still fail with a message naming the class. The course material has students build a `Semaphor` from `wait`/`notify`, so the library versions are a convenience rather than the lesson.
+- 🟢 Collection APIs used by the reference samples are available: `ArrayList`/`Vector` indexed list operations, `LinkedList` queue operations, `HashMap` key operations, `HashSet` add/contains/remove and iteration, plus enhanced-for over lists, queues, and sets. Set membership honors user-defined `equals`; collection generics remain erased.
+- 🟡 Other Java library classes (`java.util.concurrent.*`, `java.util.Timer`, …) still fail with a message naming the class. The course material has students build a `Semaphor` from `wait`/`notify`, so the library versions are a convenience rather than the lesson.
 - 🟢 Program-type markers select imperative, object-oriented, or reusable-class parsing semantics; unmarked files default to imperative as in the reference implementation.
 - ⚪ Hardcoded loop-iteration (~100k) and recursion-depth (~256) guards not in the original spec — reasonable safety net, but undocumented for users. The loop guard is now a *per-thread progress budget*: it resets on every hamster instruction and every blocking operation, so `while (true) { … vor(); }` — the normal shape of a concurrent hamster — runs until the user stops it, while a loop that makes no observable progress is still caught.
 

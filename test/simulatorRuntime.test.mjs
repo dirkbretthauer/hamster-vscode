@@ -42,13 +42,107 @@ async function loadSimulatorRuntime() {
     });
 }
 
-test('calling a method on an unprovided library class names the class', async () => {
+async function loadLanguageRunner() {
+    const langDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'lang');
+    const lexerUrl = moduleUrl(fs.readFileSync(path.join(langDir, 'hamster-lexer.js'), 'utf8'));
+    const parserSource = fs.readFileSync(path.join(langDir, 'hamster-parser.js'), 'utf8')
+        .replace("'./hamster-lexer.js'", JSON.stringify(lexerUrl));
+    const parserUrl = moduleUrl(parserSource);
+    const runnerSource = fs.readFileSync(path.join(langDir, 'hamster-runner.js'), 'utf8')
+        .replace("'./hamster-parser.js'", JSON.stringify(parserUrl));
+    return {
+        parser: await import(parserUrl),
+        runner: await import(moduleUrl(runnerSource)),
+    };
+}
+
+test('collection classes expose the supported collection APIs', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const list = runtime.createObject('ArrayList', []);
+    assert.equal(runtime.callMethod(list, 'isEmpty', []), true);
+    assert.equal(runtime.callMethod(list, 'add', ['first']), true);
+    runtime.callMethod(list, 'add', [1, 'second']);
+    assert.equal(runtime.callMethod(list, 'size', []), 2);
+    assert.equal(runtime.callMethod(list, 'get', [1]), 'second');
+    assert.equal(runtime.callMethod(list, 'remove', [0]), 'first');
+
+    const map = runtime.createObject('java.util.HashMap', []);
+    assert.equal(runtime.callMethod(map, 'put', [7, 'value']), null);
+    assert.equal(runtime.callMethod(map, 'containsKey', [7]), true);
+    assert.equal(runtime.callMethod(map, 'get', [7]), 'value');
+    assert.equal(runtime.callMethod(map, 'remove', [7]), 'value');
+    assert.equal(runtime.callMethod(map, 'get', [7]), null);
+
+    const queue = runtime.createObject('LinkedList', []);
+    assert.equal(runtime.callMethod(queue, 'offer', ['first']), true);
+    assert.equal(runtime.callMethod(queue, 'offer', ['second']), true);
+    assert.equal(runtime.callMethod(queue, 'poll', []), 'first');
+    assert.equal(runtime.callMethod(queue, 'poll', []), 'second');
+    assert.equal(runtime.callMethod(queue, 'poll', []), null);
+
+    const set = runtime.createObject('HashSet', []);
+    assert.equal(runtime.callMethod(set, 'add', ['item']), true);
+    assert.equal(runtime.callMethod(set, 'add', ['item']), false);
+    const iterator = runtime.callMethod(set, 'iterator', []);
+    assert.equal(runtime.callMethod(iterator, 'hasNext', []), true);
+    assert.equal(runtime.callMethod(iterator, 'next', []), 'item');
+    assert.equal(runtime.callMethod(iterator, 'hasNext', []), false);
+    assert.throws(
+        () => runtime.callMethod(iterator, 'next', []),
+        error => error.name === 'NoSuchElementException'
+    );
+});
+
+test('unsupported collection methods report the collection and method', async () => {
     const runtime = await loadSimulatorRuntime();
     const list = runtime.createObject('ArrayList', []);
     assert.throws(
-        () => runtime.callMethod(list, 'add', [1]),
-        /ArrayList\.add: class ArrayList is not provided by the Hamster simulator/
+        () => runtime.callMethod(list, 'removeAll', []),
+        /ArrayList\.removeAll: unsupported collection method/
     );
+});
+
+test('sets use user-defined equals and collections support enhanced-for', async () => {
+    const { parser, runner } = await loadLanguageRunner();
+    const runtime = await loadSimulatorRuntime();
+    const source = `/*object-oriented program*/
+        import java.util.HashSet;
+        import java.util.Set;
+        class Kachel {
+            int row;
+            Kachel(int row) { this.row = row; }
+            boolean equals(Object other) {
+                Kachel candidate = (Kachel) other;
+                return this.row == candidate.row;
+            }
+        }
+        class ActionStore extends java.util.Vector<Kachel> {}
+        int visited;
+        boolean found;
+        int remaining;
+        int vectorSize;
+        void main() {
+            Set<Kachel> cells = new HashSet<Kachel>();
+            cells.add(new Kachel(1));
+            cells.add(new Kachel(1));
+            found = cells.contains(new Kachel(1));
+            for (Kachel cell : cells) {
+                visited++;
+            }
+            cells.remove(new Kachel(1));
+            remaining = cells.size();
+            ActionStore actions = new ActionStore();
+            actions.add(new Kachel(2));
+            vectorSize = actions.size();
+        }`;
+    const ast = parser.parseProgram(source, { compatibility: true, strict: true });
+    const state = runner.createRunnerState(ast, runtime);
+    while (runner.executeRunnerStep(state)) {}
+
+    assert.equal(state.scopes[0].get('visited'), 1);
+    assert.equal(state.scopes[0].get('found'), true);
+    assert.equal(state.scopes[0].get('remaining'), 0);
+    assert.equal(state.scopes[0].get('vectorSize'), 1);
 });
 
 // Thread and monitor operations are intercepted by the runner before they ever
