@@ -214,6 +214,32 @@ test('Semaphore and ReentrantLock constructors validate their arguments', async 
     assert.throws(() => runtime.createObject('ReentrantLock', [true, false]), /at most one/);
 });
 
+test('latch, barrier, exchanger, and blocking-queue constructors record their configuration', async () => {
+    const runtime = await loadSimulatorRuntime();
+    assert.equal(runtime.createObject('java.util.concurrent.CountDownLatch', [3]).initialCount, 3);
+    const action = { __kind: 'object', className: 'Action', __className: 'Action', fields: {} };
+    const barrier = runtime.createObject('CyclicBarrier', [2, action]);
+    assert.equal(barrier.parties, 2);
+    assert.equal(barrier.barrierAction, action);
+    assert.equal(runtime.createObject('CyclicBarrier', [4]).barrierAction, null);
+    assert.equal(runtime.createObject('Exchanger', []).className, 'Exchanger');
+    assert.equal(runtime.createObject('ArrayBlockingQueue', [5, true]).capacity, 5);
+    assert.equal(runtime.createObject('LinkedBlockingQueue', []).capacity, Infinity);
+    assert.equal(runtime.createObject('LinkedBlockingQueue', [7]).capacity, 7);
+    assert.equal(runtime.createObject('java.util.concurrent.SynchronousQueue', []).capacity, 0);
+});
+
+test('latch, barrier, and blocking-queue constructors reject invalid arguments', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const isIllegalArgument = error => error.hamsterExceptionType === 'IllegalArgumentException';
+    assert.throws(() => runtime.createObject('CountDownLatch', [-1]), isIllegalArgument);
+    assert.throws(() => runtime.createObject('CyclicBarrier', [0]), isIllegalArgument);
+    assert.throws(() => runtime.createObject('ArrayBlockingQueue', [0]), isIllegalArgument);
+    assert.throws(() => runtime.createObject('LinkedBlockingQueue', [-3]), isIllegalArgument);
+    assert.throws(() => runtime.createObject('ArrayBlockingQueue', []), /expects a capacity/);
+    assert.throws(() => runtime.createObject('Exchanger', [1]), /expects no arguments/);
+});
+
 test('Hamster copy construction preserves state without sharing the engine hamster', async () => {
     const runtime = await loadSimulatorRuntime();
     const source = runtime.createObject('Hamster', [2, 3, 0, 4, 5]);

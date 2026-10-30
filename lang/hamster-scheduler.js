@@ -54,6 +54,18 @@ const BLOCKED_YIELD = Object.freeze({ kind: 'blocked' });
 
 const MAIN_THREAD_NAME = 'main';
 
+/** `Integer.MAX_VALUE`, the capacity Java reports for an unbounded `LinkedBlockingQueue`. */
+const JAVA_INT_MAX = 2147483647;
+
+/** Record kinds of the `java.util.concurrent` hand-off/rendezvous objects parked threads wait on. */
+const CoordinatorKind = Object.freeze({
+    LATCH: 'countDownLatch',
+    BARRIER: 'cyclicBarrier',
+    EXCHANGER: 'exchanger',
+    BLOCKING_QUEUE: 'blockingQueue',
+});
+const COORDINATOR_KINDS = new Set(Object.values(CoordinatorKind));
+
 function interruptedError(operation) {
     const error = new Error(operation + ' was interrupted');
     error.hamsterExceptionType = 'InterruptedException';
@@ -103,6 +115,8 @@ export function createScheduler(programState, options = {}) {
     const reentrantLocks = new Map();
     const semaphores = new Map();
     const conditions = new Map();
+    /** Latch/barrier/exchanger/blocking-queue object → its waiter record. */
+    const coordinators = new Map();
 
     /**
      * `setDaemon`/`setPriority`/`setName` may be called before `start()`, when
@@ -280,6 +294,181 @@ export function createScheduler(programState, options = {}) {
         admitNextLockOwner(lock);
     }
 
+    // ── latches, barriers, exchangers, blocking queues ──────────────────────
+
+    function coordinatorFor(object, kind, createFields) {
+        let record = coordinators.get(object);
+        if (!record) {
+            const className = String(object.className ?? kind);
+            record = {
+                kind,
+                className: className.slice(className.lastIndexOf('.') + 1),
+                ...createFields(),
+            };
+            coordinators.set(object, record);
+        }
+        return record;
+    }
+
+    function latchFor(latch) {
+        return coordinatorFor(latch, CoordinatorKind.LATCH,
+            () => ({ count: latch.initialCount, waiters: [] }));
+    }
+
+    function newBarrierGeneration() {
+        return { broken: false, waiters: [] };
+    }
+
+    function barrierFor(barrier) {
+        return coordinatorFor(barrier, CoordinatorKind.BARRIER,
+            () => ({ parties: barrier.parties, generation: newBarrierGeneration() }));
+    }
+
+    function exchangerFor(exchanger) {
+        return coordinatorFor(exchanger, CoordinatorKind.EXCHANGER, () => ({ slot: null }));
+    }
+
+    function blockingQueueFor(queue) {
+        return coordinatorFor(queue, CoordinatorKind.BLOCKING_QUEUE,
+            () => ({ capacity: queue.capacity, items: [], takers: [], putters: [] }));
+    }
+
+    function wakeWaiter(waiter) {
+        waiter.done = true;
+        const thread = waiter.thread;
+        if (thread.status === ThreadStatus.TERMINATED) return;
+        thread.blockedOn = null;
+        thread.status = ThreadStatus.RUNNABLE;
+    }
+
+    function removeWaiter(list, thread) {
+        const index = list.findIndex(waiter => waiter.thread === thread);
+        if (index >= 0) list.splice(index, 1);
+        return index >= 0;
+    }
+
+    /**
+     * Parks the waiter's thread on `record` until another thread marks the
+     * waiter done. An interrupt first unlinks it via `cancel`, then throws.
+     */
+    function* parkWaiter(record, waiter, cancel, operation) {
+        const thread = waiter.thread;
+        thread.status = ThreadStatus.WAITING;
+        thread.blockedOn = record;
+        while (!waiter.done) {
+            if (thread.interrupted) {
+                thread.interrupted = false;
+                cancel();
+                thread.blockedOn = null;
+                thread.status = ThreadStatus.RUNNABLE;
+                throw interruptedError(operation);
+            }
+            yield BLOCKED_YIELD;
+        }
+    }
+
+    /** Java's interruptible blocking calls throw at once when the flag is already set. */
+    function throwIfInterrupted(operation) {
+        if (!current?.interrupted) return;
+        current.interrupted = false;
+        throw interruptedError(operation);
+    }
+
+    function breakBarrier(record) {
+        const generation = record.generation;
+        generation.broken = true;
+        for (const waiter of generation.waiters.splice(0)) wakeWaiter(waiter);
+    }
+
+    function brokenBarrierError() {
+        return javaException('BrokenBarrierException', 'CyclicBarrier is broken');
+    }
+
+    function requireQueueElement(item) {
+        if (item === null || item === undefined) {
+            throw javaException('NullPointerException', 'Blocking queues do not accept null elements');
+        }
+    }
+
+    /** Moves parked putters into freed capacity, oldest first. */
+    function refillBlockingQueue(record) {
+        while (record.putters.length > 0 && record.items.length < record.capacity) {
+            const putter = record.putters.shift();
+            record.items.push(putter.item);
+            wakeWaiter(putter);
+        }
+    }
+
+    /** Hands `item` to a parked taker or stores it if capacity allows. */
+    function offerToBlockingQueue(record, item) {
+        if (record.takers.length > 0) {
+            const taker = record.takers.shift();
+            taker.received = item;
+            wakeWaiter(taker);
+            return true;
+        }
+        if (record.items.length < record.capacity) {
+            record.items.push(item);
+            return true;
+        }
+        return false;
+    }
+
+    /** Returns `{ item }`, or null when nothing is stored and no putter is parked. */
+    function pollFromBlockingQueue(record) {
+        if (record.items.length > 0) {
+            const item = record.items.shift();
+            refillBlockingQueue(record);
+            return { item };
+        }
+        // Only a zero-capacity SynchronousQueue has putters while empty.
+        if (record.putters.length > 0) {
+            const putter = record.putters.shift();
+            wakeWaiter(putter);
+            return { item: putter.item };
+        }
+        return null;
+    }
+
+    function dropFromCoordinators(thread) {
+        for (const record of coordinators.values()) {
+            switch (record.kind) {
+                case CoordinatorKind.LATCH:
+                    removeWaiter(record.waiters, thread);
+                    break;
+                case CoordinatorKind.BARRIER:
+                    if (removeWaiter(record.generation.waiters, thread)) breakBarrier(record);
+                    break;
+                case CoordinatorKind.EXCHANGER:
+                    if (record.slot?.thread === thread) record.slot = null;
+                    break;
+                case CoordinatorKind.BLOCKING_QUEUE:
+                    removeWaiter(record.takers, thread);
+                    removeWaiter(record.putters, thread);
+                    break;
+            }
+        }
+    }
+
+    function describeCoordinatorWait(thread) {
+        const record = thread.blockedOn;
+        switch (record?.kind) {
+            case CoordinatorKind.LATCH:
+                return `suspended in CountDownLatch.await(), the count is still ${record.count}`;
+            case CoordinatorKind.BARRIER:
+                return `waiting at a CyclicBarrier, ${record.generation.waiters.length} of ` +
+                    `${record.parties} parties have arrived`;
+            case CoordinatorKind.EXCHANGER:
+                return 'suspended in Exchanger.exchange(), no partner has arrived';
+            case CoordinatorKind.BLOCKING_QUEUE:
+                return record.takers.some(waiter => waiter.thread === thread)
+                    ? `waiting to take from an empty ${record.className}`
+                    : `waiting to put into a full ${record.className}`;
+            default:
+                return null;
+        }
+    }
+
     // ── lifecycle ───────────────────────────────────────────────────────────
 
     function terminate(thread, error) {
@@ -304,6 +493,7 @@ export function createScheduler(programState, options = {}) {
             const waiting = record.waiters.findIndex(waiter => waiter.thread === thread);
             if (waiting >= 0) record.waiters.splice(waiting, 1);
         }
+        dropFromCoordinators(thread);
         thread.pendingReentryDepth = 0;
         // Release everything so no other thread is stranded (FR-018, FR-029).
         for (const monitor of [...thread.monitorsHeld]) {
@@ -560,6 +750,7 @@ export function createScheduler(programState, options = {}) {
                 return 'waiting to enter a synchronized section held by ' +
                     (thread.blockedOn?.owner?.name ?? 'another hamster');
             case ThreadStatus.WAITING:
+                if (COORDINATOR_KINDS.has(thread.blockedOn?.kind)) return describeCoordinatorWait(thread);
                 return thread.blockedOn?.kind === 'condition'
                     ? 'suspended in Condition.await(), nobody has signalled it'
                     : 'suspended in wait(), nobody has signalled it';
@@ -625,6 +816,7 @@ export function createScheduler(programState, options = {}) {
             reentrantLocks.clear();
             semaphores.clear();
             conditions.clear();
+            coordinators.clear();
             clockOriginMillis = now();
         },
 
@@ -809,6 +1001,12 @@ export function createScheduler(programState, options = {}) {
         interrupt(target) {
             if (!target || target.status === ThreadStatus.TERMINATED) return;
             target.interrupted = true;
+            if (target.status === ThreadStatus.WAITING &&
+                COORDINATOR_KINDS.has(target.blockedOn?.kind)) {
+                // `parkWaiter` sees the flag, unlinks the waiter, and throws.
+                target.status = ThreadStatus.RUNNABLE;
+                return;
+            }
             if (target.status === ThreadStatus.WAITING &&
                 target.blockedOn?.kind === 'condition') {
                 moveConditionWaiterToLock(target.blockedOn, target);
@@ -1110,6 +1308,160 @@ export function createScheduler(programState, options = {}) {
                 thread.blockedOn = conditionRecord.lockRecord;
                 conditionRecord.lockRecord.entryQueue.push(thread);
             }
+        },
+
+        // ── CountDownLatch / CyclicBarrier / Exchanger / BlockingQueue ──────
+
+        *latchAwait(latch) {
+            const record = latchFor(latch);
+            throwIfInterrupted('CountDownLatch.await');
+            if (record.count === 0) return;
+            const waiter = { thread: current, done: false };
+            record.waiters.push(waiter);
+            yield* parkWaiter(record, waiter,
+                () => removeWaiter(record.waiters, waiter.thread), 'CountDownLatch.await');
+        },
+
+        latchCountDown(latch) {
+            const record = latchFor(latch);
+            if (record.count === 0) return;
+            record.count -= 1;
+            if (record.count === 0) {
+                for (const waiter of record.waiters.splice(0)) wakeWaiter(waiter);
+            }
+        },
+
+        latchCount(latch) {
+            return latchFor(latch).count;
+        },
+
+        /**
+         * Returns the arrival index (`parties - 1` for the first arrival, 0 for
+         * the last). The last arrival runs `runBarrierAction` (a generator
+         * function, or null) before releasing the others.
+         */
+        *barrierAwait(barrier, runBarrierAction) {
+            const record = barrierFor(barrier);
+            const generation = record.generation;
+            if (generation.broken) throw brokenBarrierError();
+            if (current.interrupted) {
+                current.interrupted = false;
+                breakBarrier(record);
+                throw interruptedError('CyclicBarrier.await');
+            }
+            const arrivalIndex = record.parties - 1 - generation.waiters.length;
+            if (arrivalIndex === 0) {
+                // Later arrivals belong to the next generation, even while the action runs.
+                record.generation = newBarrierGeneration();
+                if (runBarrierAction) {
+                    try {
+                        yield* runBarrierAction();
+                    } catch (error) {
+                        generation.broken = true;
+                        for (const waiter of generation.waiters.splice(0)) wakeWaiter(waiter);
+                        breakBarrier(record);
+                        throw error;
+                    }
+                }
+                for (const waiter of generation.waiters.splice(0)) wakeWaiter(waiter);
+                return 0;
+            }
+            const waiter = { thread: current, done: false };
+            generation.waiters.push(waiter);
+            yield* parkWaiter(record, waiter, () => {
+                if (removeWaiter(generation.waiters, waiter.thread)) breakBarrier(record);
+            }, 'CyclicBarrier.await');
+            if (generation.broken) throw brokenBarrierError();
+            return arrivalIndex;
+        },
+
+        barrierReset(barrier) {
+            const record = barrierFor(barrier);
+            breakBarrier(record);
+            record.generation = newBarrierGeneration();
+        },
+
+        barrierParties(barrier) {
+            return barrierFor(barrier).parties;
+        },
+
+        barrierNumberWaiting(barrier) {
+            return barrierFor(barrier).generation.waiters.length;
+        },
+
+        barrierIsBroken(barrier) {
+            return barrierFor(barrier).generation.broken;
+        },
+
+        *exchange(exchanger, item) {
+            const record = exchangerFor(exchanger);
+            throwIfInterrupted('Exchanger.exchange');
+            const partner = record.slot;
+            if (partner) {
+                record.slot = null;
+                partner.received = item;
+                wakeWaiter(partner);
+                return partner.item;
+            }
+            const waiter = { thread: current, item, received: null, done: false };
+            record.slot = waiter;
+            yield* parkWaiter(record, waiter, () => {
+                if (record.slot === waiter) record.slot = null;
+            }, 'Exchanger.exchange');
+            return waiter.received;
+        },
+
+        *queuePut(queue, item) {
+            requireQueueElement(item);
+            const record = blockingQueueFor(queue);
+            throwIfInterrupted(record.className + '.put');
+            if (offerToBlockingQueue(record, item)) return;
+            const waiter = { thread: current, item, done: false };
+            record.putters.push(waiter);
+            yield* parkWaiter(record, waiter,
+                () => removeWaiter(record.putters, waiter.thread), record.className + '.put');
+        },
+
+        *queueTake(queue) {
+            const record = blockingQueueFor(queue);
+            throwIfInterrupted(record.className + '.take');
+            const polled = pollFromBlockingQueue(record);
+            if (polled) return polled.item;
+            const waiter = { thread: current, received: null, done: false };
+            record.takers.push(waiter);
+            yield* parkWaiter(record, waiter,
+                () => removeWaiter(record.takers, waiter.thread), record.className + '.take');
+            return waiter.received;
+        },
+
+        queueOffer(queue, item) {
+            requireQueueElement(item);
+            return offerToBlockingQueue(blockingQueueFor(queue), item);
+        },
+
+        /** Returns the head, or null if nothing can be taken without blocking. */
+        queuePoll(queue) {
+            return pollFromBlockingQueue(blockingQueueFor(queue))?.item ?? null;
+        },
+
+        queuePeek(queue) {
+            return blockingQueueFor(queue).items[0] ?? null;
+        },
+
+        queueSize(queue) {
+            return blockingQueueFor(queue).items.length;
+        },
+
+        queueRemainingCapacity(queue) {
+            const record = blockingQueueFor(queue);
+            const capacity = Number.isFinite(record.capacity) ? record.capacity : JAVA_INT_MAX;
+            return capacity - record.items.length;
+        },
+
+        queueClear(queue) {
+            const record = blockingQueueFor(queue);
+            record.items.length = 0;
+            refillBlockingQueue(record);
         },
 
         // ── java.util.Timer / TimerTask, called by the runner ───────────────
