@@ -59,6 +59,28 @@ async function loadLanguageRunner() {
     };
 }
 
+test('uncaught array bounds failures carry the index expression source location', async () => {
+    const { parser, runner } = await loadLanguageRunner();
+    for (const expression of ['a[5] = 1;', 'int value = a[5];']) {
+        const ast = parser.parseProgram(`void main() {
+    int[] a = new int[1];
+    ${expression}
+}`);
+        const state = runner.createRunnerState(ast, await loadSimulatorRuntime());
+        assert.throws(() => {
+            while (!state.finished) runner.executeRunnerStep(state);
+        }, error => {
+            assert.ok(error instanceof runner.HamsterLanguageException);
+            assert.equal(error.name, 'ArrayIndexOutOfBoundsException');
+            assert.equal(error.line, 3);
+            assert.ok(error.column > 0);
+            assert.equal(error.loc.line, 3);
+            assert.match(error.message, /Index 5 out of bounds for length 1/);
+            return true;
+        });
+    }
+});
+
 test('collection classes expose the supported collection APIs', async () => {
     const runtime = await loadSimulatorRuntime();
     const list = runtime.createObject('ArrayList', []);

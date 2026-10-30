@@ -44,6 +44,7 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['HamsterException', 'RuntimeException'],
     ['ClassCastException', 'RuntimeException'],
     ['ArrayIndexOutOfBoundsException', 'IndexOutOfBoundsException'],
+    ['StringIndexOutOfBoundsException', 'IndexOutOfBoundsException'],
     ['IndexOutOfBoundsException', 'RuntimeException'],
     ['IllegalArgumentException', 'RuntimeException'],
     ['IllegalStateException', 'RuntimeException'],
@@ -1275,14 +1276,30 @@ function readMemberValue(state, receiver, property, startClass = null) {
 function* evalIndexExpressionGen(node, state, callDepth) {
     const target = yield* evalExpressionGen(node.object, state, callDepth);
     const index = Number(yield* evalExpressionGen(node.index, state, callDepth));
-    return readIndexValue(target, index);
+    return readIndexValue(target, index, node.loc);
 }
 
-function readIndexValue(target, index) {
+function checkIndexBounds(target, index, loc) {
+    if (Number.isInteger(index) && index >= 0 && index < target.length) return;
+    const typeName = typeof target === 'string'
+        ? 'StringIndexOutOfBoundsException'
+        : 'ArrayIndexOutOfBoundsException';
+    const error = new HamsterLanguageException(createExceptionValue(
+        typeName, ['Index ' + index + ' out of bounds for length ' + target.length]
+    ));
+    error.loc = loc || null;
+    error.line = loc?.line;
+    error.column = loc?.column;
+    throw error;
+}
+
+function readIndexValue(target, index, loc) {
     if (Array.isArray(target)) {
+        checkIndexBounds(target, index, loc);
         return target[index];
     }
     if (typeof target === 'string') {
+        checkIndexBounds(target, index, loc);
         return target.charAt(index);
     }
     throw new Error('Index access is only supported for arrays and strings');
@@ -1941,9 +1958,10 @@ function* resolveAssignmentTargetGen(state, targetNode, name, callDepth) {
         const receiver = yield* evalExpressionGen(targetNode.object, state, callDepth);
         const index = Number(yield* evalExpressionGen(targetNode.index, state, callDepth));
         return {
-            get: () => readIndexValue(receiver, index),
+            get: () => readIndexValue(receiver, index, targetNode.loc),
             set: value => {
                 if (Array.isArray(receiver)) {
+                    checkIndexBounds(receiver, index, targetNode.loc);
                     receiver[index] = value;
                     return;
                 }
