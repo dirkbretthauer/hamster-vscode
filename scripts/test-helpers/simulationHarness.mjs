@@ -44,6 +44,7 @@ function loadSimulatorStack() {
         const runnerUrl = readModule('lang/hamster-runner.js', { './hamster-parser.js': parserUrl });
         const schedulerUrl = readModule('lang/hamster-scheduler.js', { './hamster-runner.js': runnerUrl });
         const sharedStateUrl = readModule('src/webview/shared/terrainEngineState.js');
+        const javaTimeUrl = readModule('src/webview/simulator/javaTime.js');
 
         // `engine.js` reaches `parseTerrainFile` as a webview global, published by
         // `src/webview/langBundleEntry.js` (`Object.assign(window, …)`). Headlessly
@@ -58,6 +59,7 @@ function loadSimulatorStack() {
         const runtimeUrl = readModule('src/webview/simulator/runtime.js', {
             '../shared/terrainEngineState.js': sharedStateUrl,
             './engine.js': engineUrl,
+            './javaTime.js': javaTimeUrl,
         });
         return {
             parser: await import(parserUrl),
@@ -151,11 +153,14 @@ function discoverClassModules(programPath, encoding, detectProgramType, ProgramT
  * @param {string[]} [options.classModules] inline class sources; suppresses auto-discovery
  * @param {Array<string|number>} [options.inputs] answers fed to `liesZahl`/`liesZeichenkette`
  * @param {number} [options.seed] scheduling seed
+ * @param {() => number} [options.now] wall-clock start of the simulation clock (epoch ms)
+ * @param {number} [options.stopAfterSteps] stop like the Stop button after this many steps,
+ *   for programs that never end on their own (e.g. a repeating non-daemon `Timer`)
  * @param {BufferEncoding} [options.encoding] `latin1` for the reference corpus
  */
 export async function runSimulation({
     programPath, program, terrainPath, terrain, classModules, inputs = [],
-    seed = 1, maxSteps = 100000, encoding = 'utf8',
+    seed = 1, maxSteps = 100000, encoding = 'utf8', now, stopAfterSteps,
 }) {
     const stack = await loadSimulatorStack();
 
@@ -211,7 +216,7 @@ export async function runSimulation({
         stack.parser.parseProgram(source, { requireMain: false, strict: true }));
     const state = stack.runner.createRunnerState(ast, hamsterRuntime, moduleAsts, {
         createScheduler: programState =>
-            stack.scheduler.createScheduler(programState, { random: seededRandom(seed) }),
+            stack.scheduler.createScheduler(programState, { random: seededRandom(seed), now }),
     });
     const scheduler = state.programState.scheduler;
 
@@ -232,7 +237,12 @@ export async function runSimulation({
             scheduler.provideInput(result.thread);
         }
         if (result.status === 'finished' || result.status === 'deadlocked') break;
-        if (++steps >= maxSteps) {
+        ++steps;
+        if (stopAfterSteps !== undefined && steps >= stopAfterSteps) {
+            result = { ...result, status: 'stopped' };
+            break;
+        }
+        if (steps >= maxSteps) {
             throw new Error(
                 `simulation did not terminate within ${maxSteps} steps (status ${result.status})`);
         }

@@ -46,6 +46,7 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['ArrayIndexOutOfBoundsException', 'IndexOutOfBoundsException'],
     ['IndexOutOfBoundsException', 'RuntimeException'],
     ['IllegalArgumentException', 'RuntimeException'],
+    ['IllegalStateException', 'RuntimeException'],
     ['NoSuchElementException', 'RuntimeException'],
     ['EmptyStackException', 'RuntimeException'],
     ['InterruptedException', 'Exception'],
@@ -307,6 +308,33 @@ function* threadBodyGenerator(state, runMethod, receiver) {
 }
 
 /**
+ * Create a thread whose body is a host-side generator rather than a user
+ * `run()` method — the scheduler uses it for `java.util.Timer` workers.
+ * `makeBody(state)` receives the new thread's own state.
+ */
+export function createNativeThreadState(programState, makeBody) {
+    const state = makeThreadState(programState);
+    state.generator = (function* nativeThreadBody() {
+        try {
+            yield* makeBody(state);
+        } finally {
+            state.finished = true;
+        }
+    })();
+    return state;
+}
+
+/** Call `receiver.methodName(...args)` on behalf of host code such as a timer worker. */
+export function* invokeObjectMethodGen(receiver, methodName, args, state) {
+    const className = receiver?.__className;
+    if (!className || !findMethod(state, className, methodName, args.length, false)) {
+        throw new Error((className || receiver?.className || 'object') + ' does not implement ' +
+            methodName + '()');
+    }
+    return yield* invokeInstanceMethodGen(receiver, methodName, args, state, 0, className, null);
+}
+
+/**
  * Backward-compatible entry point: builds the program state and returns the
  * main thread's state, which is what every existing caller expects.
  *
@@ -322,6 +350,10 @@ export function createRunnerState(ast, runtime, classModules = [], options = {})
         (typeof globalThis !== 'undefined' ? globalThis.createScheduler : null);
     if (typeof factory === 'function') {
         factory(programState, options.schedulerOptions).registerMain(state);
+    }
+    // Date/Calendar/System.currentTimeMillis read the same clock the timers run on.
+    if (typeof runtime?.setClock === 'function') {
+        runtime.setClock(programState.scheduler ? programState.scheduler.currentTimeMillis : null);
     }
     return state;
 }
@@ -960,6 +992,9 @@ function* evalCallExpressionGen(node, state, callDepth) {
             receiver, methodName, args, state, node.loc
         );
         if (memberThreadResult !== THREAD_OPERATION_NOT_HANDLED) return memberThreadResult;
+
+        const timerResult = tryTimerOperation(receiver, methodName, args, state);
+        if (timerResult !== TIMER_OPERATION_NOT_HANDLED) return timerResult;
 
         const collectionResult = yield* tryCollectionMethodGen(
             receiver, methodName, args, state, callDepth, node.loc
@@ -2369,6 +2404,97 @@ function* tryThreadStaticGen(methodName, args, state) {
     }
 }
 
+/** Returned by `tryTimerOperation` when the call is not a Timer/TimerTask operation. */
+const TIMER_OPERATION_NOT_HANDLED = Symbol('timerOperationNotHandled');
+
+function isLibraryInstance(value, className) {
+    return Boolean(value) && typeof value === 'object' && value.__kind === 'object' &&
+        value.className === className;
+}
+
+function timerArgumentError(message) {
+    const error = new Error(message);
+    error.hamsterExceptionType = 'IllegalArgumentException';
+    return error;
+}
+
+/**
+ * Normalise the `schedule`/`scheduleAtFixedRate` overloads — `(task, delay)`,
+ * `(task, Date)`, `(task, delay, period)`, `(task, Date, period)` — to an
+ * absolute first execution time and a period (0 = run once).
+ */
+function timerScheduleArguments(methodName, args, nowMillis) {
+    const isFixedRate = methodName === 'scheduleAtFixedRate';
+    if (args.length !== 2 && args.length !== 3) {
+        throw new Error('Timer.' + methodName + ' expects (task, delay or Date[, period])');
+    }
+    if (isFixedRate && args.length !== 3) {
+        throw new Error('Timer.scheduleAtFixedRate expects (task, delay or Date, period)');
+    }
+    const [task, when, period] = args;
+    if (!isLibraryInstance(task, 'TimerTask')) {
+        throw new Error('Timer.' + methodName + ' expects a TimerTask');
+    }
+    let firstExecutionMillis;
+    if (when && typeof when === 'object' && typeof when.__epochMillis === 'number') {
+        if (when.__epochMillis < 0) throw timerArgumentError('Illegal execution time.');
+        firstExecutionMillis = when.__epochMillis;
+    } else {
+        const delay = Number(when);
+        if (!Number.isFinite(delay)) throw new Error('Timer.' + methodName + ' expects a delay or a Date');
+        if (delay < 0) throw timerArgumentError('Negative delay.');
+        firstExecutionMillis = nowMillis + Math.trunc(delay);
+    }
+    let periodMillis = 0;
+    if (args.length === 3) {
+        periodMillis = Math.trunc(Number(period));
+        if (!(periodMillis > 0)) throw timerArgumentError('Non-positive period.');
+    }
+    return { task, firstExecutionMillis, periodMillis, isFixedRate };
+}
+
+/**
+ * `java.util.Timer` and `TimerTask` members. Scheduling lives in the
+ * scheduler because tasks run on their own cooperatively-scheduled thread
+ * and wait on the simulation clock.
+ */
+function tryTimerOperation(receiver, methodName, args, state) {
+    const isTimer = isLibraryInstance(receiver, 'Timer');
+    const isTimerTask = isLibraryInstance(receiver, 'TimerTask');
+    if (!isTimer && !isTimerTask) return TIMER_OPERATION_NOT_HANDLED;
+    const scheduler = state.scheduler;
+    if (!scheduler) throw new Error(receiver.className + '.' + methodName + ' needs the thread scheduler');
+
+    try {
+        if (isTimerTask) {
+            if (methodName === 'cancel' && args.length === 0) return scheduler.cancelTimerTask(receiver);
+            if (methodName === 'scheduledExecutionTime' && args.length === 0) {
+                return scheduler.timerTaskScheduledExecutionTime(receiver);
+            }
+            return TIMER_OPERATION_NOT_HANDLED;
+        }
+        switch (methodName) {
+            case 'schedule':
+            case 'scheduleAtFixedRate': {
+                const request = timerScheduleArguments(methodName, args, scheduler.currentTimeMillis());
+                scheduler.scheduleTimerTask(
+                    receiver, request.task, request.firstExecutionMillis, request.periodMillis, request.isFixedRate
+                );
+                return undefined;
+            }
+            case 'cancel':
+                scheduler.cancelTimer(receiver);
+                return undefined;
+            case 'purge':
+                return scheduler.purgeTimer(receiver);
+            default:
+                return TIMER_OPERATION_NOT_HANDLED;
+        }
+    } catch (error) {
+        throw normalizeBuiltinFailure(error);
+    }
+}
+
 function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, startClass, loc) {
     const method = findMethod(state, startClass, methodName, args.length, false);
     if (method) {
@@ -2379,6 +2505,9 @@ function* invokeInstanceMethodGen(receiver, methodName, args, state, callDepth, 
     }
     const threadResult = yield* tryThreadOperationGen(receiver, methodName, args, state, loc);
     if (threadResult !== THREAD_OPERATION_NOT_HANDLED) return threadResult;
+
+    const timerResult = tryTimerOperation(receiver, methodName, args, state);
+    if (timerResult !== TIMER_OPERATION_NOT_HANDLED) return timerResult;
 
     // `super.add(x)` in a user subclass of a library collection lands here.
     const collectionResult = yield* tryCollectionMethodGen(receiver, methodName, args, state, callDepth, loc);

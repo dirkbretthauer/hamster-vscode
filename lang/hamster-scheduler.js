@@ -10,7 +10,9 @@
  * imports this one. The runner reaches the scheduler at runtime through
  * `programState.scheduler`.
  */
-import { createThreadState, executeRunnerStep, RunnerPause } from './hamster-runner.js';
+import {
+    createThreadState, createNativeThreadState, executeRunnerStep, invokeObjectMethodGen, RunnerPause,
+} from './hamster-runner.js';
 
 export const ThreadStatus = Object.freeze({
     NEW: 'new',
@@ -38,6 +40,15 @@ export const DEFAULT_MAX_THREADS = 64;
  */
 export const STEPS_PER_MILLISECOND = 0.01;
 
+/**
+ * When every live thread is parked on a timed wait, gaps of up to this many
+ * steps are still paced one step at a time, so a short `Thread.sleep` remains
+ * visible at the chosen speed. Longer idle gaps (more than 10 simulated
+ * seconds) are skipped in a single step; otherwise a `Timer` scheduled for
+ * noon tomorrow would take hours of UI ticks to fire.
+ */
+export const MAX_PACED_IDLE_STEPS = 100;
+
 /** Yielded while a thread is parked; never becomes `lastInstruction`. */
 const BLOCKED_YIELD = Object.freeze({ kind: 'blocked' });
 
@@ -53,6 +64,14 @@ function schedulerError(message) {
     return new Error(message);
 }
 
+/** An error the runner turns into a catchable Java exception of `typeName`. */
+function javaException(typeName, message) {
+    const error = new Error(message);
+    error.name = typeName;
+    error.hamsterExceptionType = typeName;
+    return error;
+}
+
 function durationToSteps(milliseconds) {
     const ms = Number(milliseconds);
     if (!Number.isFinite(ms) || ms <= 0) return 0;
@@ -61,17 +80,26 @@ function durationToSteps(milliseconds) {
 
 /**
  * @param {object} programState shared program-wide runner state
- * @param {object} [options] `{ random, maxThreads }`
+ * @param {object} [options] `{ random, maxThreads, now }`; `now()` returns the
+ *   wall-clock epoch milliseconds the simulation clock starts from
  */
 export function createScheduler(programState, options = {}) {
     const random = typeof options.random === 'function' ? options.random : Math.random;
     const maxThreads = options.maxThreads || DEFAULT_MAX_THREADS;
+    const now = typeof options.now === 'function' ? options.now : () => Date.now();
 
     const threads = [];
     let nextThreadId = 1;
     let current = null;
     let stepCount = 0;
     let pendingEvents = [];
+    let clockOriginMillis = now();
+
+    /** Timer object → its task queue and worker thread. */
+    const timers = new Map();
+    /** TimerTask object → its scheduling state. */
+    const timerTasks = new Map();
+    let nextTimerSerial = 0;
 
     /**
      * `setDaemon`/`setPriority`/`setName` may be called before `start()`, when
@@ -247,6 +275,155 @@ export function createScheduler(programState, options = {}) {
             thread.status !== ThreadStatus.TERMINATED);
     }
 
+    function earliestWakeStep() {
+        let earliest = Infinity;
+        for (const thread of threads) {
+            if (thread.wakeAtStep !== null && thread.status !== ThreadStatus.TERMINATED) {
+                earliest = Math.min(earliest, thread.wakeAtStep);
+            }
+        }
+        return earliest;
+    }
+
+    /** Advance the clock while nothing can run; long gaps are skipped in one step. */
+    function advanceIdleClock() {
+        const gap = earliestWakeStep() - stepCount;
+        stepCount += gap > MAX_PACED_IDLE_STEPS ? gap : 1;
+    }
+
+    // ── simulation clock ────────────────────────────────────────────────────
+
+    /** Wall-clock time at program start plus the simulated time elapsed since. */
+    function currentTimeMillis() {
+        return clockOriginMillis + Math.round(stepCount / STEPS_PER_MILLISECOND);
+    }
+
+    /** The first step at which `currentTimeMillis()` reaches `epochMillis`. */
+    function stepAtMillis(epochMillis) {
+        return Math.ceil((epochMillis - clockOriginMillis) * STEPS_PER_MILLISECOND);
+    }
+
+    // ── java.util.Timer ─────────────────────────────────────────────────────
+    //
+    // Each Timer owns one worker thread, as in Java: its tasks run one after
+    // another on that thread, so a long `run()` delays the next task. The
+    // worker parks on the simulation clock between tasks, and it ends when its
+    // queue is empty, so a program whose timers have nothing left to do can
+    // finish (Java would keep a non-daemon timer thread alive forever).
+
+    const TaskState = Object.freeze({
+        VIRGIN: 'virgin', SCHEDULED: 'scheduled', EXECUTED: 'executed', CANCELLED: 'cancelled',
+    });
+
+    function timerRecordFor(timer) {
+        let record = timers.get(timer);
+        if (!record) {
+            record = {
+                name: timer.timerName || 'Timer-' + nextTimerSerial++,
+                isDaemon: Boolean(timer.isDaemon),
+                isCancelled: false,
+                queue: [],
+                thread: null,
+            };
+            timers.set(timer, record);
+        }
+        return record;
+    }
+
+    function taskRecordFor(task) {
+        let record = timerTasks.get(task);
+        if (!record) {
+            record = {
+                task,
+                state: TaskState.VIRGIN,
+                nextExecutionMillis: 0,
+                periodMillis: 0,
+                isFixedRate: false,
+                lastScheduledMillis: 0,
+            };
+            timerTasks.set(task, record);
+        }
+        return record;
+    }
+
+    function wakeTimerWorker(record) {
+        const worker = record.thread;
+        if (worker && worker.status === ThreadStatus.TIMED_WAITING) {
+            worker.wakeAtStep = null;
+            worker.status = ThreadStatus.RUNNABLE;
+        }
+    }
+
+    function* parkTimerWorker(thread, wakeAtStep) {
+        thread.status = ThreadStatus.TIMED_WAITING;
+        thread.blockedOn = null;
+        thread.wakeAtStep = wakeAtStep;
+        while (thread.status === ThreadStatus.TIMED_WAITING) {
+            yield BLOCKED_YIELD;
+        }
+    }
+
+    /** Cancelled tasks stay queued until they fall due or are purged, as in Java's TimerThread. */
+    function nextDueTask(record) {
+        return record.queue.reduce((earliest, task) =>
+            earliest === null || task.nextExecutionMillis < earliest.nextExecutionMillis ? task : earliest, null);
+    }
+
+    /** Java computes the next execution *before* running the task, so a slow task can't drift a fixed-rate schedule. */
+    function claimExecution(record, task, nowMillis) {
+        task.lastScheduledMillis = task.nextExecutionMillis;
+        if (task.periodMillis === 0) {
+            task.state = TaskState.EXECUTED;
+            record.queue.splice(record.queue.indexOf(task), 1);
+            return;
+        }
+        task.nextExecutionMillis = task.isFixedRate
+            ? task.nextExecutionMillis + task.periodMillis
+            : nowMillis + task.periodMillis;
+    }
+
+    function* timerWorkerBody(record, state) {
+        const thread = state.thread;
+        try {
+            while (!record.isCancelled) {
+                const task = nextDueTask(record);
+                if (!task) return;
+                const nowMillis = currentTimeMillis();
+                if (task.nextExecutionMillis > nowMillis) {
+                    yield* parkTimerWorker(thread, stepAtMillis(task.nextExecutionMillis));
+                    continue;
+                }
+                if (task.state !== TaskState.SCHEDULED) {
+                    record.queue.splice(record.queue.indexOf(task), 1);
+                    continue;
+                }
+                claimExecution(record, task, nowMillis);
+                yield* invokeObjectMethodGen(task.task, 'run', [], state);
+            }
+        } catch (error) {
+            // As in Java, an exception escaping a task kills the timer.
+            record.isCancelled = true;
+            record.queue = [];
+            throw error;
+        } finally {
+            if (record.thread === thread) record.thread = null;
+        }
+    }
+
+    function startTimerWorker(record) {
+        if (liveThreads().length >= maxThreads) {
+            throw schedulerError('Too many hamster threads (limit ' + maxThreads + ')');
+        }
+        const state = createNativeThreadState(programState, threadState => timerWorkerBody(record, threadState));
+        const thread = makeThread(record.name, null, state);
+        thread.daemon = record.isDaemon;
+        state.thread = thread;
+        threads.push(thread);
+        record.thread = thread;
+        thread.status = ThreadStatus.RUNNABLE;
+        pendingEvents.push({ kind: 'started', threadId: thread.id, name: thread.name });
+    }
+
     function hasPendingInput() {
         return threads.some(thread => thread.pendingInput !== null &&
             thread.status !== ThreadStatus.TERMINATED);
@@ -328,6 +505,7 @@ export function createScheduler(programState, options = {}) {
         deadlockReport,
         isDeadlocked,
         stepCount() { return stepCount; },
+        currentTimeMillis,
 
         reset() {
             threads.length = 0;
@@ -337,6 +515,10 @@ export function createScheduler(programState, options = {}) {
             pendingEvents = [];
             programState.monitors.clear();
             pendingSettings.clear();
+            timers.clear();
+            timerTasks.clear();
+            nextTimerSerial = 0;
+            clockOriginMillis = now();
         },
 
         /**
@@ -354,7 +536,7 @@ export function createScheduler(programState, options = {}) {
                 }
                 if (hasPendingTimer()) {
                     // Nothing runnable but a timer is pending: let the clock advance.
-                    stepCount++;
+                    advanceIdleClock();
                     return { status: 'progressed', thread: null, instruction: null, events: drainEvents(), report: null };
                 }
                 if (hasPendingInput()) {
@@ -650,6 +832,58 @@ export function createScheduler(programState, options = {}) {
         },
 
         monitorFor,
+
+        // ── java.util.Timer / TimerTask, called by the runner ───────────────
+
+        /**
+         * @param {number} firstExecutionMillis absolute epoch time of the first run
+         * @param {number} periodMillis 0 for a one-shot task
+         */
+        scheduleTimerTask(timer, task, firstExecutionMillis, periodMillis, isFixedRate) {
+            const record = timerRecordFor(timer);
+            if (record.isCancelled) throw javaException('IllegalStateException', 'Timer already cancelled.');
+            const taskRecord = taskRecordFor(task);
+            if (taskRecord.state !== TaskState.VIRGIN) {
+                throw javaException('IllegalStateException', 'Task already scheduled or cancelled');
+            }
+            taskRecord.state = TaskState.SCHEDULED;
+            taskRecord.nextExecutionMillis = firstExecutionMillis;
+            taskRecord.periodMillis = periodMillis;
+            taskRecord.isFixedRate = isFixedRate;
+            record.queue.push(taskRecord);
+            if (record.thread) {
+                wakeTimerWorker(record);
+            } else {
+                startTimerWorker(record);
+            }
+        },
+
+        /** Discards every scheduled task; a task that is running finishes first. */
+        cancelTimer(timer) {
+            const record = timerRecordFor(timer);
+            record.isCancelled = true;
+            record.queue = [];
+            wakeTimerWorker(record);
+        },
+
+        purgeTimer(timer) {
+            const record = timerRecordFor(timer);
+            const before = record.queue.length;
+            record.queue = record.queue.filter(task => task.state !== TaskState.CANCELLED);
+            return before - record.queue.length;
+        },
+
+        /** True when cancelling prevented at least one future run, as in `TimerTask.cancel()`. */
+        cancelTimerTask(task) {
+            const record = taskRecordFor(task);
+            const preventedRun = record.state === TaskState.SCHEDULED;
+            record.state = TaskState.CANCELLED;
+            return preventedRun;
+        },
+
+        timerTaskScheduledExecutionTime(task) {
+            return timerTasks.get(task)?.lastScheduledMillis ?? 0;
+        },
     };
 
     programState.scheduler = scheduler;

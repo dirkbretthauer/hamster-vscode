@@ -39,7 +39,8 @@ programs (`.ham` files) with an integrated simulator webview, terrain editor, an
     `.ter` codec (stage 1), which both bundles also depend on
   - `simulator/` – the simulator webview: `engine.js` (terrain + hamster state machine, built-in
     API), `runtime.js` (bridges `window.parseProgram`/`createRunnerState`/`executeRunnerStep` from
-    the `hamster-lang.js` bundle to the engine), `renderer.js` (canvas rendering incl. sprite
+    the `hamster-lang.js` bundle to the engine), `javaTime.js` (`java.util.Date`/`Calendar` on the
+    simulation clock), `renderer.js` (canvas rendering incl. sprite
     tinting), `debugger.js` (breakpoints/step/continue/stack/scopes/variables/evaluate), `index.js`
     (DOM bootstrap, toolbar wiring, `window.addEventListener('message', ...)` dispatch, terminal
     input, zoom/speed controls) — bundled as `dist/webview/hamster-simulator.js`
