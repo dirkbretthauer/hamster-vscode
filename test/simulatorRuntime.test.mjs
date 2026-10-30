@@ -21,14 +21,16 @@ function readWebviewModule(relativePath, replacements = {}) {
     return moduleUrl(source);
 }
 
-async function loadSimulatorRuntime() {
+async function loadSimulatorRuntime(options = {}) {
     const sharedStateUrl = readWebviewModule('shared/terrainEngineState.js');
+    const javaTimeUrl = readWebviewModule('simulator/javaTime.js');
     const engineUrl = readWebviewModule('simulator/engine.js', {
         '../shared/terrainEngineState.js': sharedStateUrl,
     });
     const runtimeUrl = readWebviewModule('simulator/runtime.js', {
         '../shared/terrainEngineState.js': sharedStateUrl,
         './engine.js': engineUrl,
+        './javaTime.js': javaTimeUrl,
     });
     const { createSimulatorEngine } = await import(engineUrl);
     const { createHamsterRuntime } = await import(runtimeUrl);
@@ -39,6 +41,7 @@ async function loadSimulatorRuntime() {
         getEngineState,
         appendLog: () => {},
         readTerminalValue: () => 0,
+        ...options,
     });
 }
 
@@ -546,4 +549,30 @@ test('the no-argument Random constructor and nextInt(bound) are available', asyn
     const value = runtime.callMethod(random, 'nextInt', [37]);
     assert.ok(Number.isInteger(value));
     assert.ok(value >= 0 && value < 37);
+});
+
+test('Date and Calendar read the runtime clock and implement Calendar field arithmetic', async () => {
+    const start = new Date(2024, 0, 31, 8, 30, 15).getTime();
+    const runtime = await loadSimulatorRuntime({ currentTimeMillis: () => start });
+
+    const date = runtime.createObject('Date', []);
+    assert.equal(runtime.callMethod(date, 'getTime', []), start);
+
+    const calendar = runtime.callBuiltin('Calendar.getInstance', []);
+    const field = (name) => runtime.getMember({ __kind: 'class', name: 'Calendar' }, name);
+    assert.equal(runtime.callMethod(calendar, 'get', [field('HOUR_OF_DAY')]), 8);
+    assert.equal(runtime.callMethod(calendar, 'get', [field('MONTH')]), field('JANUARY'));
+
+    runtime.callMethod(calendar, 'add', [field('MONTH'), 1]);
+    assert.equal(runtime.callMethod(calendar, 'get', [field('DAY_OF_MONTH')]), 29, 'Jan 31 + 1 month clamps to Feb 29');
+    runtime.callMethod(calendar, 'add', [field('HOUR_OF_DAY'), 20]);
+    assert.equal(runtime.callMethod(calendar, 'get', [field('DAY_OF_MONTH')]), 1, 'hours roll over into March');
+    assert.equal(runtime.callMethod(calendar, 'get', [field('MONTH')]), field('MARCH'));
+
+    const later = runtime.callMethod(calendar, 'getTime', []);
+    assert.equal(runtime.callMethod(later, 'after', [date]), true);
+    assert.equal(runtime.callMethod(calendar, 'getTimeInMillis', []), runtime.callMethod(later, 'getTime', []));
+
+    runtime.setClock(() => start + 1000);
+    assert.equal(runtime.callBuiltin('System.currentTimeMillis', []), start + 1000);
 });

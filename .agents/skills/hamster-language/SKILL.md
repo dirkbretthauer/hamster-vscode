@@ -158,8 +158,9 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   carry `hamsterExceptionType` so they are catchable. `Stack` supports `push`/`pop`/`peek`,
   `empty`/`isEmpty`, `size`, equals-based top-relative `search`, inherited list operations,
   bottom-to-top iteration, and user subclasses; empty `pop`/`peek` throw catchable
-  `EmptyStackException` (a `RuntimeException`). Other classes (`java.util.concurrent.*`,
-  `java.util.Timer`, …) still fail with a message naming the class. Note
+  `EmptyStackException` (a `RuntimeException`). `Timer`/`TimerTask` and `Calendar`/`Date` run on
+  the simulation clock (see Concurrency below). Other classes (`java.util.concurrent.*`, …) still
+  fail with a message naming the class. Note
   `Thread`'s *own* members are supported (see below); it is the library classes around it that are not.
 - for-each iterates arrays, lists, queues, and sets; maps fail with a message naming the type
 - Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
@@ -181,6 +182,11 @@ A started hamster is its own cooperatively-scheduled thread, matching the refere
 - Scheduling is deliberately varied (so unprotected programs can go wrong); tests must assert
   interleaving-independent invariants and inject `random` rather than pin an exact order.
 - Deviations are tabulated in `spec/vscode-port-status.md` (2026-10-06 update).
+- `java.util.Timer` gets one worker thread per timer (`timerWorkerBody` in the scheduler);
+  `Timer`/`TimerTask` calls are intercepted by `tryTimerOperation` in the runner. Timer deadlines,
+  `new Date()`, `Calendar.getInstance()`, and `System.currentTimeMillis()` all read the scheduler's
+  simulation clock (start wall-clock + 100 ms per step), installed in the runtime via
+  `runtime.setClock` on every `createRunnerState`. Tests inject `now` for determinism.
 
 ### Removed
 - The dead `state.stack` field is gone — it was declared but never read or written.

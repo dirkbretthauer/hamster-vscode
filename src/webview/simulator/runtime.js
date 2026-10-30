@@ -8,6 +8,29 @@
  */
 import { isWallAt, insideTerrain, findHamster } from '../shared/terrainEngineState.js';
 import { hamsterError } from './engine.js';
+import {
+    CALENDAR_CONSTANTS, TIME_METHOD_NOT_HANDLED,
+    isDateClassName, isCalendarClassName, createJavaDate, createJavaCalendar,
+    callJavaDateMethod, callJavaCalendarMethod,
+} from './javaTime.js';
+
+const TIMER_CLASS_NAMES = new Set(['Timer', 'java.util.Timer']);
+/** Top-level package names that may start a fully qualified class name such as `java.util.Calendar`. */
+const JAVA_PACKAGE_ROOTS = new Set(['java', 'javax']);
+const TIMER_TASK_CLASS_NAMES = new Set(['TimerTask', 'java.util.TimerTask']);
+
+function simpleClassName(name) {
+    return name.slice(name.lastIndexOf('.') + 1);
+}
+
+/** `new Timer()`, `new Timer(isDaemon)`, `new Timer(name)` and `new Timer(name, isDaemon)`. */
+function createJavaTimer(args) {
+    if (args.length > 2) throw new Error('Timer constructor expects at most two arguments');
+    const [first, second] = args;
+    const name = typeof first === 'string' ? first : null;
+    const isDaemon = Boolean(typeof first === 'boolean' ? first : second);
+    return { __kind: 'object', className: 'Timer', timerName: name, isDaemon, fields: Object.create(null) };
+}
 
 /** Aliases accepted by both the German and English Hamster APIs, normalized to the German canonical name. */
 const hamsterMethodAliases = Object.freeze({
@@ -296,7 +319,21 @@ function callCollectionMethod(receiver, methodName, args) {
  * @param {(text: string) => void} deps.appendLog writes a line to the on-screen log
  * @param {(kind: 'number'|'string', hamsterId: number, prompt: string) => (number|string)} deps.readTerminalValue
  */
-export function createHamsterRuntime({ engine, getEngineState, appendLog, readTerminalValue }) {
+export function createHamsterRuntime({ engine, getEngineState, appendLog, readTerminalValue, currentTimeMillis }) {
+    const wallClock = typeof currentTimeMillis === 'function' ? currentTimeMillis : () => Date.now();
+    let clock = wallClock;
+
+    function createCalendarFromArgs(args) {
+        const calendar = createJavaCalendar(clock());
+        if (args.length === 0) return calendar;
+        // Java's field constructors start from midnight, not from "now".
+        const midnight = new Date(calendar.__epochMillis);
+        midnight.setHours(0, 0, 0, 0);
+        calendar.__epochMillis = midnight.getTime();
+        callJavaCalendarMethod(calendar, 'set', args);
+        return calendar;
+    }
+
     function territoryHamsters(args) {
         let hamsters = getEngineState().terrain.hamsters;
         if (args.length >= 2) {
@@ -356,9 +393,21 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
     }
 
     return {
+        /**
+         * Installs the time source for `new Date()`, `Calendar.getInstance()` and
+         * `System.currentTimeMillis()`. The runner passes the scheduler's
+         * simulation clock; `null` restores the wall clock.
+         */
+        setClock(source) {
+            clock = typeof source === 'function' ? source : wallClock;
+        },
+        currentTimeMillis() {
+            return clock();
+        },
         resolveIdentifier(name) {
             if (name === 'Hamster') return { __kind: 'class', name: 'Hamster' };
             if (/^[A-Z][A-Za-z0-9_]*$/.test(name)) return { __kind: 'class', name };
+            if (JAVA_PACKAGE_ROOTS.has(name)) return { __kind: 'package', name };
             return undefined;
         },
         createObject(className, args) {
@@ -368,6 +417,15 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                     ? Math.floor(Math.random() * 2 ** 48)
                     : args[0];
                 return createJavaRandom(seed);
+            }
+            if (isDateClassName(className)) {
+                if (args.length > 1) throw new Error('Date constructor expects zero arguments or a time in milliseconds');
+                return createJavaDate(args.length === 0 ? clock() : args[0]);
+            }
+            if (isCalendarClassName(className)) return createCalendarFromArgs(args);
+            if (TIMER_CLASS_NAMES.has(className)) return createJavaTimer(args);
+            if (TIMER_TASK_CLASS_NAMES.has(className)) {
+                return { __kind: 'object', className: 'TimerTask', fields: Object.create(null) };
             }
             if (className.endsWith('Hamster')) {
                 if (args.length === 0) {
@@ -403,6 +461,12 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             return { __kind: 'object', className, fields: Object.create(null) };
         },
         getMember(receiver, property) {
+            if (receiver && receiver.__kind === 'package') {
+                // `java.util.Calendar` names the same class as an imported `Calendar`.
+                return /^[A-Z]/.test(property)
+                    ? { __kind: 'class', name: property }
+                    : { __kind: 'package', name: receiver.name + '.' + property };
+            }
             if (receiver && receiver.__kind === 'class' && receiver.name === 'Hamster') {
                 const constants = {
                     NORD: 0, NORTH: 0, OST: 1, EAST: 1, SUED: 2, SOUTH: 2, WEST: 3,
@@ -411,6 +475,10 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                     GRAU: 8, GRAY: 8, WEISS: 9, WHITE: 9,
                 };
                 if (Object.prototype.hasOwnProperty.call(constants, property)) return constants[property];
+            }
+            if (receiver && receiver.__kind === 'class' && isCalendarClassName(receiver.name) &&
+                Object.prototype.hasOwnProperty.call(CALENDAR_CONSTANTS, property)) {
+                return CALENDAR_CONSTANTS[property];
             }
             if (receiver && (receiver.__kind === 'object' || receiver.__kind === 'collection')) {
                 return receiver.fields[property];
@@ -431,6 +499,14 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             if (receiver && receiver.__kind === 'object' && receiver.className === 'Random') {
                 const result = callJavaRandomMethod(receiver, methodName, args);
                 if (result !== RANDOM_METHOD_NOT_HANDLED) return result;
+            }
+            if (receiver && receiver.__kind === 'object' && isDateClassName(receiver.className)) {
+                const result = callJavaDateMethod(receiver, methodName, args);
+                if (result !== TIME_METHOD_NOT_HANDLED) return result;
+            }
+            if (receiver && receiver.__kind === 'object' && isCalendarClassName(receiver.className)) {
+                const result = callJavaCalendarMethod(receiver, methodName, args);
+                if (result !== TIME_METHOD_NOT_HANDLED) return result;
             }
             if (receiver && receiver.__kind === 'hamster') {
                 methodName = normalizeHamsterMethodName(methodName);
@@ -468,6 +544,13 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             // because they must be able to block and this adapter is synchronous.
             if (receiverName === 'Territorium' || receiverName === 'Territory') {
                 return callTerritoryBuiltin(rawMethodName, args);
+            }
+            if (isCalendarClassName(receiverName) && rawMethodName === 'getInstance') {
+                if (args.length > 0) throw new Error('Calendar.getInstance expects no arguments');
+                return createJavaCalendar(clock());
+            }
+            if (simpleClassName(receiverName) === 'System' && rawMethodName === 'currentTimeMillis') {
+                return clock();
             }
             if ((receiverName === 'Hamster' || receiverName.endsWith('Hamster')) &&
                 (rawMethodName === 'getStandardHamster' ||
