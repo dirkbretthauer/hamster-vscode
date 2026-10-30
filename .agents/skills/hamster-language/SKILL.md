@@ -163,6 +163,9 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   fail with a message naming the class. Note
   `Thread`'s *own* members are supported (see below); it is the library classes around it that are not.
 - for-each iterates arrays, lists, queues, and sets; maps fail with a message naming the type
+- Array and string indexing checks bounds through `checkIndexBounds` in the runner. Array reads
+  and assignment references share that check, including compound assignments and prefix/postfix
+  updates. Bounds failures are catchable Java exceptions with source locations.
 - Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
 
 ### Concurrency (supported since `specs/003-cooperative-threads`)

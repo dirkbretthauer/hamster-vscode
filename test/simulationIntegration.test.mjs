@@ -19,6 +19,75 @@ import {
 
 // ── basic movement and sensing ──────────────────────────────────────────────
 
+for (const index of ['-1', '1', '5', '"0.5"', '0 / 0', '1 / 0']) {
+    for (const operation of [`schreib(a[${index}]);`, `a[${index}] = 9;`,
+        `a[${index}] += 1;`, `a[${index}]++;`, `++a[${index}];`]) {
+        test(`invalid array access throws without changing the array: ${operation}`, async () => {
+            const run = await runSimulation({
+                program: `void main() {
+                    int[] a = {7};
+                    try { ${operation} schreib("missed"); }
+                    catch (ArrayIndexOutOfBoundsException e) { schreib("caught"); }
+                    schreib(a.length);
+                    schreib(a[0]);
+                }`,
+            });
+            assert.deepEqual(run.errors, []);
+            assert.deepEqual(run.output, ['caught', '1', '7']);
+        });
+    }
+}
+
+test('empty arrays and nested arrays check bounds and support exception supertypes', async () => {
+    const run = await runSimulation({
+        program: `void main() {
+            int[] empty = new int[0];
+            int[][] matrix = {{3}, {4, 5}};
+            try { empty[0] = 1; } catch (IndexOutOfBoundsException e) { schreib("empty"); }
+            try { schreib(matrix[2][0]); } catch (RuntimeException e) { schreib("outer"); }
+            try { matrix[0][1] = 9; } catch (Exception e) { schreib("inner"); }
+            matrix[1][1] += 1;
+            matrix[0][0]++;
+            schreib(matrix[0][0]);
+            schreib(matrix[1][1]);
+        }`,
+    });
+    assert.deepEqual(run.errors, []);
+    assert.deepEqual(run.output, ['empty', 'outer', 'inner', '4', '6']);
+});
+
+test('valid array updates evaluate their index once and preserve prefix/postfix values', async () => {
+    const run = await runSimulation({
+        program: `void main() {
+            int[] a = {3, 5};
+            int i = 0;
+            schreib(a[i++]++);
+            schreib(++a[i]);
+            a[0] -= 1;
+            schreib(a[0]);
+            schreib(a[1]);
+            schreib(i);
+        }`,
+    });
+    assert.deepEqual(run.errors, []);
+    assert.deepEqual(run.output, ['3', '6', '3', '6', '1']);
+});
+
+test('string indexing checks bounds and throws catchable StringIndexOutOfBoundsException', async () => {
+    const run = await runSimulation({
+        program: `void main() {
+            String s = "ab";
+            schreib(s[0]);
+            schreib(s[1]);
+            try { schreib(s[2]); } catch (StringIndexOutOfBoundsException e) { schreib(e.getMessage()); }
+            try { schreib(s[-1]); } catch (IndexOutOfBoundsException e) { schreib("negative"); }
+            try { schreib(""[0]); } catch (RuntimeException e) { schreib("empty"); }
+        }`,
+    });
+    assert.deepEqual(run.errors, []);
+    assert.deepEqual(run.output, ['a', 'b', 'Index 2 out of bounds for length 2', 'negative', 'empty']);
+});
+
 test('a hamster walks forward and the terrain records the move', async () => {
     const run = await runSimulation({
         terrain: terrainFile(['>    ', '     ', '     '], [0], 0),
