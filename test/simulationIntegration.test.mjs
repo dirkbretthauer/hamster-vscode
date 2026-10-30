@@ -574,3 +574,61 @@ test('an uncaught error in one hamster does not stop the other from finishing it
     const survivor = run.hamsters().find(h => h.y === 1 && h.id !== -1);
     assert.equal(survivor.x, 2, 'the other hamster completed both steps');
 });
+
+test('blocking queues, latches, barriers, and exchangers coordinate real hamsters end to end', async () => {
+    for (const seed of [1, 2]) {
+        const run = await runSimulation({
+            seed,
+            terrain: terrainFile(['>    ', '     ', '     '], [0], 0),
+            program: `
+                /*object-oriented program*/
+                import java.util.concurrent.ArrayBlockingQueue;
+                import java.util.concurrent.CountDownLatch;
+                import java.util.concurrent.CyclicBarrier;
+                import java.util.concurrent.Exchanger;
+                class Worker extends Hamster {
+                    ArrayBlockingQueue<Integer> queue;
+                    CountDownLatch done;
+                    CyclicBarrier barrier;
+                    Exchanger<Integer> exchanger;
+                    int id;
+                    Worker(int row, int id, ArrayBlockingQueue<Integer> q, CountDownLatch d,
+                           CyclicBarrier b, Exchanger<Integer> e) {
+                        super(row, 0, Hamster.OST, 0);
+                        this.id = id; this.queue = q; this.done = d; this.barrier = b; this.exchanger = e;
+                    }
+                    public void run() {
+                        try {
+                            this.vor();
+                            this.barrier.await();
+                            int other = this.exchanger.exchange(this.id);
+                            this.queue.put(other);
+                            this.done.countDown();
+                        } catch (Exception exc) {
+                            schreib("error");
+                        }
+                    }
+                }
+                void main() {
+                    ArrayBlockingQueue<Integer> queue = new ArrayBlockingQueue<Integer>(1);
+                    CountDownLatch done = new CountDownLatch(2);
+                    CyclicBarrier barrier = new CyclicBarrier(2);
+                    Exchanger<Integer> exchanger = new Exchanger<Integer>();
+                    new Worker(1, 1, queue, done, barrier, exchanger).start();
+                    new Worker(2, 2, queue, done, barrier, exchanger).start();
+                    int sum = 0;
+                    try {
+                        sum = sum + queue.take();
+                        sum = sum + queue.take();
+                        done.await();
+                    } catch (InterruptedException exc) {
+                    }
+                    schreib("sum " + sum + " left " + done.getCount());
+                }
+            `,
+        });
+        assert.equal(run.status, 'finished');
+        assert.deepEqual(run.errors, []);
+        assert.deepEqual(run.output, ['sum 3 left 0']);
+    }
+});

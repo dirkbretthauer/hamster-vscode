@@ -26,6 +26,77 @@ const ATOMIC_BOOLEAN_CLASS_NAMES = new Set([
     'AtomicBoolean', 'java.util.concurrent.atomic.AtomicBoolean',
 ]);
 
+function concurrentClassNames(simpleName) {
+    return new Set([simpleName, 'java.util.concurrent.' + simpleName]);
+}
+
+const COUNT_DOWN_LATCH_CLASS_NAMES = concurrentClassNames('CountDownLatch');
+const CYCLIC_BARRIER_CLASS_NAMES = concurrentClassNames('CyclicBarrier');
+const EXCHANGER_CLASS_NAMES = concurrentClassNames('Exchanger');
+const ARRAY_BLOCKING_QUEUE_CLASS_NAMES = concurrentClassNames('ArrayBlockingQueue');
+const LINKED_BLOCKING_QUEUE_CLASS_NAMES = concurrentClassNames('LinkedBlockingQueue');
+const SYNCHRONOUS_QUEUE_CLASS_NAMES = concurrentClassNames('SynchronousQueue');
+
+function concurrentObject(className, properties = {}) {
+    return { __kind: 'object', className, ...properties, fields: Object.create(null) };
+}
+
+function requireIntegerArgument(value, isValid, typeName, message) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || !isValid(number)) throw javaRuntimeException(typeName, message);
+    return number;
+}
+
+function createJavaCountDownLatch(className, args) {
+    if (args.length !== 1) throw new Error('CountDownLatch constructor expects one count argument');
+    const count = requireIntegerArgument(args[0], value => value >= 0,
+        'IllegalArgumentException', 'count < 0');
+    return concurrentObject(className, { initialCount: count });
+}
+
+function createJavaCyclicBarrier(className, args) {
+    if (args.length < 1 || args.length > 2) {
+        throw new Error('CyclicBarrier constructor expects parties and an optional barrier action');
+    }
+    const parties = requireIntegerArgument(args[0], value => value > 0,
+        'IllegalArgumentException', 'parties must be positive');
+    return concurrentObject(className, { parties, barrierAction: args[1] ?? null });
+}
+
+function createJavaExchanger(className, args) {
+    if (args.length !== 0) throw new Error('Exchanger constructor expects no arguments');
+    return concurrentObject(className);
+}
+
+/**
+ * `new ArrayBlockingQueue(capacity[, fair])`, `new LinkedBlockingQueue([capacity])`,
+ * and `new SynchronousQueue([fair])`, which has no capacity at all.
+ */
+function createJavaBlockingQueue(className, args) {
+    if (SYNCHRONOUS_QUEUE_CLASS_NAMES.has(className)) {
+        if (args.length > 1) throw new Error('SynchronousQueue constructor expects at most one fairness flag');
+        return concurrentObject(className, { capacity: 0 });
+    }
+    const isArrayQueue = ARRAY_BLOCKING_QUEUE_CLASS_NAMES.has(className);
+    const maxArgs = isArrayQueue ? 2 : 1;
+    if (args.length > maxArgs || (isArrayQueue && args.length === 0)) {
+        throw new Error(isArrayQueue
+            ? 'ArrayBlockingQueue constructor expects a capacity and an optional fairness flag'
+            : 'LinkedBlockingQueue constructor expects at most one capacity argument');
+    }
+    const capacity = args.length === 0
+        ? Infinity
+        : requireIntegerArgument(args[0], value => value > 0,
+            'IllegalArgumentException', 'capacity must be positive');
+    return concurrentObject(className, { capacity });
+}
+
+function isBlockingQueueClassName(className) {
+    return ARRAY_BLOCKING_QUEUE_CLASS_NAMES.has(className) ||
+        LINKED_BLOCKING_QUEUE_CLASS_NAMES.has(className) ||
+        SYNCHRONOUS_QUEUE_CLASS_NAMES.has(className);
+}
+
 function simpleClassName(name) {
     return name.slice(name.lastIndexOf('.') + 1);
 }
@@ -474,6 +545,10 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             if (SEMAPHORE_CLASS_NAMES.has(className)) return createJavaSemaphore(className, args);
             if (REENTRANT_LOCK_CLASS_NAMES.has(className)) return createJavaReentrantLock(className, args);
             if (ATOMIC_BOOLEAN_CLASS_NAMES.has(className)) return createJavaAtomicBoolean(className, args);
+            if (COUNT_DOWN_LATCH_CLASS_NAMES.has(className)) return createJavaCountDownLatch(className, args);
+            if (CYCLIC_BARRIER_CLASS_NAMES.has(className)) return createJavaCyclicBarrier(className, args);
+            if (EXCHANGER_CLASS_NAMES.has(className)) return createJavaExchanger(className, args);
+            if (isBlockingQueueClassName(className)) return createJavaBlockingQueue(className, args);
             if (className === 'Random' || className === 'java.util.Random') {
                 if (args.length > 1) throw new Error('Random constructor expects zero or one seed argument');
                 const seed = args.length === 0

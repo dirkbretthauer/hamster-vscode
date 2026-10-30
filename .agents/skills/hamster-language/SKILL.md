@@ -160,7 +160,9 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   bottom-to-top iteration, and user subclasses; empty `pop`/`peek` throw catchable
   `EmptyStackException` (a `RuntimeException`). `Timer`/`TimerTask` and `Calendar`/`Date` run on
   the simulation clock (see Concurrency below). `Semaphore`, `ReentrantLock`, `Condition`, and
-  `AtomicBoolean` implement the course-used synchronization APIs; other classes
+  `AtomicBoolean` implement the course-used synchronization APIs, as do `CountDownLatch`,
+  `CyclicBarrier`, `Exchanger`, and `ArrayBlockingQueue`/`LinkedBlockingQueue`/`SynchronousQueue`
+  (untimed operations only); other classes
   (`java.util.concurrent.*`, …) still fail with a message naming the class. Note
   `Thread`'s *own* members are supported (see below); it is the library classes around it that are not.
 - for-each iterates arrays, lists, queues, and sets; maps fail with a message naming the type
@@ -201,6 +203,12 @@ A started hamster is its own cooperatively-scheduled thread, matching the refere
 - Semaphore permits, reentrant lock ownership, condition wait queues, and atomic booleans are
   implemented in the same scheduler/runtime boundary. Invalid lock ownership throws a catchable
   `IllegalMonitorStateException`; invalid permit counts throw `IllegalArgumentException`.
+- Latches, barriers, exchangers, and blocking queues are scheduler *coordinator* records keyed by
+  the runtime object (`coordinators` map, `parkWaiter`/`wakeWaiter`); the runner dispatches them in
+  `tryConcurrentOperationGen` (`callCountDownLatchGen`, `callCyclicBarrierGen`,
+  `callBlockingQueueGen`). The barrier action runs via `invokeObjectMethodGen(action, 'run')` after
+  the last arriver installs the next generation. Interrupts wake coordinator waiters, which then
+  throw `InterruptedException`; terminating a barrier waiter breaks the barrier.
 
 ### Removed
 - The dead `state.stack` field is gone — it was declared but never read or written.

@@ -74,6 +74,17 @@ function createTestRuntime(log) {
                     fields: Object.create(null),
                 };
             }
+            const coordinatorProperties = {
+                CountDownLatch: () => ({ initialCount: Number(args[0]) }),
+                CyclicBarrier: () => ({ parties: Number(args[0]), barrierAction: args[1] ?? null }),
+                Exchanger: () => ({}),
+                ArrayBlockingQueue: () => ({ capacity: Number(args[0]) }),
+                LinkedBlockingQueue: () => ({ capacity: args.length ? Number(args[0]) : Infinity }),
+                SynchronousQueue: () => ({ capacity: 0 }),
+            }[className];
+            if (coordinatorProperties) {
+                return { __kind: 'object', className, ...coordinatorProperties(), fields: Object.create(null) };
+            }
             return className.endsWith('Hamster')
                 ? { __kind: 'hamster', id: 0, className }
                 : { __kind: 'object', className, fields: Object.create(null) };
@@ -534,6 +545,254 @@ test('ReentrantLock and Condition reject operations by non-owners', async () => 
     `);
     assert.deepEqual(errors, []);
     assert.deepEqual(log, ['unlock', 'signal', 'await']);
+});
+
+// ── latches, barriers, exchangers, blocking queues ──────────────────────────
+
+test('CountDownLatch.await releases every waiter once the count reaches zero', async () => {
+    const { log, errors, result } = await runProgram(`
+        class W extends Hamster {
+            CountDownLatch start;
+            CountDownLatch done;
+            W(CountDownLatch s, CountDownLatch d) { super(0,0,1,0); this.start = s; this.done = d; }
+            public void run() {
+                try {
+                    this.start.await();
+                    schreib("run");
+                    this.done.countDown();
+                } catch (InterruptedException e) { schreib("interrupted"); }
+            }
+        }
+        void main() {
+            CountDownLatch start = new CountDownLatch(2);
+            CountDownLatch done = new CountDownLatch(3);
+            for (int i = 0; i < 3; i++) { (new W(start, done)).start(); }
+            Thread.yield(); Thread.yield();
+            schreib("count " + start.getCount());
+            start.countDown();
+            schreib("count " + start.getCount());
+            start.countDown();
+            start.countDown();
+            try { done.await(); } catch (InterruptedException e) {}
+            schreib("all done " + done.getCount());
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual(log.slice(0, 2), ['count 2', 'count 1']);
+    assert.deepEqual(log.slice(2), ['run', 'run', 'run', 'all done 0']);
+});
+
+test('CyclicBarrier releases its parties together, runs the action once per trip, and is reusable', async () => {
+    for (const seed of [1, 2, 3]) {
+        const { log, errors, result, staticOf } = await runProgram(`
+            class Action {
+                static int trips = 0;
+                public void run() { Action.trips = Action.trips + 1; schreib("trip"); }
+            }
+            class W extends Hamster {
+                static int indexSum = 0;
+                CyclicBarrier barrier;
+                W(CyclicBarrier b) { super(0,0,1,0); this.barrier = b; }
+                public void run() {
+                    for (int round = 0; round < 2; round++) {
+                        schreib("before");
+                        try { schreib("index " + this.barrier.await()); }
+                        catch (Exception e) { schreib("error"); }
+                        schreib("after");
+                    }
+                }
+            }
+            void main() {
+                CyclicBarrier barrier = new CyclicBarrier(3, new Action());
+                for (int i = 0; i < 3; i++) { (new W(barrier)).start(); }
+            }
+        `, { seed });
+        assert.equal(result.status, 'finished');
+        assert.deepEqual(errors, []);
+        assert.equal(staticOf('Action', 'trips'), 2);
+        assert.deepEqual(log.filter(entry => entry.startsWith('index')).sort(),
+            ['index 0', 'index 0', 'index 1', 'index 1', 'index 2', 'index 2']);
+        const firstTrip = log.indexOf('trip');
+        assert.ok(log.slice(0, firstTrip).filter(entry => entry === 'before').length === 3, `seed ${seed}`);
+        assert.ok(log.slice(0, firstTrip).every(entry => entry === 'before'), `seed ${seed}`);
+        assert.ok(!log.includes('error'));
+    }
+});
+
+test('interrupting a CyclicBarrier waiter breaks the barrier for the other parties', async () => {
+    const { log, errors, result } = await runProgram(`
+        class W extends Hamster {
+            static int arrived = 0;
+            CyclicBarrier barrier;
+            W(CyclicBarrier b) { super(0,0,1,0); this.barrier = b; }
+            public void run() {
+                try { W.arrived = W.arrived + 1; this.barrier.await(); schreib("passed"); }
+                catch (InterruptedException e) { schreib("interrupted"); }
+                catch (BrokenBarrierException e) { schreib("broken"); }
+            }
+        }
+        void main() {
+            CyclicBarrier barrier = new CyclicBarrier(3);
+            W a = new W(barrier); W b = new W(barrier);
+            a.start(); b.start();
+            while (W.arrived < 2 || barrier.getNumberWaiting() < 2) { Thread.yield(); }
+            a.interrupt();
+            try { b.join(); a.join(); } catch (InterruptedException e) {}
+            if (barrier.isBroken()) { schreib("isBroken"); }
+            barrier.reset();
+            if (!barrier.isBroken()) { schreib("reset"); }
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual([...log].sort(), ['broken', 'interrupted', 'isBroken', 'reset']);
+    assert.deepEqual(log.slice(-2), ['isBroken', 'reset']);
+});
+
+test('Exchanger swaps the values of each pair of partners', async () => {
+    const { log, errors, result } = await runProgram(`
+        class W extends Hamster {
+            Exchanger exchanger;
+            int value;
+            W(Exchanger e, int v) { super(0,0,1,0); this.exchanger = e; this.value = v; }
+            public void run() {
+                try { schreib(this.value + "->" + this.exchanger.exchange(this.value)); }
+                catch (InterruptedException e) {}
+            }
+        }
+        void main() {
+            Exchanger exchanger = new Exchanger();
+            (new W(exchanger, 1)).start();
+            (new W(exchanger, 2)).start();
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual([...log].sort(), ['1->2', '2->1']);
+});
+
+test('ArrayBlockingQueue blocks producers at capacity and hands values out in FIFO order', async () => {
+    for (const seed of [1, 2, 3]) {
+        const { log, errors, result, staticOf } = await runProgram(`
+            class Producer extends Hamster {
+                static int maxSize = 0;
+                ArrayBlockingQueue queue;
+                Producer(ArrayBlockingQueue q) { super(0,0,1,0); this.queue = q; }
+                public void run() {
+                    for (int i = 0; i < 6; i++) {
+                        try { this.queue.put(i); } catch (InterruptedException e) {}
+                        if (this.queue.size() > Producer.maxSize) { Producer.maxSize = this.queue.size(); }
+                    }
+                }
+            }
+            class Consumer extends Hamster {
+                ArrayBlockingQueue queue;
+                Consumer(ArrayBlockingQueue q) { super(0,0,1,0); this.queue = q; }
+                public void run() {
+                    for (int i = 0; i < 6; i++) {
+                        try { schreib(this.queue.take()); } catch (InterruptedException e) {}
+                    }
+                }
+            }
+            void main() {
+                ArrayBlockingQueue queue = new ArrayBlockingQueue(2);
+                (new Producer(queue)).start();
+                (new Consumer(queue)).start();
+            }
+        `, { seed });
+        assert.equal(result.status, 'finished');
+        assert.deepEqual(errors, []);
+        assert.deepEqual(log, ['0', '1', '2', '3', '4', '5'], `seed ${seed}`);
+        assert.ok(staticOf('Producer', 'maxSize') <= 2, `seed ${seed}`);
+    }
+});
+
+test('non-blocking queue operations respect capacity and emptiness', async () => {
+    const { log, errors } = await runProgram(`
+        void main() {
+            ArrayBlockingQueue bounded = new ArrayBlockingQueue(2);
+            schreib(bounded.offer(1) + " " + bounded.offer(2) + " " + bounded.offer(3));
+            schreib(bounded.remainingCapacity() + " " + bounded.peek() + " " + bounded.size());
+            try { bounded.add(4); } catch (IllegalStateException e) { schreib("full"); }
+            schreib(bounded.poll() + " " + bounded.poll() + " " + bounded.poll() + " " + bounded.isEmpty());
+            try { bounded.remove(); } catch (NoSuchElementException e) { schreib("empty"); }
+            LinkedBlockingQueue unbounded = new LinkedBlockingQueue();
+            for (int i = 0; i < 100; i++) { try { unbounded.put(i); } catch (InterruptedException e) {} }
+            schreib(unbounded.size() + " " + unbounded.remainingCapacity());
+            unbounded.clear();
+            schreib(unbounded.isEmpty());
+            SynchronousQueue handOff = new SynchronousQueue();
+            schreib(handOff.offer(1) + " " + handOff.poll() + " " + handOff.size());
+        }
+    `);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(log, [
+        'true true false', '0 1 2', 'full', '1 2 null true', 'empty',
+        '100 2147483547', 'true', 'false null 0',
+    ]);
+});
+
+test('SynchronousQueue.put waits until a taker receives the value', async () => {
+    const { log, errors, result } = await runProgram(`
+        class Taker extends Hamster {
+            static int moves = 0;
+            SynchronousQueue queue;
+            Taker(SynchronousQueue q) { super(0,0,1,0); this.queue = q; }
+            public void run() {
+                for (int i = 0; i < 6; i++) { vor(); Taker.moves = Taker.moves + 1; }
+                try { schreib("took " + this.queue.take()); } catch (InterruptedException e) {}
+            }
+        }
+        void main() {
+            SynchronousQueue queue = new SynchronousQueue();
+            (new Taker(queue)).start();
+            try { queue.put(7); } catch (InterruptedException e) {}
+            schreib("put returned after " + Taker.moves + " moves");
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual([...log].sort(), ['put returned after 6 moves', 'took 7']);
+});
+
+test('a hamster parked on an empty blocking queue is reported in the deadlock report', async () => {
+    const { result, scheduler } = await runProgram(`
+        void main() {
+            LinkedBlockingQueue queue = new LinkedBlockingQueue();
+            try { queue.take(); } catch (InterruptedException e) {}
+        }
+    `);
+    assert.equal(result.status, 'deadlocked');
+    assert.match(scheduler.deadlockReport(), /waiting to take from an empty LinkedBlockingQueue/);
+});
+
+test('interrupting a hamster parked on a latch or queue throws InterruptedException', async () => {
+    const { log, errors, result } = await runProgram(`
+        class W extends Hamster {
+            static int parked = 0;
+            CountDownLatch latch;
+            ArrayBlockingQueue queue;
+            W(CountDownLatch l, ArrayBlockingQueue q) { super(0,0,1,0); this.latch = l; this.queue = q; }
+            public void run() {
+                try { W.parked = W.parked + 1; this.latch.await(); } catch (InterruptedException e) { schreib("latch"); }
+                try { W.parked = W.parked + 1; this.queue.take(); } catch (InterruptedException e) { schreib("queue"); }
+            }
+        }
+        void main() {
+            W w = new W(new CountDownLatch(1), new ArrayBlockingQueue(1));
+            w.start();
+            while (W.parked < 1) { Thread.yield(); }
+            Thread.yield();
+            w.interrupt();
+            while (W.parked < 2) { Thread.yield(); }
+            Thread.yield();
+            w.interrupt();
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual(log, ['latch', 'queue']);
 });
 
 // ── User Story 4: lifetime ──────────────────────────────────────────────────

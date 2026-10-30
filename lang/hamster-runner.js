@@ -49,6 +49,8 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['IllegalArgumentException', 'RuntimeException'],
     ['IllegalStateException', 'RuntimeException'],
     ['IllegalMonitorStateException', 'RuntimeException'],
+    ['NullPointerException', 'RuntimeException'],
+    ['BrokenBarrierException', 'Exception'],
     ['NoSuchElementException', 'RuntimeException'],
     ['EmptyStackException', 'RuntimeException'],
     ['InterruptedException', 'Exception'],
@@ -2537,10 +2539,140 @@ function* tryConcurrentOperationGen(receiver, methodName, args, state) {
                     return CONCURRENT_OPERATION_NOT_HANDLED;
             }
         }
+
+        if (isConcurrentLibraryInstance(receiver, 'CountDownLatch')) {
+            return yield* callCountDownLatchGen(scheduler, receiver, methodName, args);
+        }
+        if (isConcurrentLibraryInstance(receiver, 'CyclicBarrier')) {
+            return yield* callCyclicBarrierGen(scheduler, receiver, methodName, args, state);
+        }
+        if (isConcurrentLibraryInstance(receiver, 'Exchanger') && methodName === 'exchange') {
+            requireConcurrentArity('Exchanger', methodName, args, 1);
+            return yield* scheduler.exchange(receiver, args[0]);
+        }
+        const queueClassName = blockingQueueClassName(receiver);
+        if (queueClassName) {
+            return yield* callBlockingQueueGen(scheduler, receiver, queueClassName, methodName, args);
+        }
     } catch (error) {
         throw normalizeBuiltinFailure(error);
     }
     return CONCURRENT_OPERATION_NOT_HANDLED;
+}
+
+const BLOCKING_QUEUE_CLASS_NAMES = new Set(['ArrayBlockingQueue', 'LinkedBlockingQueue', 'SynchronousQueue']);
+
+function blockingQueueClassName(receiver) {
+    if (!receiver || typeof receiver !== 'object' || receiver.__kind !== 'object') return null;
+    const name = String(receiver.className ?? '');
+    const simpleName = name.slice(name.lastIndexOf('.') + 1);
+    return BLOCKING_QUEUE_CLASS_NAMES.has(simpleName) ? simpleName : null;
+}
+
+function* callCountDownLatchGen(scheduler, latch, methodName, args) {
+    switch (methodName) {
+        case 'await':
+            requireConcurrentArity('CountDownLatch', methodName, args, 0);
+            yield* scheduler.latchAwait(latch);
+            return undefined;
+        case 'countDown':
+            requireConcurrentArity('CountDownLatch', methodName, args, 0);
+            scheduler.latchCountDown(latch);
+            return undefined;
+        case 'getCount':
+            requireConcurrentArity('CountDownLatch', methodName, args, 0);
+            return scheduler.latchCount(latch);
+        default:
+            return CONCURRENT_OPERATION_NOT_HANDLED;
+    }
+}
+
+function* callCyclicBarrierGen(scheduler, barrier, methodName, args, state) {
+    switch (methodName) {
+        case 'await': {
+            requireConcurrentArity('CyclicBarrier', methodName, args, 0);
+            const action = barrier.barrierAction;
+            const runBarrierAction = action
+                ? () => invokeObjectMethodGen(action, 'run', [], state)
+                : null;
+            return yield* scheduler.barrierAwait(barrier, runBarrierAction);
+        }
+        case 'reset':
+            requireConcurrentArity('CyclicBarrier', methodName, args, 0);
+            scheduler.barrierReset(barrier);
+            return undefined;
+        case 'getParties':
+            requireConcurrentArity('CyclicBarrier', methodName, args, 0);
+            return scheduler.barrierParties(barrier);
+        case 'getNumberWaiting':
+            requireConcurrentArity('CyclicBarrier', methodName, args, 0);
+            return scheduler.barrierNumberWaiting(barrier);
+        case 'isBroken':
+            requireConcurrentArity('CyclicBarrier', methodName, args, 0);
+            return scheduler.barrierIsBroken(barrier);
+        default:
+            return CONCURRENT_OPERATION_NOT_HANDLED;
+    }
+}
+
+function queueException(typeName, message) {
+    const error = new Error(message);
+    error.hamsterExceptionType = typeName;
+    return error;
+}
+
+function* callBlockingQueueGen(scheduler, queue, className, methodName, args) {
+    switch (methodName) {
+        case 'put':
+            requireConcurrentArity(className, methodName, args, 1);
+            yield* scheduler.queuePut(queue, args[0]);
+            return undefined;
+        case 'take':
+            requireConcurrentArity(className, methodName, args, 0);
+            return yield* scheduler.queueTake(queue);
+        case 'offer':
+            requireConcurrentArity(className, methodName, args, 1);
+            return scheduler.queueOffer(queue, args[0]);
+        case 'add':
+            requireConcurrentArity(className, methodName, args, 1);
+            if (!scheduler.queueOffer(queue, args[0])) {
+                throw queueException('IllegalStateException', 'Queue full');
+            }
+            return true;
+        case 'poll':
+            requireConcurrentArity(className, methodName, args, 0);
+            return scheduler.queuePoll(queue);
+        case 'remove': {
+            requireConcurrentArity(className, methodName, args, 0);
+            const head = scheduler.queuePoll(queue);
+            if (head === null) throw queueException('NoSuchElementException', className + ' is empty');
+            return head;
+        }
+        case 'peek':
+            requireConcurrentArity(className, methodName, args, 0);
+            return scheduler.queuePeek(queue);
+        case 'element': {
+            requireConcurrentArity(className, methodName, args, 0);
+            const head = scheduler.queuePeek(queue);
+            if (head === null) throw queueException('NoSuchElementException', className + ' is empty');
+            return head;
+        }
+        case 'size':
+            requireConcurrentArity(className, methodName, args, 0);
+            return scheduler.queueSize(queue);
+        case 'isEmpty':
+            requireConcurrentArity(className, methodName, args, 0);
+            return scheduler.queueSize(queue) === 0;
+        case 'remainingCapacity':
+            requireConcurrentArity(className, methodName, args, 0);
+            return scheduler.queueRemainingCapacity(queue);
+        case 'clear':
+            requireConcurrentArity(className, methodName, args, 0);
+            scheduler.queueClear(queue);
+            return undefined;
+        default:
+            return CONCURRENT_OPERATION_NOT_HANDLED;
+    }
 }
 
 function timerArgumentError(message) {
