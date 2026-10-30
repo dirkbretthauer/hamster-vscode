@@ -381,6 +381,108 @@ test('two hamster threads collect from one terrain without losing grain', async 
     assert.equal(collected, 10, 'all 10 grains ended up in a mouth — none lost or duplicated');
 });
 
+test('Semaphore producer and consumer coordinate without blocking the simulator runtime', async () => {
+    const run = await runSimulation({
+        terrain: terrainFile(['>    ', '     '], [0], 0),
+        program: `
+            /*object-oriented program*/
+            import java.util.concurrent.Semaphore;
+            class Producer extends Hamster {
+                Semaphore empty;
+                Semaphore full;
+                Semaphore mutex;
+                static int produced = 0;
+                Producer(Semaphore e, Semaphore f, Semaphore m) {
+                    super(0,0,1,0); this.empty = e; this.full = f; this.mutex = m;
+                }
+                public void run() {
+                    for (int i = 0; i < 5; i++) {
+                        this.empty.acquireUninterruptibly();
+                        this.mutex.acquireUninterruptibly();
+                        Producer.produced = Producer.produced + 1;
+                        schreib("put");
+                        this.mutex.release();
+                        this.full.release();
+                    }
+                }
+            }
+            class Consumer extends Hamster {
+                Semaphore empty;
+                Semaphore full;
+                Semaphore mutex;
+                static int consumed = 0;
+                Consumer(Semaphore e, Semaphore f, Semaphore m) {
+                    super(0,0,1,0); this.empty = e; this.full = f; this.mutex = m;
+                }
+                public void run() {
+                    for (int i = 0; i < 5; i++) {
+                        this.full.acquireUninterruptibly();
+                        this.mutex.acquireUninterruptibly();
+                        Consumer.consumed = Consumer.consumed + 1;
+                        schreib("get");
+                        this.mutex.release();
+                        this.empty.release();
+                    }
+                }
+            }
+            void main() {
+                Semaphore empty = new Semaphore(2);
+                Semaphore full = new Semaphore(0);
+                Semaphore mutex = new Semaphore(1);
+                new Producer(empty, full, mutex).start();
+                new Consumer(empty, full, mutex).start();
+            }
+        `,
+    });
+    assert.equal(run.status, 'finished');
+    assert.deepEqual(run.errors, []);
+    assert.equal(run.output.filter(value => value === 'put').length, 5);
+    assert.equal(run.output.filter(value => value === 'get').length, 5);
+});
+
+test('AtomicBoolean compareAndSet spin loops yield so competing hamsters can make progress', async () => {
+    const run = await runSimulation({
+        terrain: terrainFile(['>    ', '     '], [0], 0),
+        program: `
+            /*object-oriented program*/
+            import java.util.concurrent.atomic.AtomicBoolean;
+            class Worker extends Hamster {
+                static int inside = 0;
+                static int maximum = 0;
+                AtomicBoolean semaphore;
+                Worker(AtomicBoolean s) { super(0,0,1,0); this.semaphore = s; }
+                public void run() {
+                    for (int i = 0; i < 4; i++) {
+                        while (!this.semaphore.compareAndSet(true, false)) {}
+                        Worker.inside = Worker.inside + 1;
+                        if (Worker.inside > Worker.maximum) { Worker.maximum = Worker.inside; }
+                        schreib("critical");
+                        Worker.inside = Worker.inside - 1;
+                        this.semaphore.set(true);
+                    }
+                }
+            }
+            void main() {
+                AtomicBoolean semaphore = new AtomicBoolean(true);
+                Worker first = new Worker(semaphore);
+                Worker second = new Worker(semaphore);
+                first.start();
+                second.start();
+                first.join();
+                second.join();
+                schreib(Worker.maximum);
+            }
+        `,
+    });
+    assert.equal(run.status, 'finished');
+    assert.deepEqual(run.errors, []);
+    assert.deepEqual(run.output, [
+        'critical', 'critical', 'critical', 'critical',
+        'critical', 'critical', 'critical', 'critical', '1',
+    ]);
+    assert.equal(run.scheduler.threads().length, 3);
+});
+
 test('an unsynchronized shared counter can go wrong where a synchronized one cannot', async () => {
     const shared = guarded => `
         /*class*/class Counter extends Hamster {

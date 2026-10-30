@@ -18,6 +18,13 @@ const TIMER_CLASS_NAMES = new Set(['Timer', 'java.util.Timer']);
 /** Top-level package names that may start a fully qualified class name such as `java.util.Calendar`. */
 const JAVA_PACKAGE_ROOTS = new Set(['java', 'javax']);
 const TIMER_TASK_CLASS_NAMES = new Set(['TimerTask', 'java.util.TimerTask']);
+const SEMAPHORE_CLASS_NAMES = new Set(['Semaphore', 'java.util.concurrent.Semaphore']);
+const REENTRANT_LOCK_CLASS_NAMES = new Set([
+    'ReentrantLock', 'java.util.concurrent.locks.ReentrantLock',
+]);
+const ATOMIC_BOOLEAN_CLASS_NAMES = new Set([
+    'AtomicBoolean', 'java.util.concurrent.atomic.AtomicBoolean',
+]);
 
 function simpleClassName(name) {
     return name.slice(name.lastIndexOf('.') + 1);
@@ -30,6 +37,59 @@ function createJavaTimer(args) {
     const name = typeof first === 'string' ? first : null;
     const isDaemon = Boolean(typeof first === 'boolean' ? first : second);
     return { __kind: 'object', className: 'Timer', timerName: name, isDaemon, fields: Object.create(null) };
+}
+
+function createJavaSemaphore(className, args) {
+    if (args.length < 1 || args.length > 2) {
+        throw new Error('Semaphore constructor expects permits and an optional fairness flag');
+    }
+    const permits = Number(args[0]);
+    if (!Number.isInteger(permits) || permits < 0) {
+        throw javaRuntimeException('IllegalArgumentException', 'Semaphore permits must be non-negative');
+    }
+    return {
+        __kind: 'object',
+        className,
+        initialPermits: permits,
+        fair: Boolean(args[1]),
+        fields: Object.create(null),
+    };
+}
+
+function createJavaReentrantLock(className, args) {
+    if (args.length > 1) throw new Error('ReentrantLock constructor expects at most one fairness flag');
+    return { __kind: 'object', className, fair: Boolean(args[0]), fields: Object.create(null) };
+}
+
+function createJavaAtomicBoolean(className, args) {
+    if (args.length > 1) throw new Error('AtomicBoolean constructor expects at most one initial value');
+    return { __kind: 'object', className, value: Boolean(args[0]), fields: Object.create(null) };
+}
+
+function callAtomicBooleanMethod(receiver, methodName, args) {
+    switch (methodName) {
+        case 'get':
+            if (args.length !== 0) throw new Error('AtomicBoolean.get expects no arguments');
+            return receiver.value;
+        case 'set':
+        case 'lazySet':
+            if (args.length !== 1) throw new Error('AtomicBoolean.' + methodName + ' expects one argument');
+            receiver.value = Boolean(args[0]);
+            return undefined;
+        case 'compareAndSet':
+            if (args.length !== 2) throw new Error('AtomicBoolean.compareAndSet expects two arguments');
+            if (receiver.value !== Boolean(args[0])) return false;
+            receiver.value = Boolean(args[1]);
+            return true;
+        case 'getAndSet': {
+            if (args.length !== 1) throw new Error('AtomicBoolean.getAndSet expects one argument');
+            const previous = receiver.value;
+            receiver.value = Boolean(args[0]);
+            return previous;
+        }
+        default:
+            return null;
+    }
 }
 
 /** Aliases accepted by both the German and English Hamster APIs, normalized to the German canonical name. */
@@ -411,6 +471,9 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             return undefined;
         },
         createObject(className, args) {
+            if (SEMAPHORE_CLASS_NAMES.has(className)) return createJavaSemaphore(className, args);
+            if (REENTRANT_LOCK_CLASS_NAMES.has(className)) return createJavaReentrantLock(className, args);
+            if (ATOMIC_BOOLEAN_CLASS_NAMES.has(className)) return createJavaAtomicBoolean(className, args);
             if (className === 'Random' || className === 'java.util.Random') {
                 if (args.length > 1) throw new Error('Random constructor expects zero or one seed argument');
                 const seed = args.length === 0
@@ -499,6 +562,12 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             if (receiver && receiver.__kind === 'object' && receiver.className === 'Random') {
                 const result = callJavaRandomMethod(receiver, methodName, args);
                 if (result !== RANDOM_METHOD_NOT_HANDLED) return result;
+            }
+            if (receiver && receiver.__kind === 'object' &&
+                ATOMIC_BOOLEAN_CLASS_NAMES.has(receiver.className)) {
+                const result = callAtomicBooleanMethod(receiver, methodName, args);
+                if (result !== null) return result;
+                throw unprovidedClassError(receiver.className, methodName);
             }
             if (receiver && receiver.__kind === 'object' && isDateClassName(receiver.className)) {
                 const result = callJavaDateMethod(receiver, methodName, args);

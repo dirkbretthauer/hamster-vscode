@@ -151,7 +151,7 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   (`obj.<T>m()`), `&` type-parameter bounds, multi-catch unions (`catch (A | B e)`), try-with-resources
 
 ### Runner gaps
-- Java library support is limited to `java.util.Random`'s no-argument/seeded constructors and
+- Java library support includes `java.util.Random`'s no-argument/seeded constructors and
   `nextInt(bound)`, and the sample-used subset of `ArrayList`/`Vector`, `Stack`, `LinkedList`, `HashSet`,
   and `HashMap` (see `spec/vscode-port-status.md`). Equality-sensitive collection operations run in
   the runner (`tryCollectionMethodGen`) so they can call user `equals`/`hashCode`; runtime failures
@@ -159,8 +159,9 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
   `empty`/`isEmpty`, `size`, equals-based top-relative `search`, inherited list operations,
   bottom-to-top iteration, and user subclasses; empty `pop`/`peek` throw catchable
   `EmptyStackException` (a `RuntimeException`). `Timer`/`TimerTask` and `Calendar`/`Date` run on
-  the simulation clock (see Concurrency below). Other classes (`java.util.concurrent.*`, …) still
-  fail with a message naming the class. Note
+  the simulation clock (see Concurrency below). `Semaphore`, `ReentrantLock`, `Condition`, and
+  `AtomicBoolean` implement the course-used synchronization APIs; other classes
+  (`java.util.concurrent.*`, …) still fail with a message naming the class. Note
   `Thread`'s *own* members are supported (see below); it is the library classes around it that are not.
 - for-each iterates arrays, lists, queues, and sets; maps fail with a message naming the type
 - Array and string indexing checks bounds through `checkIndexBounds` in the runner. Array reads
@@ -180,6 +181,13 @@ A started hamster is its own cooperatively-scheduled thread, matching the refere
 - Thread and monitor operations are intercepted *in the runner* (`tryThreadOperationGen` /
   `tryThreadStaticGen`) before reaching the runtime adapter, because they must block, which means
   yielding — the adapter is synchronous and cannot.
+- `Semaphore.acquire/acquireUninterruptibly/release`, `ReentrantLock.lock/unlock/tryLock`, and
+  `Condition.await/signal/signalAll` are also intercepted by the runner and cooperatively block in
+  the scheduler. A
+  condition wait releases the full re-entrant lock depth and reacquires it before returning.
+  `AtomicBoolean` (`get`, `set`, `compareAndSet`, `getAndSet`) is synchronous and atomic with
+  respect to the cooperative scheduler; a failed `compareAndSet` yields so active-wait loops do
+  not starve the thread that can release the flag.
 - The loop guard is a per-thread progress budget that resets on hamster instructions and blocking
   operations, so `while (true) { … vor(); }` is legal.
 - Scheduling is deliberately varied (so unprotected programs can go wrong); tests must assert
@@ -190,6 +198,9 @@ A started hamster is its own cooperatively-scheduled thread, matching the refere
   `new Date()`, `Calendar.getInstance()`, and `System.currentTimeMillis()` all read the scheduler's
   simulation clock (start wall-clock + 100 ms per step), installed in the runtime via
   `runtime.setClock` on every `createRunnerState`. Tests inject `now` for determinism.
+- Semaphore permits, reentrant lock ownership, condition wait queues, and atomic booleans are
+  implemented in the same scheduler/runtime boundary. Invalid lock ownership throws a catchable
+  `IllegalMonitorStateException`; invalid permit counts throw `IllegalArgumentException`.
 
 ### Removed
 - The dead `state.stack` field is gone — it was declared but never read or written.
