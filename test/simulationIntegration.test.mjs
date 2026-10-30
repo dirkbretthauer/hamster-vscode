@@ -228,6 +228,49 @@ test('java.util.Random seeded construction and nextInt run through the language 
     assert.deepEqual(run.output, ['7']);
 });
 
+test('a Stack route lets copied hamsters deposit and retrieve grain in reverse order', async () => {
+    const run = await runSimulation({
+        terrain: terrainFile(['>    '], [0], 5),
+        program: `/*object-oriented program*/
+            import java.util.Stack;
+            import java.util.Random;
+            class CourierHamster extends Hamster {
+                CourierHamster(Hamster source) { super(source); }
+                void visit(int column) {
+                    int direction = column < this.getSpalte() ? Hamster.WEST : Hamster.OST;
+                    while (this.getBlickrichtung() != direction) { this.linksUm(); }
+                    while (this.getSpalte() != column) { this.vor(); }
+                }
+            }
+            void main() {
+                Stack<Integer> route = new Stack<Integer>();
+                Random random = new Random(7);
+                CourierHamster sender = new CourierHamster(Hamster.getStandardHamster());
+                while (!sender.maulLeer()) {
+                    int column = random.nextInt(Territorium.getAnzahlSpalten());
+                    sender.visit(column);
+                    sender.gib();
+                    route.push(column);
+                }
+                CourierHamster collector = new CourierHamster(Hamster.getStandardHamster());
+                while (!route.isEmpty()) {
+                    collector.visit(route.pop());
+                    collector.nimm();
+                }
+            }`,
+    });
+
+    assert.equal(run.status, 'finished');
+    assert.deepEqual(run.errors, []);
+    assert.equal(run.totalCorn(), 0);
+    assert.equal(run.hamster().mouth, 5);
+    assert.equal(run.hamsters().length, 3);
+    assert.equal(run.hamsters()[1].mouth, 0);
+    assert.equal(run.hamsters()[2].mouth, 10);
+    assert.equal(run.hamsters()[1].color, run.hamster().color);
+    assert.equal(run.hamsters()[2].color, run.hamster().color);
+});
+
 test('a program waiting for input that never arrives reports the prompt', async () => {
     const run = await runSimulation({
         terrain: terrainFile(['>  ', '   '], [0], 0),

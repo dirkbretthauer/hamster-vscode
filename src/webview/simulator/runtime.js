@@ -6,7 +6,7 @@
  * helpers and terminal I/O glue. Moved out of `hamsterPanel.ts`'s inline
  * script unchanged in behavior.
  */
-import { isWallAt, insideTerrain } from '../shared/terrainEngineState.js';
+import { isWallAt, insideTerrain, findHamster } from '../shared/terrainEngineState.js';
 import { hamsterError } from './engine.js';
 
 /** Aliases accepted by both the German and English Hamster APIs, normalized to the German canonical name. */
@@ -103,6 +103,7 @@ function collectionClassType(className) {
     switch (className.slice(className.lastIndexOf('.') + 1)) {
         case 'ArrayList':
         case 'Vector': return 'list';
+        case 'Stack': return 'stack';
         case 'LinkedList': return 'queue';
         case 'HashSet': return 'set';
         case 'HashMap': return 'map';
@@ -124,9 +125,9 @@ function collectionKeyIndex(entries, key) {
     return entries.findIndex(entry => Object.is(entry.key, key));
 }
 
-/** Vector reports bad indices as `ArrayIndexOutOfBoundsException`, the other lists as `IndexOutOfBoundsException`. */
+/** Vector and its Stack subclass use `ArrayIndexOutOfBoundsException` for bad indices. */
 function indexOutOfBoundsTypeFor(className) {
-    return className.slice(className.lastIndexOf('.') + 1) === 'Vector'
+    return ['Vector', 'Stack'].includes(className.slice(className.lastIndexOf('.') + 1))
         ? 'ArrayIndexOutOfBoundsException'
         : 'IndexOutOfBoundsException';
 }
@@ -160,6 +161,27 @@ function isListValueMethod(methodName, args) {
     return methodName === 'remove' && typeof args[0] !== 'number';
 }
 
+function callStackMethod(receiver, methodName, args) {
+    const values = receiver.values;
+    const hasArgument = methodName === 'push' || methodName === 'search';
+    requireCollectionArguments(receiver.className, methodName, args, hasArgument ? 1 : 0);
+    if (methodName === 'push') {
+        values.push(args[0]);
+        return args[0];
+    }
+    if (methodName === 'empty') return values.length === 0;
+    if (methodName === 'search') {
+        for (let index = values.length - 1; index >= 0; index--) {
+            if (Object.is(values[index], args[0])) return values.length - index;
+        }
+        return -1;
+    }
+    if (values.length === 0) {
+        throw javaRuntimeException('EmptyStackException', 'Stack is empty');
+    }
+    return methodName === 'pop' ? values.pop() : values[values.length - 1];
+}
+
 function callCollectionMethod(receiver, methodName, args) {
     const values = receiver.values;
     const entries = receiver.entries;
@@ -175,6 +197,11 @@ function callCollectionMethod(receiver, methodName, args) {
             return values[receiver.index++];
         }
         throw collectionError(receiver, methodName);
+    }
+
+    if (receiver.collectionType === 'stack' &&
+        ['push', 'pop', 'peek', 'empty', 'search'].includes(methodName)) {
+        return callStackMethod(receiver, methodName, args);
     }
 
     if (methodName === 'size' || methodName === 'isEmpty' || methodName === 'clear' ||
@@ -193,13 +220,14 @@ function callCollectionMethod(receiver, methodName, args) {
 
     switch (receiver.collectionType) {
         case 'list':
+        case 'stack':
         case 'queue':
             if ((methodName === 'add' || (receiver.collectionType === 'queue' && methodName === 'offer')) &&
                 args.length === 1) {
                 values.push(args[0]);
                 return true;
             }
-            if (receiver.collectionType === 'list' && methodName === 'add' && args.length === 2) {
+            if (receiver.collectionType !== 'queue' && methodName === 'add' && args.length === 2) {
                 const [index, value] = args;
                 requireCollectionIndex(receiver, index, true);
                 values.splice(index, 0, value);
@@ -344,6 +372,15 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             if (className.endsWith('Hamster')) {
                 if (args.length === 0) {
                     return { __kind: 'hamster', id: null, className };
+                }
+                if (args.length === 1 && args[0]?.__kind === 'hamster') {
+                    if (args[0].id === null) return { __kind: 'hamster', id: null, className };
+                    const source = findHamster(getEngineState().terrain, args[0].id);
+                    if (!source) {
+                        throw hamsterError('HamsterNotInitializedException', 'Hamster not initialised');
+                    }
+                    const id = engine.createHamster(source.y, source.x, source.dir, source.mouth, source.color);
+                    return { __kind: 'hamster', id, className };
                 }
                 if (args.length < 4) throw new Error(className + ' constructor expects at least 4 arguments');
                 const id = engine.createHamster(

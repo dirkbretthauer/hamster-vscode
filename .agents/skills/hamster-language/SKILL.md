@@ -152,11 +152,14 @@ code from `UnsupportedConstruct`; `npm run conformance` reports such programs se
 
 ### Runner gaps
 - Java library support is limited to `java.util.Random`'s no-argument/seeded constructors and
-  `nextInt(bound)`, and the sample-used subset of `ArrayList`/`Vector`, `LinkedList`, `HashSet`,
+  `nextInt(bound)`, and the sample-used subset of `ArrayList`/`Vector`, `Stack`, `LinkedList`, `HashSet`,
   and `HashMap` (see `spec/vscode-port-status.md`). Equality-sensitive collection operations run in
   the runner (`tryCollectionMethodGen`) so they can call user `equals`/`hashCode`; runtime failures
-  carry `hamsterExceptionType` so they are catchable. Other classes (`Stack`,
-  `java.util.concurrent.*`, `java.util.Timer`, …) still fail with a message naming the class. Note
+  carry `hamsterExceptionType` so they are catchable. `Stack` supports `push`/`pop`/`peek`,
+  `empty`/`isEmpty`, `size`, equals-based top-relative `search`, inherited list operations,
+  bottom-to-top iteration, and user subclasses; empty `pop`/`peek` throw catchable
+  `EmptyStackException` (a `RuntimeException`). Other classes (`java.util.concurrent.*`,
+  `java.util.Timer`, …) still fail with a message naming the class. Note
   `Thread`'s *own* members are supported (see below); it is the library classes around it that are not.
 - for-each iterates arrays, lists, queues, and sets; maps fail with a message naming the type
 - Non-constant global initializers (e.g. `int[] a = new int[3];` at top level) keep the type's default value
