@@ -102,6 +102,87 @@ test('unsupported collection methods report the collection and method', async ()
     );
 });
 
+test('Stack supports LIFO operations, top-relative search and inherited Vector APIs', async () => {
+    const runtime = await loadSimulatorRuntime();
+    for (const className of ['Stack', 'java.util.Stack']) {
+        const stack = runtime.createObject(className, []);
+        const call = (method, ...args) => runtime.callMethod(stack, method, args);
+        assert.equal(call('empty'), true);
+        assert.equal(call('isEmpty'), true);
+        assert.equal(call('size'), 0);
+        assert.equal(call('search', 'missing'), -1);
+        for (const method of ['pop', 'peek']) {
+            assert.throws(() => call(method), error =>
+                error.name === 'EmptyStackException' &&
+                error.hamsterExceptionType === 'EmptyStackException');
+        }
+
+        assert.equal(call('push', 'first'), 'first');
+        assert.equal(call('push', 'second'), 'second');
+        assert.equal(call('push', 'first'), 'first');
+        assert.equal(call('empty'), false);
+        assert.equal(call('isEmpty'), false);
+        assert.equal(call('size'), 3);
+        assert.equal(call('peek'), 'first');
+        assert.equal(call('size'), 3);
+        assert.equal(call('search', 'first'), 1);
+        assert.equal(call('search', 'second'), 2);
+        assert.equal(call('search', 'missing'), -1);
+        assert.equal(call('indexOf', 'first'), 0);
+        assert.equal(call('contains', 'second'), true);
+        const iterator = call('iterator');
+        for (const value of ['first', 'second', 'first']) {
+            assert.equal(runtime.callMethod(iterator, 'hasNext', []), true);
+            assert.equal(runtime.callMethod(iterator, 'next', []), value);
+        }
+        assert.equal(runtime.callMethod(iterator, 'hasNext', []), false);
+        assert.equal(call('pop'), 'first');
+        assert.equal(call('pop'), 'second');
+        assert.equal(call('pop'), 'first');
+        assert.equal(call('empty'), true);
+        assert.equal(call('push', null), null);
+        assert.equal(call('peek'), null);
+        assert.equal(call('search', null), 1);
+        assert.equal(call('pop'), null);
+
+        assert.equal(call('add', 'bottom'), true);
+        call('add', 1, 'top');
+        assert.equal(call('get', 0), 'bottom');
+        assert.equal(call('remove', 0), 'bottom');
+        assert.equal(call('pop'), 'top');
+        for (const [method, args] of [['get', [0]], ['remove', [-1]], ['add', [1, 'bad']]]) {
+            assert.throws(() => call(method, ...args), error =>
+                error.hamsterExceptionType === 'ArrayIndexOutOfBoundsException');
+        }
+        call('push', 'cleared');
+        call('clear');
+        assert.equal(call('empty'), true);
+        assert.throws(() => call('push'), /expects 1 argument/);
+        assert.throws(() => call('search'), /expects 1 argument/);
+        assert.throws(() => call('peek', 1), /expects 0 arguments/);
+    }
+});
+
+test('Hamster copy construction preserves state without sharing the engine hamster', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const source = runtime.createObject('Hamster', [2, 3, 0, 4, 5]);
+    const copy = runtime.createObject('Hamster', [source]);
+    assert.notEqual(copy.id, source.id);
+    for (const [method, expected] of [
+        ['getReihe', 2], ['getSpalte', 3], ['getBlickrichtung', 0], ['getAnzahlKoerner', 4],
+    ]) {
+        assert.equal(runtime.callMethod(copy, method, []), expected);
+    }
+    runtime.callMethod(copy, 'gib', []);
+    assert.equal(runtime.callMethod(copy, 'getAnzahlKoerner', []), 3);
+    assert.equal(runtime.callMethod(source, 'getAnzahlKoerner', []), 4);
+    const uninitialized = runtime.createObject('Hamster', []);
+    const uninitializedCopy = runtime.createObject('Hamster', [uninitialized]);
+    assert.equal(uninitializedCopy.id, null);
+    assert.throws(() => runtime.callMethod(uninitializedCopy, 'vor', []),
+        error => error.hamsterExceptionType === 'HamsterNotInitializedException');
+});
+
 test('sets use user-defined equals and collections support enhanced-for', async () => {
     const { parser, runner } = await loadLanguageRunner();
     const runtime = await loadSimulatorRuntime();
@@ -168,6 +249,100 @@ async function runCollectionProgram(body) {
     while (runner.executeRunnerStep(state)) {}
     return state.scopes[0];
 }
+
+test('Stack search uses equals from the top and inherits list equality operations', async () => {
+    const globals = await runCollectionProgram(`
+        int nearest;
+        int bottom;
+        int missing;
+        int nullDistance;
+        int firstIndex;
+        boolean contained;
+        boolean removed;
+        int popped;
+        void main() {
+            Stack<Kachel> stack = new Stack<Kachel>();
+            stack.push(new Kachel(1));
+            stack.push(new Kachel(2));
+            stack.push(new Kachel(2));
+            nearest = stack.search(new Kachel(2));
+            bottom = stack.search(new Kachel(1));
+            missing = stack.search(new Kachel(9));
+            stack.push(null);
+            nullDistance = stack.search(null);
+            stack.pop();
+            firstIndex = stack.indexOf(new Kachel(2));
+            contained = stack.contains(new Kachel(1));
+            removed = stack.remove(new Kachel(1));
+            popped = stack.pop().row;
+        }`);
+
+    assert.equal(globals.get('nearest'), 1);
+    assert.equal(globals.get('bottom'), 3);
+    assert.equal(globals.get('missing'), -1);
+    assert.equal(globals.get('nullDistance'), 1);
+    assert.equal(globals.get('firstIndex'), 1);
+    assert.equal(globals.get('contained'), true);
+    assert.equal(globals.get('removed'), true);
+    assert.equal(globals.get('popped'), 2);
+});
+
+test('Stack failures are catchable as EmptyStackException and RuntimeException', async () => {
+    const globals = await runCollectionProgram(`
+        boolean popCaught;
+        boolean runtimeCaught;
+        boolean peekCaught;
+        boolean indexCaught;
+        void main() {
+            Stack<String> stack = new Stack<String>();
+            try { stack.pop(); } catch (EmptyStackException e) { popCaught = true; }
+            try { stack.pop(); } catch (RuntimeException e) { runtimeCaught = true; }
+            try { stack.peek(); } catch (EmptyStackException e) { peekCaught = true; }
+            try { stack.get(0); } catch (ArrayIndexOutOfBoundsException e) { indexCaught = true; }
+        }`);
+
+    for (const name of ['popCaught', 'runtimeCaught', 'peekCaught', 'indexCaught']) {
+        assert.equal(globals.get(name), true, name);
+    }
+});
+
+test('Stack and user subclasses iterate bottom-to-top and support super calls', async () => {
+    const globals = await runCollectionProgram(`
+        class CellStack extends java.util.Stack<Kachel> {
+            Kachel push(Kachel cell) { return super.push(cell); }
+            int search(Kachel cell) { return super.search(cell); }
+            Kachel pop() { return super.pop(); }
+        }
+        class DerivedStack extends CellStack {}
+        int stackOrder;
+        int subclassOrder;
+        int subclassSearch;
+        int subclassTop;
+        int pushed;
+        int remaining;
+        void main() {
+            Stack<Integer> stack = new Stack<Integer>();
+            stack.push(1);
+            stack.push(2);
+            stack.push(3);
+            for (int value : stack) { stackOrder = stackOrder * 10 + value; }
+            DerivedStack cells = new DerivedStack();
+            pushed = cells.push(new Kachel(4)).row;
+            cells.add(0, new Kachel(3));
+            cells.push(new Kachel(5));
+            for (Kachel cell : cells) { subclassOrder = subclassOrder * 10 + cell.row; }
+            subclassSearch = cells.search(new Kachel(4));
+            subclassTop = cells.pop().row;
+            remaining = cells.size();
+        }`);
+
+    assert.equal(globals.get('stackOrder'), 123);
+    assert.equal(globals.get('subclassOrder'), 345);
+    assert.equal(globals.get('subclassSearch'), 2);
+    assert.equal(globals.get('subclassTop'), 5);
+    assert.equal(globals.get('pushed'), 4);
+    assert.equal(globals.get('remaining'), 2);
+});
 
 test('collection and Random failures are catchable Java exceptions', async () => {
     const globals = await runCollectionProgram(`

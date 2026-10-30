@@ -47,6 +47,7 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['IndexOutOfBoundsException', 'RuntimeException'],
     ['IllegalArgumentException', 'RuntimeException'],
     ['NoSuchElementException', 'RuntimeException'],
+    ['EmptyStackException', 'RuntimeException'],
     ['InterruptedException', 'Exception'],
     ['RuntimeException', 'Exception'],
     ['Exception', 'Throwable'],
@@ -1274,7 +1275,7 @@ function* evalNewExpressionGen(node, state, callDepth) {
         // Hamster constructor is a breakpoint (CreateInstruction).
         // Yield BEFORE constructing so the debugger highlights the line
         // that is *about to* run.
-        if (className.endsWith('Hamster') && args.length >= 4) {
+        if (isHamsterCreation(className, args)) {
             yield { kind: 'instruction', name: 'createHamster', loc: node.loc || null };
         }
         const obj = state.runtime.createObject(className, args, state.functions);
@@ -1388,12 +1389,26 @@ function* tryCollectionMethodGen(receiver, methodName, args, state, callDepth, l
     if (receiver?.__kind !== 'collection') return COLLECTION_METHOD_NOT_HANDLED;
     const context = { state, callDepth, loc };
     switch (receiver.collectionType) {
+        case 'stack':
+            if (methodName === 'search' && args.length === 1) {
+                return yield* searchStackGen(receiver.values, args[0], context);
+            }
+            return yield* tryListMethodGen(receiver.values, methodName, args, context);
         case 'set': return yield* trySetMethodGen(receiver.values, methodName, args, context);
         case 'map': return yield* tryMapMethodGen(receiver.entries, methodName, args, context);
         case 'list':
         case 'queue': return yield* tryListMethodGen(receiver.values, methodName, args, context);
         default: return COLLECTION_METHOD_NOT_HANDLED;
     }
+}
+
+function* searchStackGen(values, wanted, context) {
+    for (let index = values.length - 1; index >= 0; index--) {
+        if (yield* javaValuesEqualGen(wanted, values[index], false, context)) {
+            return values.length - index;
+        }
+    }
+    return -1;
 }
 
 function* trySetMethodGen(values, methodName, args, context) {
@@ -1739,7 +1754,7 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
     if (typeof state.runtime.createObject !== 'function') {
         throw new Error('Unknown superclass ' + declaration.superClass);
     }
-    if (declaration.superClass.endsWith('Hamster') && args.length >= 4) {
+    if (isHamsterCreation(declaration.superClass, args)) {
         yield { kind: 'instruction', name: 'createHamster', loc: loc || declaration.loc || null };
     }
     const nativeObject = state.runtime.createObject(declaration.superClass, args, state.functions);
@@ -1747,6 +1762,11 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
         __className: receiver.__className,
         fields: receiver.fields,
     });
+}
+
+function isHamsterCreation(className, args) {
+    return className.endsWith('Hamster') && (args.length >= 4 ||
+        (args.length === 1 && args[0]?.__kind === 'hamster' && args[0].id !== null));
 }
 
 function getConstructorChainingCall(statement) {
