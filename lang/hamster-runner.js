@@ -48,6 +48,7 @@ const BUILTIN_EXCEPTION_SUPERTYPES = new Map([
     ['IndexOutOfBoundsException', 'RuntimeException'],
     ['IllegalArgumentException', 'RuntimeException'],
     ['IllegalStateException', 'RuntimeException'],
+    ['IllegalMonitorStateException', 'RuntimeException'],
     ['NoSuchElementException', 'RuntimeException'],
     ['EmptyStackException', 'RuntimeException'],
     ['InterruptedException', 'Exception'],
@@ -993,6 +994,11 @@ function* evalCallExpressionGen(node, state, callDepth) {
             receiver, methodName, args, state, node.loc
         );
         if (memberThreadResult !== THREAD_OPERATION_NOT_HANDLED) return memberThreadResult;
+
+        const concurrentResult = yield* tryConcurrentOperationGen(
+            receiver, methodName, args, state
+        );
+        if (concurrentResult !== CONCURRENT_OPERATION_NOT_HANDLED) return concurrentResult;
 
         const timerResult = tryTimerOperation(receiver, methodName, args, state);
         if (timerResult !== TIMER_OPERATION_NOT_HANDLED) return timerResult;
@@ -2428,6 +2434,113 @@ const TIMER_OPERATION_NOT_HANDLED = Symbol('timerOperationNotHandled');
 function isLibraryInstance(value, className) {
     return Boolean(value) && typeof value === 'object' && value.__kind === 'object' &&
         value.className === className;
+}
+
+const CONCURRENT_OPERATION_NOT_HANDLED = Symbol('concurrentOperationNotHandled');
+
+function isConcurrentLibraryInstance(value, className) {
+    return Boolean(value) && typeof value === 'object' &&
+        (value.__kind === 'object' || value.__kind === 'condition') &&
+        value.className?.slice(value.className.lastIndexOf('.') + 1) === className;
+}
+
+function requireConcurrentArity(className, methodName, args, expectedCount) {
+    if (args.length !== expectedCount) {
+        const error = new Error(
+            `${className}.${methodName} expects ${expectedCount} argument${expectedCount === 1 ? '' : 's'}`
+        );
+        error.hamsterExceptionType = 'IllegalArgumentException';
+        throw error;
+    }
+}
+
+function* tryConcurrentOperationGen(receiver, methodName, args, state) {
+    const scheduler = state.scheduler;
+    if (!scheduler) return CONCURRENT_OPERATION_NOT_HANDLED;
+
+    try {
+        if (isConcurrentLibraryInstance(receiver, 'AtomicBoolean') &&
+            methodName === 'compareAndSet') {
+            requireConcurrentArity('AtomicBoolean', methodName, args, 2);
+            const changed = state.runtime.callMethod(receiver, methodName, args);
+            if (!changed) yield* scheduler.yieldNow();
+            return changed;
+        }
+
+        if (isConcurrentLibraryInstance(receiver, 'Semaphore')) {
+            switch (methodName) {
+                case 'acquire':
+                    if (args.length > 1) requireConcurrentArity('Semaphore', methodName, args, 0);
+                    yield* scheduler.semaphoreAcquire(receiver, args.length ? args[0] : 1);
+                    return undefined;
+                case 'acquireUninterruptibly':
+                    if (args.length > 1) requireConcurrentArity('Semaphore', methodName, args, 0);
+                    yield* scheduler.semaphoreAcquire(receiver, args.length ? args[0] : 1, false);
+                    return undefined;
+                case 'release':
+                    if (args.length > 1) requireConcurrentArity('Semaphore', methodName, args, 0);
+                    scheduler.semaphoreRelease(receiver, args.length ? args[0] : 1);
+                    return undefined;
+                case 'availablePermits':
+                    requireConcurrentArity('Semaphore', methodName, args, 0);
+                    return scheduler.semaphoreAvailablePermits(receiver);
+                default:
+                    return CONCURRENT_OPERATION_NOT_HANDLED;
+            }
+        }
+
+        if (isConcurrentLibraryInstance(receiver, 'ReentrantLock')) {
+            switch (methodName) {
+                case 'lock':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    yield* scheduler.lock(receiver);
+                    return undefined;
+                case 'unlock':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    scheduler.unlock(receiver);
+                    return undefined;
+                case 'tryLock':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    return scheduler.tryLock(receiver);
+                case 'isLocked':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    return scheduler.lockIsLocked(receiver);
+                case 'isHeldByCurrentThread':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    return scheduler.lockIsHeldByCurrentThread(receiver);
+                case 'getHoldCount':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    return scheduler.lockHoldCount(receiver);
+                case 'newCondition':
+                    requireConcurrentArity('ReentrantLock', methodName, args, 0);
+                    return scheduler.newCondition(receiver);
+                default:
+                    return CONCURRENT_OPERATION_NOT_HANDLED;
+            }
+        }
+
+        if (isConcurrentLibraryInstance(receiver, 'Condition')) {
+            switch (methodName) {
+                case 'await':
+                    requireConcurrentArity('Condition', methodName, args, 0);
+                    yield* scheduler.conditionAwait(receiver);
+                    return undefined;
+                case 'signal':
+                    requireConcurrentArity('Condition', methodName, args, 0);
+                    scheduler.conditionSignal(receiver);
+                    return undefined;
+                case 'signalAll':
+                    requireConcurrentArity('Condition', methodName, args, 0);
+                    scheduler.conditionSignal(receiver, true);
+                    return undefined;
+                default:
+                    return CONCURRENT_OPERATION_NOT_HANDLED;
+            }
+        }
+    } catch (error) {
+        throw normalizeBuiltinFailure(error);
+    }
+    return CONCURRENT_OPERATION_NOT_HANDLED;
 }
 
 function timerArgumentError(message) {

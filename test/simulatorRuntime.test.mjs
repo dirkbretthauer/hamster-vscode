@@ -188,6 +188,32 @@ test('Stack supports LIFO operations, top-relative search and inherited Vector A
     }
 });
 
+test('AtomicBoolean supports atomic reads, writes, swaps, and compare-and-set', async () => {
+    const runtime = await loadSimulatorRuntime();
+    for (const className of ['AtomicBoolean', 'java.util.concurrent.atomic.AtomicBoolean']) {
+        const atomic = runtime.createObject(className, [false]);
+        const call = (method, ...args) => runtime.callMethod(atomic, method, args);
+        assert.equal(call('get'), false);
+        assert.equal(call('compareAndSet', true, true), false);
+        assert.equal(call('get'), false);
+        assert.equal(call('compareAndSet', false, true), true);
+        assert.equal(call('get'), true);
+        assert.equal(call('getAndSet', false), true);
+        assert.equal(call('get'), false);
+        assert.equal(call('set', true), undefined);
+        assert.equal(call('get'), true);
+    }
+});
+
+test('Semaphore and ReentrantLock constructors validate their arguments', async () => {
+    const runtime = await loadSimulatorRuntime();
+    assert.throws(() => runtime.createObject('Semaphore', [-1]), error =>
+        error.name === 'IllegalArgumentException' &&
+        error.hamsterExceptionType === 'IllegalArgumentException');
+    assert.throws(() => runtime.createObject('Semaphore', []), /expects permits/);
+    assert.throws(() => runtime.createObject('ReentrantLock', [true, false]), /at most one/);
+});
+
 test('Hamster copy construction preserves state without sharing the engine hamster', async () => {
     const runtime = await loadSimulatorRuntime();
     const source = runtime.createObject('Hamster', [2, 3, 0, 4, 5]);

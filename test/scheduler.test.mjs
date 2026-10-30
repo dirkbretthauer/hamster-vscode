@@ -65,7 +65,15 @@ function createTestRuntime(log) {
         resolveIdentifier(name) {
             return /^[A-Z][A-Za-z0-9_]*$/.test(name) ? { __kind: 'class', name } : undefined;
         },
-        createObject(className) {
+        createObject(className, args) {
+            if (className.endsWith('Semaphore')) {
+                return {
+                    __kind: 'object',
+                    className,
+                    initialPermits: Number(args?.[0] ?? 0),
+                    fields: Object.create(null),
+                };
+            }
             return className.endsWith('Hamster')
                 ? { __kind: 'hamster', id: 0, className }
                 : { __kind: 'object', className, fields: Object.create(null) };
@@ -385,6 +393,147 @@ test('a timed wait expires even when nobody signals', async () => {
     `);
     assert.equal(result.status, 'finished');
     assert.deepEqual(log, ['woke']);
+});
+
+test('contended semaphore permits are granted cooperatively and exclusively', async () => {
+    const { log, staticOf, errors, result } = await runProgram(`
+        class W extends Hamster {
+            static int active = 0;
+            static int maximum = 0;
+            Semaphore semaphore;
+            W(Semaphore s) { super(0,0,1,0); this.semaphore = s; }
+            public void run() {
+                int i = 0;
+                while (i < 5) {
+                    try {
+                        if (i % 2 == 0) { this.semaphore.acquire(); }
+                        else { this.semaphore.acquireUninterruptibly(); }
+                    } catch (InterruptedException e) {}
+                    W.active = W.active + 1;
+                    if (W.active > W.maximum) { W.maximum = W.active; }
+                    schreib("critical");
+                    W.active = W.active - 1;
+                    this.semaphore.release();
+                    i = i + 1;
+                }
+            }
+        }
+        void main() {
+            Semaphore semaphore = new Semaphore(1);
+            W a = new W(semaphore); W b = new W(semaphore);
+            a.start(); b.start();
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.equal(log.length, 10);
+    assert.equal(staticOf('W', 'maximum'), 1);
+    assert.equal(staticOf('W', 'active'), 0);
+});
+
+test('Condition.await releases and reacquires the full reentrant lock depth', async () => {
+    const { log, errors, result } = await runProgram(`
+        class Box {
+            ReentrantLock lock;
+            Condition ready;
+            boolean value = false;
+            Box() { this.lock = new ReentrantLock(); this.ready = this.lock.newCondition(); }
+            void waitForValue() {
+                this.lock.lock(); this.lock.lock();
+                try {
+                    while (!this.value) {
+                        W.waiting = W.waiting + 1;
+                        this.ready.await();
+                    }
+                    schreib(this.lock.getHoldCount());
+                } finally { this.lock.unlock(); this.lock.unlock(); }
+            }
+            void setValue() {
+                this.lock.lock();
+                try { this.value = true; this.ready.signalAll(); }
+                finally { this.lock.unlock(); }
+            }
+        }
+        class W extends Hamster {
+            static int waiting = 0;
+            Box box;
+            W(Box b) { super(0,0,1,0); this.box = b; }
+            public void run() { this.box.waitForValue(); }
+        }
+        void main() {
+            Box box = new Box();
+            W a = new W(box); W b = new W(box);
+            a.start(); b.start();
+            while (W.waiting < 2) { Thread.yield(); }
+            box.setValue();
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual(log, ['2', '2']);
+});
+
+test('Condition.signal wakes one waiter and signalAll wakes the rest', async () => {
+    const { log, errors, result } = await runProgram(`
+        class Box {
+            ReentrantLock lock;
+            Condition ready;
+            boolean value = false;
+            Box() { this.lock = new ReentrantLock(); this.ready = this.lock.newCondition(); }
+            void awaitValue() {
+                this.lock.lock();
+                try {
+                    W.waiting = W.waiting + 1;
+                    while (!this.value) { this.ready.await(); }
+                    W.completed = W.completed + 1;
+                    schreib("done");
+                } finally { this.lock.unlock(); }
+            }
+            void signalOne() {
+                this.lock.lock();
+                try { this.value = true; this.ready.signal(); }
+                finally { this.lock.unlock(); }
+            }
+            void signalRest() {
+                this.lock.lock();
+                try { this.ready.signalAll(); }
+                finally { this.lock.unlock(); }
+            }
+        }
+        class W extends Hamster {
+            static int waiting = 0;
+            static int completed = 0;
+            Box box;
+            W(Box b) { super(0,0,1,0); this.box = b; }
+            public void run() { this.box.awaitValue(); }
+        }
+        void main() {
+            Box box = new Box();
+            W a = new W(box); W b = new W(box);
+            a.start(); b.start();
+            while (W.waiting < 2) { Thread.yield(); }
+            box.signalOne();
+            while (W.completed < 1) { Thread.yield(); }
+            box.signalRest();
+        }
+    `);
+    assert.equal(result.status, 'finished');
+    assert.deepEqual(errors, []);
+    assert.deepEqual(log, ['done', 'done']);
+});
+
+test('ReentrantLock and Condition reject operations by non-owners', async () => {
+    const { log, errors } = await runProgram(`
+        void main() {
+            ReentrantLock lock = new ReentrantLock();
+            Condition condition = lock.newCondition();
+            try { lock.unlock(); } catch (IllegalMonitorStateException e) { schreib("unlock"); }
+            try { condition.signal(); } catch (IllegalMonitorStateException e) { schreib("signal"); }
+            try { condition.await(); } catch (IllegalMonitorStateException e) { schreib("await"); }
+        }
+    `);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(log, ['unlock', 'signal', 'await']);
 });
 
 // ── User Story 4: lifetime ──────────────────────────────────────────────────

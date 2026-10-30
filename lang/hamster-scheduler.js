@@ -100,6 +100,9 @@ export function createScheduler(programState, options = {}) {
     /** TimerTask object → its scheduling state. */
     const timerTasks = new Map();
     let nextTimerSerial = 0;
+    const reentrantLocks = new Map();
+    const semaphores = new Map();
+    const conditions = new Map();
 
     /**
      * `setDaemon`/`setPriority`/`setName` may be called before `start()`, when
@@ -132,6 +135,7 @@ export function createScheduler(programState, options = {}) {
             blockedOn: null,
             wakeAtStep: null,
             monitorsHeld: [],
+            locksHeld: [],
             progressCounter: 0,
             pendingInput: null,
             exitError: null,
@@ -204,6 +208,78 @@ export function createScheduler(programState, options = {}) {
         next.pendingReentryDepth = 0;
     }
 
+    function lockFor(lock) {
+        let record = reentrantLocks.get(lock);
+        if (!record) {
+            record = { kind: 'reentrantLock', lock, owner: null, depth: 0, entryQueue: [] };
+            reentrantLocks.set(lock, record);
+        }
+        return record;
+    }
+
+    function acquireLock(record, thread, depth = 1) {
+        record.owner = thread;
+        record.depth = depth;
+        if (!thread.locksHeld.includes(record)) thread.locksHeld.push(record);
+    }
+
+    function admitNextLockOwner(record) {
+        if (record.owner !== null || record.entryQueue.length === 0) return;
+        const next = record.entryQueue.shift();
+        next.blockedOn = null;
+        next.status = ThreadStatus.RUNNABLE;
+        acquireLock(record, next, next.pendingReentryDepth || 1);
+        next.pendingReentryDepth = 0;
+    }
+
+    function releaseLockFully(record, thread) {
+        const depth = record.depth;
+        record.owner = null;
+        record.depth = 0;
+        const index = thread.locksHeld.indexOf(record);
+        if (index >= 0) thread.locksHeld.splice(index, 1);
+        admitNextLockOwner(record);
+        return depth;
+    }
+
+    function semaphoreFor(semaphore) {
+        let record = semaphores.get(semaphore);
+        if (!record) {
+            record = {
+                kind: 'semaphore',
+                semaphore,
+                permits: semaphore.initialPermits,
+                waiters: [],
+            };
+            semaphores.set(semaphore, record);
+        }
+        return record;
+    }
+
+    function grantSemaphoreWaiters(record) {
+        while (record.waiters.length > 0) {
+            const waiter = record.waiters[0];
+            if (waiter.permits > record.permits) return;
+            record.waiters.shift();
+            record.permits -= waiter.permits;
+            waiter.granted = true;
+            waiter.thread.blockedOn = null;
+            waiter.thread.status = ThreadStatus.RUNNABLE;
+        }
+    }
+
+    function moveConditionWaiterToLock(conditionRecord, thread) {
+        const lock = conditionRecord.lockRecord;
+        const index = conditionRecord.waiters.findIndex(waiter => waiter.thread === thread);
+        if (index < 0) return;
+        const [waiter] = conditionRecord.waiters.splice(index, 1);
+        thread.pendingReentryDepth = waiter.depth;
+        thread.status = ThreadStatus.BLOCKED;
+        thread.blockedOn = lock;
+        lock.entryQueue.push(thread);
+        admitNextLockOwner(lock);
+    }
+
     // ── lifecycle ───────────────────────────────────────────────────────────
 
     function terminate(thread, error) {
@@ -216,6 +292,18 @@ export function createScheduler(programState, options = {}) {
             const waiting = monitor.waitSet.indexOf(thread);
             if (waiting >= 0) monitor.waitSet.splice(waiting, 1);
         }
+        for (const record of reentrantLocks.values()) {
+            const queued = record.entryQueue.indexOf(thread);
+            if (queued >= 0) record.entryQueue.splice(queued, 1);
+            for (const condition of conditions.values()) {
+                const waiting = condition.waiters.findIndex(waiter => waiter.thread === thread);
+                if (waiting >= 0) condition.waiters.splice(waiting, 1);
+            }
+        }
+        for (const record of semaphores.values()) {
+            const waiting = record.waiters.findIndex(waiter => waiter.thread === thread);
+            if (waiting >= 0) record.waiters.splice(waiting, 1);
+        }
         thread.pendingReentryDepth = 0;
         // Release everything so no other thread is stranded (FR-018, FR-029).
         for (const monitor of [...thread.monitorsHeld]) {
@@ -224,6 +312,12 @@ export function createScheduler(programState, options = {}) {
             admitNextOwner(monitor);
         }
         thread.monitorsHeld.length = 0;
+        for (const record of [...thread.locksHeld]) {
+            record.owner = null;
+            record.depth = 0;
+            admitNextLockOwner(record);
+        }
+        thread.locksHeld.length = 0;
         thread.status = ThreadStatus.TERMINATED;
         thread.state.finished = true;
         thread.blockedOn = null;
@@ -456,9 +550,19 @@ export function createScheduler(programState, options = {}) {
     function describeWait(thread) {
         switch (thread.status) {
             case ThreadStatus.BLOCKED:
+                if (thread.blockedOn?.kind === 'semaphore') {
+                    return 'waiting for a semaphore permit';
+                }
+                if (thread.blockedOn?.kind === 'reentrantLock') {
+                    return 'waiting for a reentrant lock held by ' +
+                        (thread.blockedOn.owner?.name ?? 'another hamster');
+                }
                 return 'waiting to enter a synchronized section held by ' +
                     (thread.blockedOn?.owner?.name ?? 'another hamster');
-            case ThreadStatus.WAITING: return 'suspended in wait(), nobody has signalled it';
+            case ThreadStatus.WAITING:
+                return thread.blockedOn?.kind === 'condition'
+                    ? 'suspended in Condition.await(), nobody has signalled it'
+                    : 'suspended in wait(), nobody has signalled it';
             case ThreadStatus.TIMED_WAITING: return 'suspended in a timed wait';
             case ThreadStatus.JOINING: return 'waiting for ' + (thread.blockedOn?.name ?? 'another hamster');
             default: return thread.status;
@@ -518,6 +622,9 @@ export function createScheduler(programState, options = {}) {
             timers.clear();
             timerTasks.clear();
             nextTimerSerial = 0;
+            reentrantLocks.clear();
+            semaphores.clear();
+            conditions.clear();
             clockOriginMillis = now();
         },
 
@@ -702,6 +809,22 @@ export function createScheduler(programState, options = {}) {
         interrupt(target) {
             if (!target || target.status === ThreadStatus.TERMINATED) return;
             target.interrupted = true;
+            if (target.status === ThreadStatus.WAITING &&
+                target.blockedOn?.kind === 'condition') {
+                moveConditionWaiterToLock(target.blockedOn, target);
+                return;
+            }
+            if (target.status === ThreadStatus.BLOCKED &&
+                target.blockedOn?.kind === 'semaphore') {
+                const record = target.blockedOn;
+                const index = record.waiters.findIndex(waiter => waiter.thread === target);
+                if (index >= 0 && !record.waiters[index].interruptible) return;
+                if (index >= 0) record.waiters.splice(index, 1);
+                target.blockedOn = null;
+                target.status = ThreadStatus.RUNNABLE;
+                grantSemaphoreWaiters(record);
+                return;
+            }
             // Wake it so it can observe the flag and throw.
             if (target.status === ThreadStatus.WAITING ||
                 target.status === ThreadStatus.TIMED_WAITING ||
@@ -832,6 +955,162 @@ export function createScheduler(programState, options = {}) {
         },
 
         monitorFor,
+
+        // ── java.util.concurrent synchronization primitives ────────────────
+
+        *semaphoreAcquire(semaphore, permits = 1, interruptible = true) {
+            const count = Number(permits);
+            if (!Number.isInteger(count) || count <= 0) {
+                throw javaException('IllegalArgumentException', 'Semaphore permits must be positive');
+            }
+            const record = semaphoreFor(semaphore);
+            if (record.waiters.length === 0 && record.permits >= count) {
+                record.permits -= count;
+                return;
+            }
+            const thread = current;
+            const waiter = { thread, permits: count, granted: false, interruptible };
+            record.waiters.push(waiter);
+            thread.status = ThreadStatus.BLOCKED;
+            thread.blockedOn = record;
+            while (!waiter.granted) {
+                if (interruptible && thread.interrupted) {
+                    const index = record.waiters.indexOf(waiter);
+                    if (index >= 0) record.waiters.splice(index, 1);
+                    thread.interrupted = false;
+                    thread.blockedOn = null;
+                    thread.status = ThreadStatus.RUNNABLE;
+                    grantSemaphoreWaiters(record);
+                    throw interruptedError('Semaphore.acquire');
+                }
+                yield BLOCKED_YIELD;
+            }
+        },
+
+        semaphoreRelease(semaphore, permits = 1) {
+            const count = Number(permits);
+            if (!Number.isInteger(count) || count <= 0) {
+                throw javaException('IllegalArgumentException', 'Semaphore permits must be positive');
+            }
+            const record = semaphoreFor(semaphore);
+            record.permits += count;
+            grantSemaphoreWaiters(record);
+        },
+
+        semaphoreAvailablePermits(semaphore) {
+            return semaphoreFor(semaphore).permits;
+        },
+
+        *lock(lock) {
+            const thread = current;
+            const record = lockFor(lock);
+            if (record.owner === null) {
+                acquireLock(record, thread);
+                return;
+            }
+            if (record.owner === thread) {
+                record.depth += 1;
+                return;
+            }
+            thread.pendingReentryDepth = 1;
+            thread.status = ThreadStatus.BLOCKED;
+            thread.blockedOn = record;
+            record.entryQueue.push(thread);
+            while (thread.status === ThreadStatus.BLOCKED) {
+                yield BLOCKED_YIELD;
+            }
+        },
+
+        tryLock(lock) {
+            const thread = current;
+            const record = lockFor(lock);
+            if (record.owner === null) {
+                acquireLock(record, thread);
+                return true;
+            }
+            if (record.owner === thread) {
+                record.depth += 1;
+                return true;
+            }
+            return false;
+        },
+
+        unlock(lock) {
+            const thread = current;
+            const record = reentrantLocks.get(lock);
+            if (!record || record.owner !== thread) {
+                throw javaException('IllegalMonitorStateException', 'Current hamster does not own this lock');
+            }
+            record.depth -= 1;
+            if (record.depth === 0) {
+                record.owner = null;
+                const index = thread.locksHeld.indexOf(record);
+                if (index >= 0) thread.locksHeld.splice(index, 1);
+                admitNextLockOwner(record);
+            }
+        },
+
+        lockIsLocked(lock) {
+            return (reentrantLocks.get(lock)?.owner ?? null) !== null;
+        },
+
+        lockIsHeldByCurrentThread(lock) {
+            return reentrantLocks.get(lock)?.owner === current;
+        },
+
+        lockHoldCount(lock) {
+            const record = reentrantLocks.get(lock);
+            return record?.owner === current ? record.depth : 0;
+        },
+
+        newCondition(lock) {
+            const record = lockFor(lock);
+            const condition = { __kind: 'condition', className: 'Condition' };
+            conditions.set(condition, { kind: 'condition', lockRecord: record, waiters: [] });
+            return condition;
+        },
+
+        *conditionAwait(condition) {
+            const thread = current;
+            const conditionRecord = conditions.get(condition);
+            if (!conditionRecord || conditionRecord.lockRecord.owner !== thread) {
+                throw javaException('IllegalMonitorStateException', 'Condition.await requires owning its lock');
+            }
+            const lock = conditionRecord.lockRecord;
+            const depth = lock.depth;
+            const index = thread.locksHeld.indexOf(lock);
+            if (index >= 0) thread.locksHeld.splice(index, 1);
+            lock.owner = null;
+            lock.depth = 0;
+            const waiter = { thread, depth };
+            conditionRecord.waiters.push(waiter);
+            thread.status = ThreadStatus.WAITING;
+            thread.blockedOn = conditionRecord;
+            admitNextLockOwner(lock);
+            while (thread.status === ThreadStatus.WAITING || thread.status === ThreadStatus.BLOCKED) {
+                yield BLOCKED_YIELD;
+            }
+            thread.blockedOn = null;
+            if (thread.interrupted) {
+                thread.interrupted = false;
+                throw interruptedError('Condition.await');
+            }
+        },
+
+        conditionSignal(condition, all = false) {
+            const conditionRecord = conditions.get(condition);
+            if (!conditionRecord || conditionRecord.lockRecord.owner !== current) {
+                throw javaException('IllegalMonitorStateException', 'Condition.signal requires owning its lock');
+            }
+            const waking = all ? conditionRecord.waiters.splice(0) : conditionRecord.waiters.splice(0, 1);
+            for (const waiter of waking) {
+                const thread = waiter.thread;
+                thread.pendingReentryDepth = waiter.depth;
+                thread.status = ThreadStatus.BLOCKED;
+                thread.blockedOn = conditionRecord.lockRecord;
+                conditionRecord.lockRecord.entryQueue.push(thread);
+            }
+        },
 
         // ── java.util.Timer / TimerTask, called by the runner ───────────────
 
