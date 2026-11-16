@@ -1,8 +1,6 @@
 import * as vscode from 'vscode';
-import {
-    collectProgramErrors,
-    type HamsterLanguageError,
-} from '../lang/hamster-parser.js';
+import type { HamsterLanguageError } from '../lang/hamster-parser.js';
+import { collectDiagnostics } from '../lang/hamster-semantics.js';
 
 export class HamsterDiagnostics implements vscode.Disposable {
     private collection: vscode.DiagnosticCollection;
@@ -14,7 +12,7 @@ export class HamsterDiagnostics implements vscode.Disposable {
     async update(document: vscode.TextDocument): Promise<void> {
         let errors: HamsterLanguageError[];
         try {
-            errors = collectProgramErrors(
+            errors = collectDiagnostics(
                 document.getText(),
                 { requireMain: false }
             );

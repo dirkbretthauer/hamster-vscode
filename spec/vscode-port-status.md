@@ -194,3 +194,7 @@ labeled `spec-conformance` plus a priority label (`P0`–`P3`).
 | [#16](https://github.com/dirkbretthauer/hamster-vscode/issues/16) | Debugger breakpoints always reported as verified without executable-line validation | P3 |
 | [#17](https://github.com/dirkbretthauer/hamster-vscode/issues/17) | Debugger `evaluate` only supports bare identifiers, not expressions | P3 |
 | [#59](https://github.com/dirkbretthauer/hamster-vscode/issues/59) | Debugger variables view cannot expand objects or arrays | P3 |
+
+### Semantic diagnostics (issue #82)
+- 🟢 `lang/hamster-semantics.js` adds a conservative editor-diagnostics pass (runs only when the program parses cleanly): unknown unqualified functions/variables, wrong argument counts for user functions, trivial literal type mismatches (`int x = true;`), duplicate classes. Validated against the reference sample corpus with zero false positives; checks for names are disabled when `import`/`package` is present.
+- 🔴 Still open: missing-return and uninitialised-variable analysis, locale switch for messages (English only), default keybindings, running the semantic pass in the `hamster.compile` command (still parse-only).
