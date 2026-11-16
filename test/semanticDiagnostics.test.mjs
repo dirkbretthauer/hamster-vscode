@@ -66,3 +66,35 @@ test('syntax errors suppress the semantic pass', () => {
     assert.equal(errors.length, 1);
     assert.doesNotMatch(errors[0].message, /Unknown function/);
 });
+
+test('library members inherited through a class chain or enclosing class are not flagged', () => {
+    assert.deepEqual(messagesFor(`
+        class A extends Thread {}
+        class B extends A { public void run() { start(); } }
+        class W extends Thread { class Inner { void f() { start(); sleep(5); } } }
+        class Z { void start(int x) {} }
+        class V extends Thread { public void run() { start(); } }
+        void main() {}
+    `), []);
+});
+
+test('same-named nested classes in different outer classes are not duplicates', () => {
+    assert.deepEqual(messagesFor('class A { class I {} }\nclass B { class I {} }\nvoid main() {}'), []);
+});
+
+test('lowercase class qualifiers, package paths and Hamster statics are accepted', () => {
+    assert.deepEqual(messagesFor(`
+        class util { static int n; }
+        class M extends Hamster { void f() { int c = getAnzahlHamster(); } }
+        void main() { int a = util.n; Hamster h = new de.hamster.debugger.model.Hamster(); }
+    `), []);
+});
+
+test('varargs arity message and mismatch underline length', () => {
+    assert.deepEqual(
+        messagesFor('void v(int a, int... xs) {}\nvoid main() { v(); }'),
+        ["Function 'v' expects at least 1 argument(s) but got 0"]
+    );
+    const [error] = collectDiagnostics('void main() { int a = "hello"; }', { requireMain: false });
+    assert.equal(error.token.length, '"hello"'.length);
+});

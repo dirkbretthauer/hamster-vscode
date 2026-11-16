@@ -13,6 +13,7 @@ const HAMSTER_BUILTIN_CALLS = new Set([
     'getReihe', 'getSpalte', 'getBlickrichtung', 'getAnzahlKoerner', 'anzahlKoerner',
     'getRow', 'getColumn', 'getDirection', 'getNumberOfGrains', 'getColor', 'getFarbe',
     'createHamster', 'init', 'initialisiere',
+    'getStandardHamster', 'getDefaultHamster', 'getAnzahlHamster', 'getNumberOfHamsters',
     'schreib', 'write', 'liesZahl', 'liesZeichenkette', 'liesString',
     'readInt', 'readNumber', 'readString',
 ]);
@@ -58,11 +59,14 @@ function walk(node, visit) {
     forEachChild(node, child => walk(child, visit));
 }
 
-function flattenClasses(classes) {
-    return (classes ?? []).flatMap(declaration => [
-        declaration,
-        ...flattenClasses(declaration.nestedClasses),
-    ]);
+function flattenClasses(classes, enclosing = null, enclosingByClass = new Map()) {
+    const result = [];
+    for (const declaration of classes ?? []) {
+        enclosingByClass.set(declaration, enclosing);
+        const nested = flattenClasses(declaration.nestedClasses, declaration, enclosingByClass);
+        result.push(declaration, ...nested.classes);
+    }
+    return { classes: result, enclosingByClass };
 }
 
 function acceptsArgumentCount(fn, count) {
@@ -89,6 +93,16 @@ function collectDeclaredNames(root) {
     return names;
 }
 
+function packageQualifierRoot(memberExpression) {
+    let hasClassSegment = false;
+    let current = memberExpression;
+    while (current?.type === ASTNodeType.MemberExpression) {
+        hasClassSegment ||= looksLikeTypeName(current.property);
+        current = current.object;
+    }
+    return hasClassSegment && current?.type === ASTNodeType.Identifier ? current : null;
+}
+
 // `new int[3]` and `foo()` carry a type/function name in an Identifier node, not a variable read.
 function collectNameOnlyIdentifiers(root) {
     const nameOnly = new Set();
@@ -96,16 +110,22 @@ function collectNameOnlyIdentifiers(root) {
         const isNameHolder = node.type === ASTNodeType.CallExpression ||
             node.type === ASTNodeType.NewExpression;
         if (isNameHolder && node.callee) nameOnly.add(node.callee);
-        // `reversi.Regeln.check()`: a lowercase root followed by a class name is a package path.
-        const isPackageQualifier = node.type === ASTNodeType.MemberExpression &&
-            node.object?.type === ASTNodeType.Identifier && looksLikeTypeName(node.property);
-        if (isPackageQualifier) nameOnly.add(node.object);
+        // `reversi.Regeln.check()`, `de.hamster.Hamster`: a lowercase root followed by a path
+        // containing a class name is a package path.
+        if (node.type === ASTNodeType.MemberExpression) {
+            const root = packageQualifierRoot(node);
+            if (root) nameOnly.add(root);
+        }
     });
     return nameOnly;
 }
 
 function buildProgramContext(ast) {
-    const classes = flattenClasses(ast.classes);
+    const { classes, enclosingByClass } = flattenClasses(ast.classes);
+    const classByName = new Map();
+    for (const declaration of classes) {
+        if (!classByName.has(declaration.name)) classByName.set(declaration.name, declaration);
+    }
     const classNames = new Set(classes.map(declaration => declaration.name));
     const functionsByName = new Map();
     for (const fn of ast.functions ?? []) {
@@ -117,25 +137,59 @@ function buildProgramContext(ast) {
         (declaration.fields ?? []).forEach(field => sharedNames.add(field.name));
         (declaration.enumConstants ?? []).forEach(constant => sharedNames.add(constant));
     }
-    return { classes, classNames, functionsByName, sharedNames };
+    return { classes, classNames, classByName, enclosingByClass, functionsByName, sharedNames };
 }
 
-// Inherited members of a library superclass are invisible to this pass.
-function hasForeignSuperclass(declaration, context) {
-    const superClass = declaration?.superClass;
-    return Boolean(superClass) && !context.classNames.has(superClass) && superClass !== 'Hamster';
+function inheritsFromUnknownType(declaration, context) {
+    const visited = new Set();
+    let current = declaration;
+    while (current && !visited.has(current)) {
+        visited.add(current);
+        if ((current.interfaces ?? []).some(name => !context.classNames.has(name))) return true;
+        const superClass = current.superClass;
+        if (!superClass || superClass === 'Hamster') return false;
+        if (!context.classNames.has(superClass)) return true;
+        current = context.classByName.get(superClass);
+    }
+    return false;
 }
 
-function checkDuplicateClasses(context, errors) {
+// Members inherited from library supertypes (directly, via a user class chain, or through an
+// enclosing class) are invisible to this pass.
+function mayInheritUnknownMembers(declaration, context) {
+    for (let scope = declaration; scope; scope = context.enclosingByClass.get(scope)) {
+        if (inheritsFromUnknownType(scope, context)) return true;
+    }
+    return false;
+}
+
+// The node location is the class keyword, not the name, so the keyword is underlined.
+function declarationKeywordLength(declaration) {
+    if (declaration.isEnum) return 'enum'.length;
+    return declaration.type === ASTNodeType.InterfaceDecl ? 'interface'.length : 'class'.length;
+}
+
+function checkDuplicatesWithinScope(declarations, errors) {
     const seen = new Set();
-    for (const declaration of context.classes) {
+    for (const declaration of declarations ?? []) {
         if (seen.has(declaration.name)) {
             errors.push(semanticError(
-                `Duplicate class '${declaration.name}'`, declaration, declaration.name.length
+                `Duplicate class '${declaration.name}'`, declaration, declarationKeywordLength(declaration)
             ));
         }
         seen.add(declaration.name);
+        checkDuplicatesWithinScope(declaration.nestedClasses, errors);
     }
+}
+
+function describeExpectedArguments(candidates) {
+    const descriptions = candidates.map(fn => {
+        const parameters = fn.parameters ?? [];
+        return parameters.some(parameter => parameter.isVarargs)
+            ? `at least ${parameters.length - 1}`
+            : String(parameters.length);
+    });
+    return [...new Set(descriptions)].join(' or ') + ' argument(s)';
 }
 
 function checkCall(node, context, errors, ownerDeclaration) {
@@ -145,16 +199,16 @@ function checkCall(node, context, errors, ownerDeclaration) {
     const candidates = context.functionsByName.get(name);
     const isBuiltin = HAMSTER_BUILTIN_CALLS.has(name) || INHERITED_OBJECT_METHODS.has(name);
     if (!candidates) {
-        if (isBuiltin || !context.resolvesAllNames || hasForeignSuperclass(ownerDeclaration, context)) {
+        if (isBuiltin || !context.resolvesAllNames || mayInheritUnknownMembers(ownerDeclaration, context)) {
             return;
         }
         errors.push(semanticError(`Unknown function '${name}'`, callee, name.length));
         return;
     }
-    if (isBuiltin || candidates.some(fn => acceptsArgumentCount(fn, node.arguments.length))) return;
-    const expectedText = [...new Set(candidates.map(fn => fn.parameters.length))].join(' or ');
+    if (isBuiltin || mayInheritUnknownMembers(ownerDeclaration, context) ||
+        candidates.some(fn => acceptsArgumentCount(fn, node.arguments.length))) return;
     errors.push(semanticError(
-        `Function '${name}' expects ${expectedText} argument(s) but got ${node.arguments.length}`,
+        `Function '${name}' expects ${describeExpectedArguments(candidates)} but got ${node.arguments.length}`,
         callee,
         name.length
     ));
@@ -168,15 +222,22 @@ function checkIdentifier(node, declared, context, errors, ownerDeclaration) {
     const name = node.name;
     if (declared.has(name) || context.sharedNames.has(name) ||
         name === LENGTH_PSEUDO_FIELD || JAVA_PACKAGE_ROOTS.has(name)) return;
-    if (looksLikeTypeName(name) || hasForeignSuperclass(ownerDeclaration, context)) return;
+    if (looksLikeTypeName(name) || context.classNames.has(name) ||
+        mayInheritUnknownMembers(ownerDeclaration, context)) return;
     errors.push(semanticError(`Unknown variable '${name}'`, node, name.length));
 }
 
 function literalKind(literal) {
     if (literal.literalType === 'boolean') return 'boolean';
     if (literal.literalType === 'int') return 'int';
-    if (literal.literalType === 'string' || literal.literalType === 'String') return 'String';
+    if (literal.literalType === 'string') return 'String';
     return null;
+}
+
+// Source text is not kept on the node; escapes and radix make this an approximation.
+function approximateLiteralLength(literal) {
+    const text = literal.literalType === 'string' ? `"${literal.value}"` : String(literal.value);
+    return Math.max(1, text.length);
 }
 
 function checkDeclarationInitializer(node, errors) {
@@ -186,7 +247,11 @@ function checkDeclarationInitializer(node, errors) {
     }
     const kind = literalKind(initializer);
     if (!kind || COMPATIBLE_TYPES_BY_LITERAL[kind].has(node.varType)) return;
-    errors.push(semanticError(`Type mismatch: cannot convert ${kind} to ${node.varType}`, initializer));
+    errors.push(semanticError(
+        `Type mismatch: cannot convert ${kind} to ${node.varType}`,
+        initializer,
+        approximateLiteralLength(initializer)
+    ));
 }
 
 function analyzeFunction(fn, context, errors, ownerDeclaration) {
@@ -213,7 +278,7 @@ function analyzeFunction(fn, context, errors, ownerDeclaration) {
 export function collectSemanticErrors(ast, { resolvesAllNames = true } = {}) {
     const errors = [];
     const context = { ...buildProgramContext(ast), resolvesAllNames };
-    checkDuplicateClasses(context, errors);
+    checkDuplicatesWithinScope(ast.classes, errors);
     const ownerByFunction = new Map();
     for (const declaration of context.classes) {
         [...(declaration.methods ?? []), ...(declaration.constructors ?? [])]
