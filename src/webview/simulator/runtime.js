@@ -184,7 +184,8 @@ const hamsterMethodAliases = Object.freeze({
 });
 
 function normalizeHamsterMethodName(name) {
-    return hamsterMethodAliases[name] || name;
+    // hasOwn: a bare lookup would resolve "toString" to Object.prototype.toString.
+    return Object.hasOwn(hamsterMethodAliases, name) ? hamsterMethodAliases[name] : name;
 }
 
 /** Sentinel returned by `callHamsterInstanceMethod` when `methodName` isn't a known built-in. */
@@ -205,6 +206,15 @@ function javaRuntimeException(typeName, message) {
     error.name = typeName;
     error.hamsterExceptionType = typeName;
     return error;
+}
+
+const DIRECTION_NAMES = ['NORTH', 'EAST', 'SOUTH', 'WEST'];
+
+function describeHamster(terrain, id) {
+    const hamster = findHamster(terrain, id);
+    if (!hamster) return 'Hamster has not been initialized yet';
+    return 'Hamster on tile (' + hamster.y + '/' + hamster.x + ') looking in direction ' +
+        DIRECTION_NAMES[hamster.dir] + ' with ' + hamster.mouth + ' corn in its mouth';
 }
 
 function defaultHamsterId(args) {
@@ -471,6 +481,8 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             const row = Number(args[0]), col = Number(args[1]);
             hamsters = hamsters.filter(h => h.y === row && h.x === col);
         }
+        // The reference (compiled-program path) lists the standard hamster last.
+        hamsters = [...hamsters.filter(h => h.id !== -1), ...hamsters.filter(h => h.id === -1)];
         return hamsters.map(h => ({ __kind: 'hamster', id: h.id, className: 'Hamster' }));
     }
 
@@ -514,6 +526,9 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             case 'getBlickrichtung': return engine.getBlickrichtung(hid);
             case 'anzahlKoerner':
             case 'getAnzahlKoerner': return engine.getAnzahlKoerner(hid);
+            case 'getColor':
+            case 'getFarbe': return engine.getColor(hid);
+            case 'toString': return describeHamster(getEngineState().terrain, hid);
             case 'schreib': appendLog(String(args.length > 0 ? args[0] : '')); return undefined;
             case 'liesZahl': return readTerminalValue('number', hid, args[0]);
             case 'liesZeichenkette': return readTerminalValue('string', hid, args[0]);
@@ -581,7 +596,7 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 if (args.length < 4) throw new Error(className + ' constructor expects at least 4 arguments');
                 const id = engine.createHamster(
                     Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
-                    args.length >= 5 ? Number(args[4]) : 1,
+                    args.length >= 5 ? Number(args[4]) : undefined,
                 );
                 return { __kind: 'hamster', id, className };
             }
@@ -655,11 +670,12 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             if (receiver && receiver.__kind === 'hamster') {
                 methodName = normalizeHamsterMethodName(methodName);
                 if (methodName === 'init' || methodName === 'initialisiere') {
-                    if (receiver.id !== null) throw hamsterError('HamsterInitializationException', receiver.className + ' is already initialized');
+                    // The reference ignores a repeated init().
+                    if (receiver.id !== null) return undefined;
                     if (args.length < 4) throw new Error(methodName + ' expects at least 4 arguments');
                     receiver.id = engine.createHamster(
                         Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
-                        args.length >= 5 ? Number(args[4]) : 1,
+                        args.length >= 5 ? Number(args[4]) : undefined,
                     );
                     return undefined;
                 }
@@ -721,13 +737,19 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 case 'getReihe': return engine.getReihe(defaultHamsterId(args));
                 case 'getSpalte': return engine.getSpalte(defaultHamsterId(args));
                 case 'getBlickrichtung': return engine.getBlickrichtung(defaultHamsterId(args));
+                case 'rechtsUm': {
+                    const hid = defaultHamsterId(args);
+                    engine.linksUm(hid); engine.linksUm(hid); return engine.linksUm(hid);
+                }
+                case 'getColor':
+                case 'getFarbe': return engine.getColor(defaultHamsterId(args));
                 case 'anzahlKoerner':
                 case 'getAnzahlKoerner': return engine.getAnzahlKoerner(defaultHamsterId(args));
                 case 'createHamster':
                     if (args.length < 4) throw new Error('createHamster expects at least 4 arguments');
                     return engine.createHamster(
                         Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
-                        args.length >= 5 ? Number(args[4]) : 1,
+                        args.length >= 5 ? Number(args[4]) : undefined,
                     );
                 case 'schreib': appendLog(String(args.length > 0 ? args[0] : '')); return undefined;
                 case 'liesZahl': return readTerminalValue('number', defaultHamsterId([]), args[0]);

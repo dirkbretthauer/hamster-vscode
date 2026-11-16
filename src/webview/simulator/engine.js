@@ -9,6 +9,10 @@ import {
     DX, DY, makeTerrain, cloneState, insideTerrain, isWallAt, findHamster,
 } from '../shared/terrainEngineState.js';
 
+/** "Auto" colour: the simulator picks the default; out-of-range colours fall back to it. */
+const AUTO_HAMSTER_COLOR = -1;
+const MAX_HAMSTER_COLOR = 9;
+
 /** Tags an `Error` with the Hamster exception type name the runner/debugger expect. */
 export function hamsterError(type, message) {
     const error = new Error(message);
@@ -116,10 +120,25 @@ export function createSimulatorEngine(renderCallback) {
         getSpalte(id = -1) { return getHamster(id).x; },
         getBlickrichtung(id = -1) { return getHamster(id).dir; },
         getAnzahlKoerner(id = -1) { return getHamster(id).mouth; },
-        createHamster(row, col, dir, mouth, color = 1) {
-            if (isWall(col, row)) throw new Error('Wall at spawn position');
+        getColor(id = -1) { return getHamster(id).color; },
+        createHamster(row, col, dir, mouth, color = AUTO_HAMSTER_COLOR) {
+            if (!Number.isInteger(row) || !Number.isInteger(col) || !inside(col, row)) {
+                throw hamsterError('HamsterInitializationException', 'Hamster position (' + row + '/' + col + ') is outside the territory');
+            }
+            if (isWall(col, row)) {
+                throw hamsterError('HamsterInitializationException', 'Hamster position (' + row + '/' + col + ') is a wall');
+            }
+            if (!Number.isInteger(dir) || dir < 0 || dir > 3) {
+                throw hamsterError('HamsterInitializationException', 'Invalid hamster direction ' + dir);
+            }
+            if (!Number.isInteger(mouth) || mouth < 0) {
+                throw hamsterError('HamsterInitializationException', 'Invalid number of grains ' + mouth);
+            }
             const id = nextId++;
-            engineState.terrain.hamsters.push({ id, x: col, y: row, dir, mouth, color });
+            const isValidColor = Number.isInteger(color) && color >= AUTO_HAMSTER_COLOR && color <= MAX_HAMSTER_COLOR;
+            engineState.terrain.hamsters.push({
+                id, x: col, y: row, dir, mouth, color: isValidColor ? color : AUTO_HAMSTER_COLOR,
+            });
             return id;
         },
         getState() { return cloneState(engineState); },
