@@ -650,3 +650,38 @@ test('Date and Calendar read the runtime clock and implement Calendar field arit
     runtime.setClock(() => start + 1000);
     assert.equal(runtime.callBuiltin('System.currentTimeMillis', []), start + 1000);
 });
+
+test('hamster creation rejects invalid arguments with HamsterInitializationException', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const invalidArguments = [[9, 0, 1, 0], [0, 9, 1, 0], [0, 0, 7, 0], [0, 0, 1, -1]];
+    for (const args of invalidArguments) {
+        assert.throws(
+            () => runtime.createObject('Hamster', args),
+            error => error.hamsterExceptionType === 'HamsterInitializationException',
+            JSON.stringify(args),
+        );
+    }
+});
+
+test('created hamsters default to auto colour, clamp bad colours, and ignore a second init', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const hamster = runtime.createObject('Hamster', [1, 1, 1, 0]);
+    assert.equal(runtime.callMethod(hamster, 'getColor', []), -1);
+    const outOfRange = runtime.createObject('Hamster', [2, 2, 1, 0, 42]);
+    assert.equal(runtime.callMethod(outOfRange, 'getColor', []), -1);
+    const blank = runtime.createObject('Hamster', []);
+    runtime.callMethod(blank, 'init', [3, 3, 2, 1]);
+    assert.doesNotThrow(() => runtime.callMethod(blank, 'init', [0, 0, 0, 0]));
+    assert.equal(runtime.callMethod(blank, 'getReihe', []), 3);
+});
+
+test('Hamster.toString, bare rechtsUm and standard-hamster-last ordering match the reference', async () => {
+    const runtime = await loadSimulatorRuntime();
+    const hamster = runtime.createObject('Hamster', [1, 2, 1, 1]);
+    assert.equal(runtime.callMethod(hamster, 'toString', []),
+        'Hamster on tile (1/2) looking in direction EAST with 1 corn in its mouth');
+    runtime.callBuiltin('rechtsUm', []);
+    assert.equal(runtime.callBuiltin('getBlickrichtung', []), 2);
+    const all = runtime.callBuiltin('Territorium.getHamster', []);
+    assert.equal(all[all.length - 1].id, -1);
+});

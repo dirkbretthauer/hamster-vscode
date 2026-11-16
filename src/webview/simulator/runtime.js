@@ -184,7 +184,8 @@ const hamsterMethodAliases = Object.freeze({
 });
 
 function normalizeHamsterMethodName(name) {
-    return hamsterMethodAliases[name] || name;
+    // hasOwn: a bare lookup would resolve "toString" to Object.prototype.toString.
+    return Object.hasOwn(hamsterMethodAliases, name) ? hamsterMethodAliases[name] : name;
 }
 
 /** Sentinel returned by `callHamsterInstanceMethod` when `methodName` isn't a known built-in. */
@@ -205,6 +206,16 @@ function javaRuntimeException(typeName, message) {
     error.name = typeName;
     error.hamsterExceptionType = typeName;
     return error;
+}
+
+const UNINITIALIZED_HAMSTER_TEXT = 'Hamster has not been initialized yet';
+const DIRECTION_NAMES = ['NORTH', 'EAST', 'SOUTH', 'WEST'];
+
+function describeHamster(terrain, id) {
+    const hamster = findHamster(terrain, id);
+    if (!hamster) return UNINITIALIZED_HAMSTER_TEXT;
+    return 'Hamster on tile (' + hamster.y + '/' + hamster.x + ') looking in direction ' +
+        DIRECTION_NAMES[hamster.dir] + ' with ' + hamster.mouth + ' corn in its mouth';
 }
 
 function defaultHamsterId(args) {
@@ -465,13 +476,25 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
         return calendar;
     }
 
+    /** Hamster handle whose toString makes string concatenation print the description, as in Java. */
+    function createHamsterRef(id, className) {
+        const ref = { __kind: 'hamster', id, className };
+        Object.defineProperty(ref, 'toString', {
+            value: () => (ref.id === null ? UNINITIALIZED_HAMSTER_TEXT : describeHamster(getEngineState().terrain, ref.id)),
+            enumerable: false,
+        });
+        return ref;
+    }
+
     function territoryHamsters(args) {
         let hamsters = getEngineState().terrain.hamsters;
         if (args.length >= 2) {
             const row = Number(args[0]), col = Number(args[1]);
             hamsters = hamsters.filter(h => h.y === row && h.x === col);
         }
-        return hamsters.map(h => ({ __kind: 'hamster', id: h.id, className: 'Hamster' }));
+        // The reference (compiled-program path) lists the standard hamster last.
+        hamsters = [...hamsters.filter(h => h.id !== -1), ...hamsters.filter(h => h.id === -1)];
+        return hamsters.map(h => createHamsterRef(h.id, 'Hamster'));
     }
 
     function callTerritoryBuiltin(methodName, args) {
@@ -514,6 +537,9 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             case 'getBlickrichtung': return engine.getBlickrichtung(hid);
             case 'anzahlKoerner':
             case 'getAnzahlKoerner': return engine.getAnzahlKoerner(hid);
+            case 'getColor':
+            case 'getFarbe': return engine.getColor(hid);
+            case 'toString': return describeHamster(getEngineState().terrain, hid);
             case 'schreib': appendLog(String(args.length > 0 ? args[0] : '')); return undefined;
             case 'liesZahl': return readTerminalValue('number', hid, args[0]);
             case 'liesZeichenkette': return readTerminalValue('string', hid, args[0]);
@@ -567,23 +593,23 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             }
             if (className.endsWith('Hamster')) {
                 if (args.length === 0) {
-                    return { __kind: 'hamster', id: null, className };
+                    return createHamsterRef(null, className);
                 }
                 if (args.length === 1 && args[0]?.__kind === 'hamster') {
-                    if (args[0].id === null) return { __kind: 'hamster', id: null, className };
+                    if (args[0].id === null) return createHamsterRef(null, className);
                     const source = findHamster(getEngineState().terrain, args[0].id);
                     if (!source) {
                         throw hamsterError('HamsterNotInitializedException', 'Hamster not initialised');
                     }
                     const id = engine.createHamster(source.y, source.x, source.dir, source.mouth, source.color);
-                    return { __kind: 'hamster', id, className };
+                    return createHamsterRef(id, className);
                 }
                 if (args.length < 4) throw new Error(className + ' constructor expects at least 4 arguments');
                 const id = engine.createHamster(
                     Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
-                    args.length >= 5 ? Number(args[4]) : 1,
+                    args.length >= 5 ? Number(args[4]) : undefined,
                 );
-                return { __kind: 'hamster', id, className };
+                return createHamsterRef(id, className);
             }
             const collectionType = collectionClassType(className);
             if (collectionType) {
@@ -655,14 +681,17 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             if (receiver && receiver.__kind === 'hamster') {
                 methodName = normalizeHamsterMethodName(methodName);
                 if (methodName === 'init' || methodName === 'initialisiere') {
-                    if (receiver.id !== null) throw hamsterError('HamsterInitializationException', receiver.className + ' is already initialized');
+                    // The reference ignores a repeated init().
+                    if (receiver.id !== null) return undefined;
                     if (args.length < 4) throw new Error(methodName + ' expects at least 4 arguments');
                     receiver.id = engine.createHamster(
                         Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
-                        args.length >= 5 ? Number(args[4]) : 1,
+                        args.length >= 5 ? Number(args[4]) : undefined,
                     );
                     return undefined;
                 }
+                // Like the reference, toString() describes an uninitialized hamster instead of throwing.
+                if (receiver.id === null && methodName === 'toString') return UNINITIALIZED_HAMSTER_TEXT;
                 if (receiver.id === null) throw hamsterError('HamsterNotInitializedException', receiver.className + ' is not initialized');
                 const hid = receiver.id;
                 const result = callHamsterInstanceMethod(hid, methodName, args);
@@ -700,7 +729,7 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 (rawMethodName === 'getStandardHamster' ||
                  rawMethodName === 'getStandardHamsterAlsDrehHamster' ||
                  rawMethodName === 'getDefaultHamster')) {
-                return { __kind: 'hamster', id: -1, className: 'Hamster' };
+                return createHamsterRef(-1, 'Hamster');
             }
             if ((receiverName === 'Hamster' || receiverName.endsWith('Hamster')) &&
                 (rawMethodName === 'getAnzahlHamster' || rawMethodName === 'getNumberOfHamsters')) {
@@ -721,13 +750,19 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 case 'getReihe': return engine.getReihe(defaultHamsterId(args));
                 case 'getSpalte': return engine.getSpalte(defaultHamsterId(args));
                 case 'getBlickrichtung': return engine.getBlickrichtung(defaultHamsterId(args));
+                case 'rechtsUm': {
+                    const hid = defaultHamsterId(args);
+                    engine.linksUm(hid); engine.linksUm(hid); return engine.linksUm(hid);
+                }
+                case 'getColor':
+                case 'getFarbe': return engine.getColor(defaultHamsterId(args));
                 case 'anzahlKoerner':
                 case 'getAnzahlKoerner': return engine.getAnzahlKoerner(defaultHamsterId(args));
                 case 'createHamster':
                     if (args.length < 4) throw new Error('createHamster expects at least 4 arguments');
                     return engine.createHamster(
                         Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
-                        args.length >= 5 ? Number(args[4]) : 1,
+                        args.length >= 5 ? Number(args[4]) : undefined,
                     );
                 case 'schreib': appendLog(String(args.length > 0 ? args[0] : '')); return undefined;
                 case 'liesZahl': return readTerminalValue('number', defaultHamsterId([]), args[0]);

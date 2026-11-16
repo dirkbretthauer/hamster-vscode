@@ -25,9 +25,14 @@ const HAMSTER_COLORS = [
     { css: '#ffffff', rgb: [255, 255, 255] },
 ];
 
+/** Auto (-1) hamsters render in the simulator's default colour, red. */
+const AUTO_COLOR_VALUE = -1;
+const DEFAULT_AUTO_COLOR_INDEX = 1;
+
 function getHamsterColorIndex(color) {
     const numericColor = Number(color);
     const index = Number.isFinite(numericColor) ? Math.trunc(numericColor) : 0;
+    if (index === AUTO_COLOR_VALUE) return DEFAULT_AUTO_COLOR_INDEX;
     return ((index % HAMSTER_COLORS.length) + HAMSTER_COLORS.length) % HAMSTER_COLORS.length;
 }
 

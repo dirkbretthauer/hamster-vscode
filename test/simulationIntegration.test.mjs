@@ -632,3 +632,27 @@ test('blocking queues, latches, barriers, and exchangers coordinate real hamster
         assert.deepEqual(run.output, ['sum 3 left 0']);
     }
 });
+
+test('invalid hamster creation is catchable and Hamster.toString describes the hamster', async () => {
+    const run = await runSimulation({
+        terrain: terrainFile(['>    ', '     '], [0], 0),
+        program: `void main() {
+            try { Hamster bad = new Hamster(0, 0, 7, 0); schreib("created"); }
+            catch (HamsterInitializationException e) { schreib("direction"); }
+            try { Hamster bad = new Hamster(0, 1, 1, -1); schreib("created"); }
+            catch (HamsterInitializationException e) { schreib("mouth"); }
+            try { Hamster bad = new Hamster(9, 9, 1, 0); schreib("created"); }
+            catch (HamsterInitializationException e) { schreib("outside"); }
+            Hamster paula = new Hamster(1, 2, 1, 1);
+            schreib("" + paula);
+            Hamster blank = new Hamster();
+            schreib(blank.toString());
+        }`,
+    });
+    assert.deepEqual(run.errors, []);
+    assert.deepEqual(run.output, [
+        'direction', 'mouth', 'outside',
+        'Hamster on tile (1/2) looking in direction EAST with 1 corn in its mouth',
+        'Hamster has not been initialized yet',
+    ]);
+});
