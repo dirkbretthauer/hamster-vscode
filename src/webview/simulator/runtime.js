@@ -208,11 +208,12 @@ function javaRuntimeException(typeName, message) {
     return error;
 }
 
+const UNINITIALIZED_HAMSTER_TEXT = 'Hamster has not been initialized yet';
 const DIRECTION_NAMES = ['NORTH', 'EAST', 'SOUTH', 'WEST'];
 
 function describeHamster(terrain, id) {
     const hamster = findHamster(terrain, id);
-    if (!hamster) return 'Hamster has not been initialized yet';
+    if (!hamster) return UNINITIALIZED_HAMSTER_TEXT;
     return 'Hamster on tile (' + hamster.y + '/' + hamster.x + ') looking in direction ' +
         DIRECTION_NAMES[hamster.dir] + ' with ' + hamster.mouth + ' corn in its mouth';
 }
@@ -475,6 +476,16 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
         return calendar;
     }
 
+    /** Hamster handle whose toString makes string concatenation print the description, as in Java. */
+    function createHamsterRef(id, className) {
+        const ref = { __kind: 'hamster', id, className };
+        Object.defineProperty(ref, 'toString', {
+            value: () => (ref.id === null ? UNINITIALIZED_HAMSTER_TEXT : describeHamster(getEngineState().terrain, ref.id)),
+            enumerable: false,
+        });
+        return ref;
+    }
+
     function territoryHamsters(args) {
         let hamsters = getEngineState().terrain.hamsters;
         if (args.length >= 2) {
@@ -483,7 +494,7 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
         }
         // The reference (compiled-program path) lists the standard hamster last.
         hamsters = [...hamsters.filter(h => h.id !== -1), ...hamsters.filter(h => h.id === -1)];
-        return hamsters.map(h => ({ __kind: 'hamster', id: h.id, className: 'Hamster' }));
+        return hamsters.map(h => createHamsterRef(h.id, 'Hamster'));
     }
 
     function callTerritoryBuiltin(methodName, args) {
@@ -582,23 +593,23 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
             }
             if (className.endsWith('Hamster')) {
                 if (args.length === 0) {
-                    return { __kind: 'hamster', id: null, className };
+                    return createHamsterRef(null, className);
                 }
                 if (args.length === 1 && args[0]?.__kind === 'hamster') {
-                    if (args[0].id === null) return { __kind: 'hamster', id: null, className };
+                    if (args[0].id === null) return createHamsterRef(null, className);
                     const source = findHamster(getEngineState().terrain, args[0].id);
                     if (!source) {
                         throw hamsterError('HamsterNotInitializedException', 'Hamster not initialised');
                     }
                     const id = engine.createHamster(source.y, source.x, source.dir, source.mouth, source.color);
-                    return { __kind: 'hamster', id, className };
+                    return createHamsterRef(id, className);
                 }
                 if (args.length < 4) throw new Error(className + ' constructor expects at least 4 arguments');
                 const id = engine.createHamster(
                     Number(args[0]), Number(args[1]), Number(args[2]), Number(args[3]),
                     args.length >= 5 ? Number(args[4]) : undefined,
                 );
-                return { __kind: 'hamster', id, className };
+                return createHamsterRef(id, className);
             }
             const collectionType = collectionClassType(className);
             if (collectionType) {
@@ -679,6 +690,8 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                     );
                     return undefined;
                 }
+                // Like the reference, toString() describes an uninitialized hamster instead of throwing.
+                if (receiver.id === null && methodName === 'toString') return UNINITIALIZED_HAMSTER_TEXT;
                 if (receiver.id === null) throw hamsterError('HamsterNotInitializedException', receiver.className + ' is not initialized');
                 const hid = receiver.id;
                 const result = callHamsterInstanceMethod(hid, methodName, args);
@@ -716,7 +729,7 @@ export function createHamsterRuntime({ engine, getEngineState, appendLog, readTe
                 (rawMethodName === 'getStandardHamster' ||
                  rawMethodName === 'getStandardHamsterAlsDrehHamster' ||
                  rawMethodName === 'getDefaultHamster')) {
-                return { __kind: 'hamster', id: -1, className: 'Hamster' };
+                return createHamsterRef(-1, 'Hamster');
             }
             if ((receiverName === 'Hamster' || receiverName.endsWith('Hamster')) &&
                 (rawMethodName === 'getAnzahlHamster' || rawMethodName === 'getNumberOfHamsters')) {

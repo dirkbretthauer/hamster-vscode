@@ -1338,8 +1338,11 @@ function* evalNewExpressionGen(node, state, callDepth) {
         if (isHamsterCreation(className, args)) {
             yield { kind: 'instruction', name: 'createHamster', loc: node.loc || null };
         }
-        const obj = state.runtime.createObject(className, args, state.functions);
-        return obj;
+        try {
+            return state.runtime.createObject(className, args, state.functions);
+        } catch (e) {
+            throw normalizeBuiltinFailure(e);
+        }
     }
     return {
         __className: className,
@@ -1817,7 +1820,12 @@ function* initializeSuperclassGen(declaration, args, receiver, state, callDepth,
     if (isHamsterCreation(declaration.superClass, args)) {
         yield { kind: 'instruction', name: 'createHamster', loc: loc || declaration.loc || null };
     }
-    const nativeObject = state.runtime.createObject(declaration.superClass, args, state.functions);
+    let nativeObject;
+    try {
+        nativeObject = state.runtime.createObject(declaration.superClass, args, state.functions);
+    } catch (e) {
+        throw normalizeBuiltinFailure(e);
+    }
     Object.assign(receiver, nativeObject, {
         __className: receiver.__className,
         fields: receiver.fields,
