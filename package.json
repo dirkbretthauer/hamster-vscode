@@ -47,7 +47,7 @@
       },
       {
         "command": "hamster.compile",
-        "title": "Hamster: Compile Program",
+        "title": "Hamster: Compile Program (Parse Check)",
         "icon": "$(check)"
       },
       {
